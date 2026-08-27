@@ -34,7 +34,7 @@
 
 ## Standard baseline
 
-- [ ] Define the strict model-adapter request, response, and task receipt contracts.
+- [x] Define the strict model-adapter request, response, and task receipt contracts.
 - [x] Implement the snapshot-safe paired runner and deterministic fake Canary.
 - [x] Implement and verify the hardened Docker execution boundary.
   - [x] Record Task 4 RED unit evidence.

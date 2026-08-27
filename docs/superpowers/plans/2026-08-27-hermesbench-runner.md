@@ -113,16 +113,25 @@
 ### Task 5: Codex non-interactive adapter
 
 **Files:**
+- Modify: `benchmarks/hermesbench/container_runtime.py`
+- Modify: `benchmarks/hermesbench/tests/test_container_runtime.py`
+- Modify: `benchmarks/hermesbench/containers/Dockerfile`
+- Create: `benchmarks/hermesbench/containers/codex_auth_fifo.py`
+- Create: `benchmarks/hermesbench/tests/test_codex_auth_fifo.py`
 - Create: `benchmarks/hermesbench/adapters/codex_exec.py`
 - Create: `benchmarks/hermesbench/schemas/prediction-response.schema.json`
 - Create: `benchmarks/hermesbench/tests/test_codex_exec_adapter.py`
 
+- [ ] Write failing tests for a bounded confidential-stdin transport that never places credentials in Docker argv, environment, inspect metadata, bind mounts, or public output.
+- [ ] Feed only the current ChatGPT access token and account ID into a FIFO under the container `/tmp` tmpfs. Never pass a refresh token, the full host `auth.json`, or the host `CODEX_HOME`.
+- [ ] Make the FIFO feeder cancellation-safe, unlink the authentication path immediately after the reader handshake, and replace Codex stdin with `/dev/null` before launching the child.
+- [ ] Reject malformed, expired, or insufficient-lifetime access tokens before container launch and fail closed on authentication errors without logging credentials.
 - [ ] Write failing tests for Standard and Hunt skill selection, identical non-workflow flags, explicit model and effort, `--ephemeral`, `--json`, `--output-schema`, isolated config, workspace-write sandbox, and disabled command network access.
 - [ ] Disable web search, connectors, ambient project configuration, persistent sessions, and inherited secret-like shell variables.
 - [ ] Give both arms the same defensive task prompt and exact prediction schema. Change only the selected skill and Hunt profile.
 - [ ] Parse the final structured response into `TaskPrediction`; parse `turn.completed.usage.input_tokens`, `cached_input_tokens`, and `output_tokens` from JSONL; fail closed on missing or inconsistent usage.
 - [ ] Preserve scrubbed event types and command counts, but never copy raw reasoning, credentials, source snippets, or session logs into public results.
-- [ ] Run adapter unit tests without a model call, then one authenticated synthetic task smoke in the container.
+- [ ] Run adapter unit tests without a model call, a fixed-image FIFO parser regression, and then one authenticated synthetic task smoke in the container.
 - [ ] Commit as `feat: connect HermesBench to Codex exec`.
 
 ### Task 6: Paired CLI and repeat policy
