@@ -38,6 +38,7 @@
 - [x] Batch-read each reviewed Git tree's regular blobs with checked binary framing.
 - [x] Exclude only explicitly quarantined Git symlink entries without reading their blobs.
 - [x] Apply fixed-comment redactions only against fixed-tree retired-path coordinates.
+- [x] Use short sibling corpus stage paths for Windows materialization budgets.
 - [ ] Review real source provenance, create private ledger rows, and materialize real Canary or Mini snapshots.
 
 ## Standard baseline

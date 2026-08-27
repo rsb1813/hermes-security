@@ -181,7 +181,7 @@ def build_reviewed_corpus(
     if not selected_rows:
         raise CorpusBuildError("reviewed ledger has no selected rows for suite")
 
-    stage = Path(tempfile.mkdtemp(prefix=".hermesbench-build-", dir=parent))
+    stage = Path(tempfile.mkdtemp(prefix=".hb-", dir=parent))
     try:
         built = _build_stage(
             stage,

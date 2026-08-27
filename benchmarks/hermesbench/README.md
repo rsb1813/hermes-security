@@ -238,6 +238,11 @@ child of `benchmarks/hermesbench/corpora/`, be actually ignored by Git, and have
 no symbolic-link, junction, or reparse-point ancestor. Existing output roots
 are never overwritten.
 
+On Windows, use a short external output parent for real corpora outside
+this repository. The builder stages each publication under the exact output
+parent with a short `.hb-` directory prefix so materialized repository paths
+retain more of the platform path-length budget.
+
 ## Current limits
 
 The builder intentionally does not infer fixed commits, clone repositories, or

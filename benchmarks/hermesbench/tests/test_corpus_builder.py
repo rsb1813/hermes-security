@@ -372,6 +372,28 @@ class CorpusBuilderTests(unittest.TestCase):
             self.assertEqual(result.oracle_path.read_bytes(), repeat.oracle_path.read_bytes())
             self.assertEqual(result.summary_path.read_bytes(), repeat.summary_path.read_bytes())
 
+    def test_builder_uses_a_short_stage_prefix_under_the_output_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, fixed = _synthetic_pair(root)
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [_selected_row(repository, vulnerable, fixed)])
+            output = root / "output"
+            with patch.object(
+                corpus_builder.tempfile,
+                "mkdtemp",
+                wraps=tempfile.mkdtemp,
+            ) as mkdtemp:
+                build_reviewed_corpus(
+                    ledger,
+                    {"source-candidate-1": _candidate(vulnerable)},
+                    {"source-candidate-1": repository},
+                    output,
+                    b"synthetic-key",
+                    suite="canary",
+                )
+            mkdtemp.assert_called_once_with(prefix=".hb-", dir=output.parent)
+
     def test_builder_uses_reviewed_group_input_for_paired_group_ids(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
