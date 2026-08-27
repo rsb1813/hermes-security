@@ -2,6 +2,12 @@
 
 ## 2026-08-27
 
+### HermesBench runner task
+
+- The runner must complete a full read-only snapshot preflight before it creates run output or calls an adapter. Snapshot hash, bundle audit, path containment, output-root link checks, and snapshot/output disjointness are all fail-closed boundaries.
+- Task output uses a digest of the raw task ID rather than the task ID as a filesystem component. The adapter request and task receipt retain the original task ID.
+- The runner receives an executor seam that reports raw protocol data, scrubbed event rows, and observed command argument vectors. It records timeout as a terminal receipt but delegates process termination to the later Docker executor.
+
 ### Repository state
 
 - The upstream repository is `openai/codex-security` under Apache-2.0.
