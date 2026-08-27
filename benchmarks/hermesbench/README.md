@@ -18,6 +18,14 @@ inputs, or remote attack traffic.
   snapshots outside Git.
 - Treat unmatched findings as provisional until a human review decides whether
   they are false positives or previously unknown vulnerabilities.
+- The host runner, executor wrapper, and the local user session that starts
+  them are trusted. The untrusted model must receive only the Docker task
+  scratch directory, never the final artifact root.
+- Preflight and post-run path checks are defense in depth. They do not claim
+  atomic protection from a hostile process running as the same host user.
+- The Task 4 live Docker validation must prove that the final artifact root is
+  absent from container mounts, argv, environment variables, and the working
+  directory, while only the scratch directory is writable.
 
 The repository `.gitignore` excludes the conventional `keys/`, `private/`,
 `snapshots/`, and `work/` directories under this package. A path outside the

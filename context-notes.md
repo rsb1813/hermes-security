@@ -7,6 +7,9 @@
 - The runner must complete a full read-only snapshot preflight before it creates run output or calls an adapter. Snapshot hash, bundle audit, path containment, output-root link checks, and snapshot/output disjointness are all fail-closed boundaries.
 - Task output uses a digest of the raw task ID rather than the task ID as a filesystem component. The adapter request and task receipt retain the original task ID.
 - The runner receives an executor seam that reports raw protocol data, scrubbed event rows, and observed command argument vectors. It records timeout as a terminal receipt but delegates process termination to the later Docker executor.
+- The host runner, executor wrapper, and same-user local session are trusted in the runner threat model. The untrusted model receives only an isolated Docker scratch directory and never the final artifact root.
+- Runner path checks before and after execution are defense in depth, not an atomic guarantee against a hostile same-user parent-swap process. Such a host process is outside this boundary because it can also access the runner, hidden oracles, and inputs.
+- Task 4 live Docker validation must prove that the final artifact root is absent from mounts, argv, environment variables, and cwd, and that only the task scratch directory is writable.
 
 ### Repository state
 

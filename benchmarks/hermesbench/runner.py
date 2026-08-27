@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import time
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from .sanitize import BundleAuditError, audit_bundle, tree_sha256
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _ZERO_USAGE = TokenUsage(0, 0, 0)
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 
 
 class RunnerError(ValueError):
@@ -365,10 +367,21 @@ def _resolve_existing_directory(path: Path, name: str) -> Path:
 
 
 def _is_link_or_junction(path: Path) -> bool:
-    if path.is_symlink():
+    try:
+        metadata = os.lstat(path)
+    except OSError as error:
+        raise RunnerError(f"path cannot be inspected safely: {path}") from error
+    if stat.S_ISLNK(metadata.st_mode):
         return True
-    is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction()) if callable(is_junction) else False
+    attributes = getattr(metadata, "st_file_attributes", None)
+    if attributes is None:
+        if os.name == "nt":
+            raise RunnerError(f"Windows path attributes are unavailable: {path}")
+        return False
+    try:
+        return bool(int(attributes) & _FILE_ATTRIBUTE_REPARSE_POINT)
+    except (TypeError, ValueError) as error:
+        raise RunnerError(f"path attributes cannot be inspected safely: {path}") from error
 
 
 def _assert_path_components_safe(path: Path, name: str) -> None:
@@ -377,12 +390,12 @@ def _assert_path_components_safe(path: Path, name: str) -> None:
     for part in absolute.parts[1:]:
         current /= part
         if _is_link_or_junction(current):
-            raise RunnerError(f"{name} must not contain a link or junction: {current}")
+            raise RunnerError(f"{name} must not contain a link or reparse point: {current}")
 
 
 def _assert_tree_has_no_links(root: Path, name: str) -> None:
     if _is_link_or_junction(root):
-        raise RunnerError(f"{name} must not be a link or junction: {root}")
+        raise RunnerError(f"{name} must not be a link or reparse point: {root}")
     pending = [root]
     while pending:
         current = pending.pop()
@@ -391,7 +404,7 @@ def _assert_tree_has_no_links(root: Path, name: str) -> None:
                 for entry in entries:
                     child = Path(entry.path)
                     if _is_link_or_junction(child):
-                        raise RunnerError(f"{name} must not contain a link or junction: {child}")
+                        raise RunnerError(f"{name} must not contain a link or reparse point: {child}")
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(child)
         except OSError as error:
@@ -443,7 +456,13 @@ def _write_jsonl(path: Path, rows: Iterable[object]) -> None:
 
 def _write_text_no_follow(path: Path, text: str) -> None:
     _assert_path_components_safe(path.parent, "artifact parent")
-    if path.exists() or _is_link_or_junction(path):
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise RunnerError(f"artifact path cannot be inspected safely: {path}") from error
+    else:
         raise RunnerError(f"artifact path already exists or is unsafe: {path}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)

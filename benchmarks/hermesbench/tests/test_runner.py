@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import benchmarks.hermesbench.runner as runner
@@ -76,6 +80,50 @@ def raw_response(task_id: str) -> dict[str, object]:
 
 
 class SnapshotPreflightTests(unittest.TestCase):
+    def test_reparse_point_is_rejected_without_pathlib_junction_support(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            metadata = SimpleNamespace(
+                st_mode=stat.S_IFDIR,
+                st_file_attributes=0x0400,
+            )
+            with patch.object(runner.os, "lstat", return_value=metadata):
+                with self.assertRaisesRegex(RunnerError, "link or"):
+                    runner._assert_path_components_safe(target, "test root")
+
+    def test_lstat_detected_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            metadata = SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0)
+            with patch.object(runner.os, "lstat", return_value=metadata):
+                with self.assertRaisesRegex(RunnerError, "link or"):
+                    runner._assert_path_components_safe(target, "test root")
+
+    def test_lstat_failure_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            with patch.object(runner.os, "lstat", side_effect=OSError("denied")):
+                with self.assertRaisesRegex(RunnerError, "cannot be inspected"):
+                    runner._assert_path_components_safe(target, "test root")
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction creation is unavailable")
+    def test_actual_windows_junction_is_rejected_when_creation_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            junction = root / "junction"
+            target.mkdir()
+            created = subprocess.run(
+                ["cmd", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest("Windows junction creation is not permitted")
+            with self.assertRaisesRegex(RunnerError, "link or"):
+                runner._assert_path_components_safe(junction, "test root")
+
     def test_linked_snapshots_root_stops_before_adapter_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -91,19 +139,9 @@ class SnapshotPreflightTests(unittest.TestCase):
                 "_is_link_or_junction",
                 side_effect=lambda path: path == snapshots,
             ):
-                with self.assertRaisesRegex(RunnerError, "link or junction"):
+                with self.assertRaisesRegex(RunnerError, "link or"):
                     run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
                               config_for(manifest, policy), policy, lambda *_: self.fail("adapter must not run"))
-
-    def test_junction_detection_uses_pathlib_when_available(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory)
-            with (
-                patch.object(Path, "is_symlink", return_value=False),
-                patch.object(Path, "is_junction", return_value=True, create=True),
-            ):
-                with self.assertRaisesRegex(RunnerError, "link or junction"):
-                    runner._assert_path_components_safe(target, "test root")
 
     def test_linked_task_snapshot_stops_before_adapter_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -121,7 +159,7 @@ class SnapshotPreflightTests(unittest.TestCase):
                 "_is_link_or_junction",
                 side_effect=lambda path: path == linked_snapshot,
             ):
-                with self.assertRaisesRegex(RunnerError, "link or junction"):
+                with self.assertRaisesRegex(RunnerError, "link or"):
                     run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
                               config_for(manifest, policy), policy, lambda *_: self.fail("adapter must not run"))
 
@@ -220,8 +258,8 @@ class SnapshotPreflightTests(unittest.TestCase):
             manifest = manifest_for("task-a", snapshots_root=snapshots)
             policy = ExecutionPolicy((("python",),))
 
-            with patch.object(Path, "is_symlink", return_value=True):
-                with self.assertRaisesRegex(RunnerError, "link or junction"):
+            with patch.object(runner, "_is_link_or_junction", return_value=True):
+                with self.assertRaisesRegex(RunnerError, "link or"):
                     run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
                               config_for(manifest, policy), policy, lambda *_: self.fail("adapter must not run"))
 
