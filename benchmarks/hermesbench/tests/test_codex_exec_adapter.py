@@ -233,6 +233,25 @@ class CodexExecAdapterTests(unittest.TestCase):
             self.assertIn(feature, standard_command)
         self.assertNotIn("oracle", " ".join(standard_command))
 
+    def test_hunt_command_arguments_are_single_line_for_each_profile(self) -> None:
+        for profile in ("hunt-balanced", "hunt-max"):
+            with self.subTest(profile=profile):
+                runtime = _Runtime(_stream())
+                with tempfile.TemporaryDirectory() as directory:
+                    self._adapter("hunt", profile, runtime)(
+                        _request(), Path(directory), 60
+                    )
+
+                command = runtime.calls[0]["command_argv"]
+                self.assertTrue(
+                    all(
+                        "\x00" not in token and "\r" not in token and "\n" not in token
+                        for token in command
+                    )
+                )
+                self.assertIn("/workspace/plugin/skills/hunt-security-scan/SKILL.md", command[-1])
+                self.assertIn(profile, command[-1])
+
     def test_verification_uses_only_canonical_candidates_in_a_fresh_prompt(self) -> None:
         runtime = _Runtime(_stream())
         candidate = CanonicalCandidate(

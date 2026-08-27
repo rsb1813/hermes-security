@@ -403,7 +403,7 @@ def _prompt(
     candidates: tuple[CanonicalCandidate, ...],
 ) -> str:
     allowed = "; ".join(" ".join(command) for command in allowed_commands)
-    profile_line = "" if profile == "baseline" else f"\nHunt profile: {profile}."
+    profile_line = "" if profile == "baseline" else f" Hunt profile: {profile}."
     prompt = (
         "Perform a defensive local-source audit only. "
         f"Read the selected skill at {skill} unchanged. "
