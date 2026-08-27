@@ -139,7 +139,13 @@ def _run_command(args: argparse.Namespace) -> int:
     manifest, controls, policy = _run_inputs(args)
     if args.workflow == "hunt":
         validate_hunt_execution_policy(policy)
-    adapter = _codex_adapter(args, controls, args.workflow, args.profile)
+    adapter = _codex_adapter(
+        args,
+        controls,
+        args.workflow,
+        args.profile,
+        allowed_command_prefixes=policy.allowed_command_prefixes,
+    )
     result = run_workflow(
         manifest=manifest,
         snapshots_root=args.snapshots_root,
@@ -160,8 +166,20 @@ def _run_command(args: argparse.Namespace) -> int:
 def _run_paired_command(args: argparse.Namespace) -> int:
     manifest, controls, policy = _run_inputs(args)
     validate_hunt_execution_policy(policy)
-    standard = _codex_adapter(args, controls, "standard", "baseline")
-    hunt = _codex_adapter(args, controls, "hunt", args.hunt_profile)
+    standard = _codex_adapter(
+        args,
+        controls,
+        "standard",
+        "baseline",
+        allowed_command_prefixes=policy.allowed_command_prefixes,
+    )
+    hunt = _codex_adapter(
+        args,
+        controls,
+        "hunt",
+        args.hunt_profile,
+        allowed_command_prefixes=policy.allowed_command_prefixes,
+    )
     result = run_paired(
         manifest,
         args.snapshots_root,
@@ -213,6 +231,8 @@ def _codex_adapter(
     controls: FrozenControls,
     workflow: str,
     profile: str,
+    *,
+    allowed_command_prefixes: tuple[tuple[str, ...], ...],
 ) -> CodexExecAdapter:
     return CodexExecAdapter(
         runtime=ContainerRuntime(controls.image_digest),
@@ -221,6 +241,7 @@ def _codex_adapter(
         profile=profile,
         model=controls.model,
         reasoning_effort=controls.reasoning_effort,
+        allowed_command_prefixes=allowed_command_prefixes,
     )
 
 

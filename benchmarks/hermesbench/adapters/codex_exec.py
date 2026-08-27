@@ -138,6 +138,7 @@ class CodexExecAdapter:
         profile: str,
         model: str,
         reasoning_effort: str,
+        allowed_command_prefixes: tuple[tuple[str, ...], ...],
         plugin_path: Path | None = None,
         phase: str = "discovery",
         verification_candidates: Mapping[str, tuple[CanonicalCandidate, ...]] | None = None,
@@ -151,6 +152,9 @@ class CodexExecAdapter:
         self._workflow, self._profile, self._skill = _workflow_profile(workflow, profile)
         self._model = _required_text(model, "model")
         self._reasoning_effort = _required_text(reasoning_effort, "reasoning_effort")
+        self._allowed_command_prefixes = _validate_allowed_command_prefixes(
+            allowed_command_prefixes
+        )
         self._plugin_path = plugin_path or _bundled_plugin_root()
         if phase not in {"discovery", "verification"}:
             raise ValueError("phase is unsupported")
@@ -183,6 +187,7 @@ class CodexExecAdapter:
             profile=self._profile,
             model=self._model,
             reasoning_effort=self._reasoning_effort,
+            allowed_command_prefixes=self._allowed_command_prefixes,
             plugin_path=self._plugin_path,
             phase="verification",
             verification_candidates=normalized,
@@ -197,10 +202,14 @@ class CodexExecAdapter:
             raise CodexExecError("adapter scratch path is invalid")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
             raise CodexExecError("adapter timeout is invalid")
-        _validate_prompt_descriptors(request)
+        allowed_commands = _effective_allowed_commands(
+            self._allowed_command_prefixes, request.allowed_commands
+        )
+        _validate_prompt_descriptors(request, allowed_commands)
         confidential_stdin = _external_auth_payload(self._auth_supplier(), timeout_seconds)
         command = _command_argv(
             request,
+            allowed_commands,
             self._model,
             self._reasoning_effort,
             self._skill,
@@ -327,6 +336,7 @@ def _validate_access_token(token: str, timeout_seconds: int) -> None:
 
 def _command_argv(
     request: AdapterTaskRequest,
+    allowed_commands: tuple[tuple[str, ...], ...],
     model: str,
     reasoning_effort: str,
     skill: str,
@@ -334,7 +344,7 @@ def _command_argv(
     phase: str,
     candidates: tuple[CanonicalCandidate, ...],
 ) -> tuple[str, ...]:
-    prompt = _prompt(request, skill, profile, phase, candidates)
+    prompt = _prompt(request, allowed_commands, skill, profile, phase, candidates)
     config = (
         "project_doc_max_bytes=0",
         'approval_policy="never"',
@@ -386,12 +396,13 @@ def _command_argv(
 
 def _prompt(
     request: AdapterTaskRequest,
+    allowed_commands: tuple[tuple[str, ...], ...],
     skill: str,
     profile: str,
     phase: str,
     candidates: tuple[CanonicalCandidate, ...],
 ) -> str:
-    allowed = "; ".join(" ".join(command) for command in request.allowed_commands)
+    allowed = "; ".join(" ".join(command) for command in allowed_commands)
     profile_line = "" if profile == "baseline" else f"\nHunt profile: {profile}."
     prompt = (
         "Perform a defensive local-source audit only. "
@@ -484,14 +495,41 @@ def _parse_result(result: object, task_id: str) -> ExecutorResult:
     )
 
 
-def _validate_prompt_descriptors(request: AdapterTaskRequest) -> None:
+def _validate_allowed_command_prefixes(
+    value: object,
+) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(value, tuple):
+        raise ValueError("allowed command prefixes are invalid")
+    for command in value:
+        if not isinstance(command, tuple) or not command:
+            raise ValueError("allowed command prefixes are invalid")
+        if any(not isinstance(token, str) or not token for token in command):
+            raise ValueError("allowed command prefixes are invalid")
+    return value
+
+
+def _effective_allowed_commands(
+    global_prefixes: tuple[tuple[str, ...], ...], task_commands: object
+) -> tuple[tuple[str, ...], ...]:
+    if not isinstance(task_commands, tuple):
+        raise CodexExecError("adapter prompt descriptor is invalid")
+    effective: list[tuple[str, ...]] = []
+    for command in (*global_prefixes, *task_commands):
+        if command not in effective:
+            effective.append(command)
+    return tuple(effective)
+
+
+def _validate_prompt_descriptors(
+    request: AdapterTaskRequest, allowed_commands: tuple[tuple[str, ...], ...]
+) -> None:
     if _PROMPT_IDENTIFIER.fullmatch(request.task_id) is None:
         raise CodexExecError("adapter prompt descriptor is invalid")
     if _PROMPT_IDENTIFIER.fullmatch(request.language) is None:
         raise CodexExecError("adapter prompt descriptor is invalid")
-    if not isinstance(request.allowed_commands, tuple) or not request.allowed_commands:
+    if not isinstance(allowed_commands, tuple) or not allowed_commands:
         raise CodexExecError("adapter prompt descriptor is invalid")
-    for command in request.allowed_commands:
+    for command in allowed_commands:
         if not isinstance(command, tuple) or not command:
             raise CodexExecError("adapter prompt descriptor is invalid")
         if any(

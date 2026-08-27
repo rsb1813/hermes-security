@@ -6,6 +6,7 @@ import base64
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -64,7 +65,12 @@ def _stream(*, usage: dict[str, object] | None = None, command: str = "python3 -
 
 class CodexExecAdapterTests(unittest.TestCase):
     def _adapter(
-        self, workflow: str, profile: str, runtime: _Runtime, auth: dict[str, object] | None = None
+        self,
+        workflow: str,
+        profile: str,
+        runtime: _Runtime,
+        auth: dict[str, object] | None = None,
+        allowed_command_prefixes: tuple[tuple[str, ...], ...] = (),
     ) -> CodexExecAdapter:
         managed_auth = auth or {
             "auth_mode": "chatgpt",
@@ -82,7 +88,107 @@ class CodexExecAdapterTests(unittest.TestCase):
             profile=profile,
             model="gpt-5.6-terra",
             reasoning_effort="high",
+            allowed_command_prefixes=allowed_command_prefixes,
         )
+
+    def test_global_commands_allow_an_empty_task_local_list_to_reach_runtime(self) -> None:
+        runtime = _Runtime(_stream())
+        auth_calls = 0
+
+        def auth_supplier() -> dict[str, object]:
+            nonlocal auth_calls
+            auth_calls += 1
+            return {
+                "auth_mode": "chatgpt",
+                "installation_id": "123e4567-e89b-12d3-a456-426614174000",
+                "tokens": {
+                    "access_token": _jwt(datetime.now(UTC) + timedelta(hours=1)),
+                    "account_id": "account-001",
+                },
+            }
+
+        adapter = CodexExecAdapter(
+            runtime=runtime,
+            auth_supplier=auth_supplier,
+            workflow="standard",
+            profile="baseline",
+            model="gpt-5.6-terra",
+            reasoning_effort="high",
+            allowed_command_prefixes=(("rg",),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            adapter(replace(_request(), allowed_commands=()), Path(directory), 60)
+
+        self.assertEqual(auth_calls, 1)
+        self.assertEqual(len(runtime.calls), 1)
+        self.assertIn("Allowed commands: rg.", runtime.calls[0]["command_argv"][-1])
+
+    def test_empty_effective_commands_fail_before_auth_or_runtime(self) -> None:
+        runtime = _Runtime(_stream())
+        auth_calls = 0
+
+        def auth_supplier() -> dict[str, object]:
+            nonlocal auth_calls
+            auth_calls += 1
+            return {}
+
+        adapter = CodexExecAdapter(
+            runtime=runtime,
+            auth_supplier=auth_supplier,
+            workflow="standard",
+            profile="baseline",
+            model="gpt-5.6-terra",
+            reasoning_effort="high",
+            allowed_command_prefixes=(),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(CodexExecError, "descriptor"):
+                adapter(replace(_request(), allowed_commands=()), Path(directory), 60)
+
+        self.assertEqual(auth_calls, 0)
+        self.assertEqual(runtime.calls, [])
+
+    def test_prompt_uses_ordered_deduplicated_global_and_task_commands(self) -> None:
+        runtime = _Runtime(_stream())
+        request = replace(
+            _request(),
+            allowed_commands=(
+                ("python3", "-m", "unittest"),
+                ("git", "diff"),
+                ("rg",),
+            ),
+        )
+        adapter = self._adapter(
+            "standard",
+            "baseline",
+            runtime,
+            allowed_command_prefixes=(
+                ("rg",),
+                ("python3", "-m", "unittest"),
+                ("rg",),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            adapter(request, Path(directory), 60)
+
+        prompt = runtime.calls[0]["command_argv"][-1]
+        allowed = prompt.split("Allowed commands: ", 1)[1].split(". Use", 1)[0]
+        self.assertEqual(allowed.split("; "), ["rg", "python3 -m unittest", "git diff"])
+
+    def test_verification_carries_global_command_prefixes(self) -> None:
+        runtime = _Runtime(_stream())
+        adapter = self._adapter(
+            "standard",
+            "baseline",
+            runtime,
+            allowed_command_prefixes=(("rg",),),
+        ).for_verification({"task-001": ()})
+        with tempfile.TemporaryDirectory() as directory:
+            adapter(replace(_request(), allowed_commands=()), Path(directory), 60)
+
+        prompt = runtime.calls[0]["command_argv"][-1]
+        self.assertIn("Verification phase", prompt)
+        self.assertIn("Allowed commands: rg.", prompt)
 
     def test_standard_and_hunt_differ_only_by_selected_skill_and_hunt_profile(self) -> None:
         standard_runtime = _Runtime(_stream())

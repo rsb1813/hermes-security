@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import benchmarks.hermesbench.cli as hermes_cli
 from benchmarks.hermesbench.receipts import (
@@ -360,7 +360,9 @@ class RunCommandTests(unittest.TestCase):
                 artifact_paths={"aggregate_receipt": "single-workflow-receipt.json"},
                 receipt=SimpleNamespace(status="completed"),
             )
+            adapter_value = MagicMock()
             with (
+                patch.object(hermes_cli, "_codex_adapter", return_value=adapter_value) as adapter,
                 patch.object(hermes_cli, "load_manifest", return_value=object()),
                 patch.object(hermes_cli, "run_workflow", return_value=result_value) as run_workflow,
             ):
@@ -373,6 +375,10 @@ class RunCommandTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(run_workflow.call_args.kwargs["workflow"], "standard")
         self.assertNotIn("oracle", repr(run_workflow.call_args.kwargs))
+        self.assertEqual(
+            adapter.call_args.kwargs["allowed_command_prefixes"],
+            (("python",),),
+        )
 
     def test_run_paired_exposes_the_seedless_comparison_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -399,7 +405,14 @@ class RunCommandTests(unittest.TestCase):
                 schedule=(("standard", "hunt"), ("hunt", "standard"), ("standard", "hunt")),
                 comparisons=(SimpleNamespace(comparable=True),) * 3,
             )
+            standard_adapter = MagicMock()
+            hunt_adapter = MagicMock()
             with (
+                patch.object(
+                    hermes_cli,
+                    "_codex_adapter",
+                    side_effect=(standard_adapter, hunt_adapter),
+                ) as adapter,
                 patch.object(hermes_cli, "load_manifest", return_value=object()),
                 patch.object(hermes_cli, "run_paired", return_value=paired),
             ):
@@ -409,6 +422,15 @@ class RunCommandTests(unittest.TestCase):
                     "--execution-policy", str(policy), "--auth", str(auth), "--hunt-profile", "hunt-balanced",
                 ])
         self.assertEqual(exit_code, 0)
+        self.assertEqual(len(adapter.call_args_list), 2)
+        self.assertEqual(
+            adapter.call_args_list[0].kwargs["allowed_command_prefixes"],
+            tuple(tuple(prefix) for prefix in HUNT_READ_ONLY_COMMAND_PREFIXES),
+        )
+        self.assertEqual(
+            adapter.call_args_list[1].kwargs["allowed_command_prefixes"],
+            adapter.call_args_list[0].kwargs["allowed_command_prefixes"],
+        )
 
 
 class ImportCommandTests(unittest.TestCase):

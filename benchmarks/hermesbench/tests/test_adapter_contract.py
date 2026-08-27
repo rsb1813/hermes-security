@@ -53,6 +53,25 @@ class AdapterTaskRequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "exactly"):
             parse_adapter_task_request(request)
 
+    def test_request_accepts_empty_task_local_commands(self) -> None:
+        request = parse_adapter_task_request(dict(REQUEST, allowed_commands=[]))
+
+        self.assertEqual(request.allowed_commands, ())
+
+    def test_request_rejects_invalid_task_local_command_entries(self) -> None:
+        invalid_values = (
+            "python -m unittest",
+            [[]],
+            [["python", ""]],
+        )
+
+        for allowed_commands in invalid_values:
+            with self.subTest(allowed_commands=allowed_commands):
+                with self.assertRaises(ContractError):
+                    parse_adapter_task_request(
+                        dict(REQUEST, allowed_commands=allowed_commands)
+                    )
+
 
 class AdapterResponseTests(unittest.TestCase):
     def test_response_reuses_prediction_and_derives_uncached_usage(self) -> None:

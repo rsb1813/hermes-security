@@ -97,8 +97,8 @@ def parse_model_usage(value: object) -> TokenUsage:
 
 
 def _parse_allowed_commands(value: object) -> tuple[tuple[str, ...], ...]:
-    if not isinstance(value, list) or not value:
-        raise ContractError("allowed_commands must be a non-empty array")
+    if not isinstance(value, list):
+        raise ContractError("allowed_commands must be an array")
     commands: list[tuple[str, ...]] = []
     for command in value:
         if not isinstance(command, list) or not command:
