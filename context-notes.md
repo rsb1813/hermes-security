@@ -135,3 +135,4 @@
 - Canary receipt aggregation validates raw task-receipt row count and manifest order before calculating totals. It uses the validated ordered rows directly so a duplicated ID cannot overwrite a missing task in a dictionary.
 - Docker runtime cleanup treats a second `KeyboardInterrupt` as a cleanup failure but continues the remaining exact-ID cleanup steps. `SystemExit` remains outside that catch boundary.
 - The opt-in Docker smoke treats a pre-existing receipt target as a failure and never removes an environment-selected path. The operator removes only the known ignored receipt before a deliberate rerun; successful evidence is atomically published after container and image cleanup.
+- Receipt publication audits the target with `lstat`, not `Path.exists`, so dangling target links are rejected. It also rejects symbolic-link, junction, and reparse-point receipt parents and ancestors before temporary creation and immediately before atomic replacement.

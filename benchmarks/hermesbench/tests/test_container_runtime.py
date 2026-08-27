@@ -77,10 +77,23 @@ def _run_live_docker(
 
 
 def _require_new_receipt_target(receipt_path: Path) -> None:
-    if receipt_path.exists():
-        raise AssertionError("Docker smoke receipt target already exists")
-    if not receipt_path.parent.is_dir():
-        raise AssertionError("Docker smoke receipt directory does not exist")
+    absolute_target = receipt_path.absolute()
+    for component in (absolute_target.parent, *absolute_target.parent.parents):
+        try:
+            metadata = os.lstat(component)
+        except OSError as exc:
+            raise AssertionError("Docker smoke receipt directory cannot be inspected") from exc
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & container_runtime._FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise AssertionError("Docker smoke receipt directory contains a link or junction")
+    try:
+        os.lstat(absolute_target)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise AssertionError("Docker smoke receipt target cannot be inspected") from exc
+    raise AssertionError("Docker smoke receipt target already exists")
 
 
 def _publish_receipt(receipt_path: Path, receipt: dict[str, object], forbidden_values: tuple[str, ...]) -> None:
@@ -95,6 +108,7 @@ def _publish_receipt(receipt_path: Path, receipt: dict[str, object], forbidden_v
             temporary_file.write(serialized)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
+        _require_new_receipt_target(receipt_path)
         os.replace(temporary_path, receipt_path)
     except (Exception, KeyboardInterrupt):
         temporary_path.unlink(missing_ok=True)
@@ -524,6 +538,57 @@ class LiveSmokeReceiptTests(unittest.TestCase):
                 _require_new_receipt_target(receipt_path)
             self.assertEqual(receipt_path.read_text(encoding="utf-8"), "stale")
 
+    def test_dangling_receipt_link_is_rejected_by_lstat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "receipt.json"
+            real_lstat = os.lstat
+
+            def dangling_link(path: os.PathLike[str] | str) -> os.stat_result:
+                if Path(path) == receipt_path.absolute():
+                    return os.stat_result((stat.S_IFLNK,) + (0,) * 9)
+                return real_lstat(path)
+
+            with patch(__name__ + ".os.lstat", side_effect=dangling_link):
+                with self.assertRaisesRegex(AssertionError, "already exists"):
+                    _require_new_receipt_target(receipt_path)
+
+    def test_existing_dangling_receipt_symlink_is_rejected_when_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "receipt.json"
+            try:
+                receipt_path.symlink_to(Path(directory) / "missing-target")
+            except OSError:
+                self.skipTest("the platform does not permit symlink creation")
+            with self.assertRaisesRegex(AssertionError, "already exists"):
+                _require_new_receipt_target(receipt_path)
+
+    def test_receipt_parent_reparse_and_target_inspection_errors_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "receipt.json"
+            real_lstat = os.lstat
+
+            class _ReparseMetadata:
+                st_mode = stat.S_IFDIR
+                st_file_attributes = container_runtime._FILE_ATTRIBUTE_REPARSE_POINT
+
+            def reparse_parent(path: os.PathLike[str] | str) -> os.stat_result | _ReparseMetadata:
+                if Path(path) == receipt_path.parent.absolute():
+                    return _ReparseMetadata()
+                return real_lstat(path)
+
+            with patch(__name__ + ".os.lstat", side_effect=reparse_parent):
+                with self.assertRaisesRegex(AssertionError, "link or junction"):
+                    _require_new_receipt_target(receipt_path)
+
+            def denied_target(path: os.PathLike[str] | str) -> os.stat_result:
+                if Path(path) == receipt_path.absolute():
+                    raise OSError("denied")
+                return real_lstat(path)
+
+            with patch(__name__ + ".os.lstat", side_effect=denied_target):
+                with self.assertRaisesRegex(AssertionError, "cannot be inspected"):
+                    _require_new_receipt_target(receipt_path)
+
     def test_receipt_publish_checks_forbidden_data_and_writes_a_complete_json_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             receipt_path = Path(directory) / "receipt.json"
@@ -533,6 +598,18 @@ class LiveSmokeReceiptTests(unittest.TestCase):
             self.assertFalse(list(Path(directory).glob("*.tmp")))
             with self.assertRaisesRegex(AssertionError, "forbidden"):
                 _publish_receipt(Path(directory) / "bad.json", {"path": "/host/mount"}, ("/host/mount",))
+
+    def test_receipt_publish_rechecks_the_target_before_atomic_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "receipt.json"
+            with patch(
+                __name__ + "._require_new_receipt_target",
+                side_effect=(None, AssertionError("Docker smoke receipt target already exists")),
+            ) as require_target:
+                with self.assertRaisesRegex(AssertionError, "already exists"):
+                    _publish_receipt(receipt_path, {"schema_version": 1}, ())
+            self.assertEqual(require_target.call_count, 2)
+            self.assertFalse(receipt_path.exists())
 
     def test_live_docker_call_fails_for_nonzero_and_timeout(self) -> None:
         with patch(__name__ + ".subprocess.run", return_value=_completed(["docker"], returncode=1)):
