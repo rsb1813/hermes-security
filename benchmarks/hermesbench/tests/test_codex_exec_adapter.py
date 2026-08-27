@@ -13,7 +13,12 @@ from pathlib import Path
 from benchmarks.hermesbench.adapter_contract import AdapterTaskRequest
 from benchmarks.hermesbench.container_runtime import ContainerResult
 
-from benchmarks.hermesbench.adapters.codex_exec import CodexExecAdapter, CodexExecError, load_managed_chatgpt_auth
+from benchmarks.hermesbench.adapters.codex_exec import (
+    CodexExecAdapter,
+    CodexExecError,
+    _normalize_command,
+    load_managed_chatgpt_auth,
+)
 from benchmarks.hermesbench.phase_runner import CanonicalCandidate
 from benchmarks.hermesbench.contracts import Location
 from benchmarks.hermesbench.runner import ExecutorTimeoutError
@@ -358,6 +363,55 @@ class CodexExecAdapterTests(unittest.TestCase):
             result = self._adapter("standard", "baseline", runtime)(_request(), Path(directory), 60)
         self.assertEqual(result.raw_response["usage"], {"input_tokens": 30, "cached_input_tokens": 20, "output_tokens": 10})
         self.assertEqual(result.observed_argv, (("python3", "-m", "unittest"),))
+
+    def test_allows_quoted_search_metacharacters_and_hashes_the_argument(self) -> None:
+        expected = (
+            "rg",
+            "-n",
+            "sha256=b381aa9d75effd31bfd58154c941aa4dae2d8326bb40f7559368ffc63d77ea01",
+            "source.py",
+        )
+
+        self.assertEqual(
+            _normalize_command("rg -n 'foo|bar(.*)$>baz' source.py"),
+            expected,
+        )
+        self.assertEqual(
+            _normalize_command(
+                "/bin/bash -lc 'rg -n '\"'\"'foo|bar(.*)$>baz'\"'\"' source.py'"
+            ),
+            expected,
+        )
+        self.assertEqual(
+            _normalize_command(r"rg foo\|bar source.py"),
+            (
+                "rg",
+                "sha256=0fc7e25e075c7849f89b9729d1aeada1c4d791893248a042f8025c35f26b635f",
+                "source.py",
+            ),
+        )
+
+    def test_rejects_true_shell_composition_after_quote_aware_scan(self) -> None:
+        unsafe_commands = (
+            "rg needle source.py | sort",
+            "rg needle > result.txt",
+            "rg needle; sort",
+            "rg needle && sort",
+            "rg (needle)",
+            "rg $(pwd)",
+            "rg `pwd`",
+            "rg needle # comment",
+            "rg needle\nsort",
+            'rg "$HOME"',
+            'rg "`pwd`"',
+            "rg 'unterminated",
+            "rg \ud800",
+        )
+
+        for command in unsafe_commands:
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(CodexExecError, "unsafe"):
+                    _normalize_command(command)
 
     def test_preserves_executor_timeout_and_rejects_unbounded_auth_payload(self) -> None:
         class _TimeoutRuntime(_Runtime):

@@ -82,6 +82,7 @@ Latest no-model verification: rebuilt `hermesbench-runtime-task5-local:latest` p
 - Read the final schema-bound prediction from a bounded regular file written by pinned Codex `--output-last-message`; JSONL agent messages remain untrusted progress events.
 - Retain the historical fixed pre-replay and post-replay receipt categories, but use the regular-file authentication runtime selected by the live boundary diagnostic without retaining stderr.
 - Test a tmpfs regular authentication file under the existing external-token mode first, and test managed ChatGPT mode only if the storage-only variant still fails.
+- Parse shell quoting before rejecting command-control syntax, reject only unquoted operators or substitutions, and hash non-public argument tokens before writing command evidence.
 - Keep the frozen model, effort, image, policy, timeout, manifest, and snapshot hashes unchanged while fixing the live response boundary.
 
 Verification: focused RED/GREEN tests prove that sensitive exception text cannot enter task artifacts, the complete HermesBench suite remains green, the source snapshots retain their pre-run hashes, the storage-only diagnostic identifies one viable boundary without persisting credentials or model text, and the next paid smoke reaches independent verification.

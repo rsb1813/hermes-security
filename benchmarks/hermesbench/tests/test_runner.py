@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import benchmarks.hermesbench.runner as runner
+from benchmarks.hermesbench.adapters.codex_exec import _normalize_command
 from benchmarks.hermesbench.contracts import BenchmarkManifest, parse_manifest
 from benchmarks.hermesbench.receipts import RECEIPT_SCHEMA_VERSION, RunConfig
 from benchmarks.hermesbench.runner import (
@@ -278,6 +279,39 @@ class SnapshotPreflightTests(unittest.TestCase):
 
 
 class SuiteExecutionTests(unittest.TestCase):
+    def test_compound_command_is_rejected_before_success_artifacts_are_published(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("task-a", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("rg",),))
+
+            def executor(*_: object) -> ExecutorResult:
+                _normalize_command("rg needle source.py | sort")
+                self.fail("unsafe command must not reach an executor result")
+
+            receipt = run_suite(
+                manifest,
+                snapshots,
+                output,
+                "run-001",
+                "standard",
+                "baseline",
+                config_for(manifest, policy),
+                policy,
+                executor,
+            )
+            task_dir = next((output / "run-001" / "tasks").iterdir())
+            self.assertEqual(receipt.status, "failed")
+            self.assertEqual({path.name for path in task_dir.iterdir()}, {"request.json", "failure.json"})
+            self.assertEqual(
+                json.loads((task_dir / "failure.json").read_text(encoding="utf-8")),
+                {"code": "command_event_invalid"},
+            )
+
     def test_failed_task_persists_only_the_bounded_executor_failure_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

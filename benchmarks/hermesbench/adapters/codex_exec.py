@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import math
 import os
@@ -20,13 +21,21 @@ from pathlib import Path
 from ..adapter_contract import AdapterTaskRequest, parse_adapter_response
 from ..container_runtime import MAX_CONFIDENTIAL_STDIN_BYTES, ContainerResult, ContainerRuntime, ContainerTimeoutError
 from ..phase_runner import CanonicalCandidate
-from ..runner import ExecutorFailureError, ExecutorResult, ExecutorTimeoutError
+from ..runner import (
+    ExecutorFailureError,
+    ExecutorResult,
+    ExecutorTimeoutError,
+    _PUBLIC_COMMAND_TOKEN,
+)
 
 
 _EVENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-_UNSAFE_SHELL = re.compile(r"[|&;<>$`()\n\r]")
 _PROMPT_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 _PROMPT_COMMAND_TOKEN = re.compile(r"[-A-Za-z0-9_./:=@%+]+\Z")
+_MAX_SHELL_WRAPPER_DEPTH = 4
+_SHELL_WRAPPER_EXECUTABLES = frozenset({"bash", "sh", "/bin/bash", "/bin/sh"})
+_UNSAFE_UNQUOTED_SHELL = frozenset("|&;<>$`()#")
+_UNSAFE_DOUBLE_QUOTED_SHELL = frozenset("$`")
 _MIN_AUTH_MARGIN_SECONDS = 60
 _PUBLIC_ERROR_CODES = frozenset({"invalid_json_schema"})
 _CHILD_FAILURE_CATEGORIES = (
@@ -788,23 +797,82 @@ def _parse_jsonl(stdout: bytes) -> tuple[dict[str, object], ...]:
 
 
 def _normalize_command(command: str) -> tuple[str, ...]:
-    if not command or _UNSAFE_SHELL.search(command) is not None:
-        raise CodexExecError(
-            "command event is unsafe", failure_code="command_event_invalid"
-        )
-    try:
-        tokens = tuple(shlex.split(command, posix=True))
-    except ValueError as error:
-        raise CodexExecError(
-            "command event is unsafe", failure_code="command_event_invalid"
-        ) from error
-    if not tokens or any(not token for token in tokens):
-        raise CodexExecError(
-            "command event is unsafe", failure_code="command_event_invalid"
-        )
-    if tokens[0] in {"bash", "sh", "/bin/bash", "/bin/sh"} and len(tokens) == 3 and tokens[1] in {"-c", "-lc"}:
-        return _normalize_command(tokens[2])
-    return tokens
+    current = command
+    for depth in range(_MAX_SHELL_WRAPPER_DEPTH + 1):
+        _scan_single_shell_command(current)
+        try:
+            tokens = tuple(shlex.split(current, posix=True))
+        except ValueError as error:
+            raise CodexExecError(
+                "command event is unsafe", failure_code="command_event_invalid"
+            ) from error
+        if not tokens or any(not token for token in tokens):
+            raise CodexExecError(
+                "command event is unsafe", failure_code="command_event_invalid"
+            )
+        if (
+            tokens[0] in _SHELL_WRAPPER_EXECUTABLES
+            and len(tokens) == 3
+            and tokens[1] in {"-c", "-lc"}
+        ):
+            if depth == _MAX_SHELL_WRAPPER_DEPTH:
+                break
+            current = tokens[2]
+            continue
+        return _public_command_tokens(tokens)
+    raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+
+
+def _scan_single_shell_command(command: str) -> None:
+    if not command or "\x00" in command:
+        raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if character in "\n\r":
+            raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+        if quote is None:
+            if character == "'":
+                quote = character
+            elif character == '"':
+                quote = character
+            elif character == "\\":
+                index += 1
+                if index == len(command) or command[index] in "\n\r":
+                    raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+            elif character in _UNSAFE_UNQUOTED_SHELL:
+                raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+        elif quote == "'":
+            if character == "'":
+                quote = None
+        elif character == '"':
+            quote = None
+        elif character == "\\":
+            index += 1
+            if index == len(command) or command[index] in "\n\r":
+                raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+        elif character in _UNSAFE_DOUBLE_QUOTED_SHELL:
+            raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+        index += 1
+    if quote is not None:
+        raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+
+
+def _public_command_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    public: list[str] = []
+    for token in tokens:
+        if _PUBLIC_COMMAND_TOKEN.fullmatch(token) is not None:
+            public.append(token)
+            continue
+        try:
+            digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        except UnicodeEncodeError as error:
+            raise CodexExecError(
+                "command event is unsafe", failure_code="command_event_invalid"
+            ) from error
+        public.append(f"sha256={digest}")
+    return tuple(public)
 
 
 def _normalize_terminal_usage(value: object) -> dict[str, int]:

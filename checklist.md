@@ -63,6 +63,7 @@
   - [x] Classify unauthorized failures before or after the bounded auth replay without retaining child stderr.
   - [x] Prove tmpfs regular-file storage under the existing external-token mode without crossing the host refresh-token boundary.
   - [x] Replace the production FIFO with a private tmpfs regular file while preserving isolation and bounded failure evidence.
+  - [x] Accept quoted search metacharacters while rejecting real shell composition and hashing non-public command arguments in receipts.
   - [ ] Complete a fresh paid Canary smoke without retaining confidential output.
 - [x] Implement paired discovery and verification runner.
   - [x] Record focused RED evidence.

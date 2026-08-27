@@ -259,6 +259,60 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(artifact["final_predictions"], "single-verification/predictions.jsonl")
         self.assertEqual(result.receipt.top_level_invocation_count, 4)
 
+    def test_hashed_command_arguments_are_published_and_revalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            policy = ExecutionPolicy((("rg",),))
+            command = (
+                "rg",
+                "-n",
+                "sha256=b381aa9d75effd31bfd58154c941aa4dae2d8326bb40f7559368ffc63d77ea01",
+                "source.py",
+            )
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return ExecutorResult(_prediction(request.task_id), ({"event": "done"},), (command,))
+
+            def verification_factory(candidate_sets: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    candidate = candidate_sets[request.task_id][0]
+                    response = _prediction(request.task_id, finding_id=candidate.candidate_id)
+                    return ExecutorResult(response, ({"event": "done"},), (command,))
+                return verification
+
+            result = run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "hashed-command",
+                "standard",
+                "baseline",
+                _controls(),
+                policy,
+                discovery,
+                verification_factory,
+            )
+            command_row = json.loads(
+                (outputs / "hashed-command-discovery" / "commands.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()[0]
+            )
+            validated = validate_workflow_receipt(
+                manifest,
+                root / "snapshots",
+                outputs,
+                outputs / "hashed-command-workflow-receipt.json",
+                _controls(),
+                policy,
+            )
+
+        self.assertEqual(command_row["argv"], list(command))
+        self.assertEqual(validated.status, "completed")
+        self.assertEqual(result.receipt.status, "completed")
+
     def test_incomplete_verification_rejects_tampered_failure_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
