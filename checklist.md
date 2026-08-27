@@ -36,6 +36,7 @@
 
 - [x] Build and test the generic reviewed-corpus materializer with synthetic Git fixtures.
 - [x] Batch-read each reviewed Git tree's regular blobs with checked binary framing.
+- [x] Exclude only explicitly quarantined Git symlink entries without reading their blobs.
 - [ ] Review real source provenance, create private ledger rows, and materialize real Canary or Mini snapshots.
 
 ## Standard baseline

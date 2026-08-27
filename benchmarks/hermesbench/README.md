@@ -212,17 +212,21 @@ exact line or line range, and SHA-256 of the original selected line bytes. The
 builder accepts only language-appropriate comment-only lines, preserves line
 count and newline style with a fixed comment marker, and rejects overlaps with
 gold entry, root, trace, or retired-path locations. `quarantine_paths` must be
-present in both pinned trees and cannot contain any gold or root source file.
-They are excluded symmetrically before snapshot auditing. Files with `.patch` or
-`.diff` metadata extensions must be explicitly quarantined or the build fails.
+present in at least one pinned tree and cannot contain a gold or root source
+file or the reviewed `license_path`. They are excluded symmetrically before
+snapshot auditing. An exact quarantine path may also name a mode `120000` blob
+symlink, which remains unmaterialized and unread in either snapshot; every
+other non-regular Git entry is rejected. Files with `.patch` or `.diff` metadata
+extensions must be explicitly quarantined or the build fails.
 
 For every selected row, the builder requires exact local commit objects, exact
 tree IDs, the expected vulnerable-tree license blob hash, a strict
 vulnerable-to-fixed ancestry relationship, and a changed critical root file. It
 materializes only regular Git blobs into a builder-owned temporary directory,
-rejects unsafe paths, non-regular entries, case-fold collisions, source or
-advisory contamination, then publishes by same-parent atomic rename. Existing
-output roots are never overwritten.
+validates every tree path before any quarantine skip, rejects unsafe paths,
+case-fold collisions, unsupported entries, source or advisory contamination,
+then publishes by same-parent atomic rename. Existing output roots are never
+overwritten.
 
 The resulting directory contains anonymous snapshot directories, an
 identity-free manifest and summary, and private oracle and provenance files.

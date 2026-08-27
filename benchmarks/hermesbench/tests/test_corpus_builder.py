@@ -53,6 +53,10 @@ def _git(repository: Path, *args: str) -> str:
 
 def _commit(repository: Path, message: str) -> str:
     _git(repository, "add", "--all")
+    return _commit_index(repository, message)
+
+
+def _commit_index(repository: Path, message: str) -> str:
     _git(repository, "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid", "commit", "-m", message)
     return _git(repository, "rev-parse", "HEAD")
 
@@ -109,6 +113,42 @@ def _synthetic_blob_tree(root: Path, payloads: dict[str, bytes]) -> tuple[Path, 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(contents)
     return repository, _commit(repository, "binary blobs")
+
+
+def _index_synthetic_symlink(repository: Path, path: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "hash-object", "-w", "--stdin"],
+        check=True,
+        shell=False,
+        capture_output=True,
+        input=b"synthetic-link-target",
+    )
+    object_id = completed.stdout.decode("ascii").strip()
+    _git(repository, "update-index", "--add", "--cacheinfo", f"120000,{object_id},{path}")
+    return object_id
+
+
+def _synthetic_pair_with_symlink(
+    root: Path, *, vulnerable_link: bool, fixed_link: bool
+) -> tuple[Path, str, str, str]:
+    repository = root / "symlink-repository"
+    repository.mkdir(parents=True)
+    _git(repository, "init", "--quiet")
+    (repository / "LICENSE").write_text("Synthetic license\n", encoding="utf-8")
+    (repository / "module.py").write_text(VULNERABLE_SOURCE, encoding="utf-8")
+    _git(repository, "add", "LICENSE", "module.py")
+    link_path = "quarantined-link"
+    if vulnerable_link:
+        _index_synthetic_symlink(repository, link_path)
+    vulnerable = _commit_index(repository, "vulnerable")
+    (repository / "module.py").write_text(FIXED_SOURCE, encoding="utf-8")
+    _git(repository, "add", "module.py")
+    if fixed_link and not vulnerable_link:
+        _index_synthetic_symlink(repository, link_path)
+    if not fixed_link and vulnerable_link:
+        _git(repository, "update-index", "--force-remove", link_path)
+    fixed = _commit_index(repository, "fixed")
+    return repository, vulnerable, fixed, link_path
 
 
 def _ignored_workspace(root: Path) -> Path:
@@ -499,7 +539,7 @@ class CorpusBuilderTests(unittest.TestCase):
                 wraps=corpus_builder._git_completed,
             ) as git_completed:
                 loaded = corpus_builder._read_tree(repository, tree)
-            self.assertEqual(loaded, payloads)
+            self.assertEqual(loaded.files, payloads)
             commands = [call.args[1:] for call in git_completed.call_args_list]
             self.assertEqual(commands[0], ("ls-tree", "-r", "-z", tree))
             self.assertEqual(commands[1], ("cat-file", "--batch"))
@@ -545,6 +585,115 @@ class CorpusBuilderTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(CorpusBuildError, "batch output"):
                 corpus_builder._read_tree(Path("synthetic"), "3" * 40)
+
+    def test_builder_skips_exact_quarantined_symlinks_from_both_snapshots(self) -> None:
+        for vulnerable_link, fixed_link in ((True, True), (True, False), (False, True)):
+            with self.subTest(vulnerable_link=vulnerable_link, fixed_link=fixed_link), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repository, vulnerable, fixed, link_path = _synthetic_pair_with_symlink(
+                    root,
+                    vulnerable_link=vulnerable_link,
+                    fixed_link=fixed_link,
+                )
+                selected = _selected_row(repository, vulnerable, fixed)
+                selected["quarantine_paths"] = [link_path]
+                ledger = root / "ledger.jsonl"
+                _write_ledger(ledger, [selected])
+                result = build_reviewed_corpus(
+                    ledger,
+                    {"source-candidate-1": _candidate(vulnerable)},
+                    {"source-candidate-1": repository},
+                    root / "output",
+                    b"synthetic-key",
+                    suite="canary",
+                )
+                self.assertFalse(any(path.name == link_path for path in result.snapshots_root.rglob("*")))
+
+    def test_tree_reader_skips_quarantined_symlink_without_batch_reading_its_blob(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, _, link_path = _synthetic_pair_with_symlink(
+                root,
+                vulnerable_link=True,
+                fixed_link=True,
+            )
+            tree = _tree(repository, vulnerable)
+            symlink_entry = _git(repository, "ls-tree", tree, "--", link_path)
+            symlink_object_id = symlink_entry.split()[2]
+            with patch.object(
+                corpus_builder,
+                "_git_completed",
+                wraps=corpus_builder._git_completed,
+            ) as git_completed:
+                result = corpus_builder._read_tree(repository, tree, (link_path,))
+            self.assertNotIn(link_path, result.files)
+            self.assertEqual(result.quarantined_symlink_paths, frozenset({link_path}))
+            batch = next(
+                call
+                for call in git_completed.call_args_list
+                if call.args[1:] == ("cat-file", "--batch")
+            )
+            self.assertNotIn(
+                symlink_object_id.encode("ascii") + b"\n",
+                batch.kwargs["input_bytes"],
+            )
+            self.assertLessEqual(git_completed.call_count, 2)
+
+    def test_builder_rejects_unquarantined_symlinks_and_other_special_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, fixed, _ = _synthetic_pair_with_symlink(
+                root,
+                vulnerable_link=True,
+                fixed_link=True,
+            )
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [_selected_row(repository, vulnerable, fixed)])
+            with self.assertRaisesRegex(CorpusBuildError, "unsupported entry"):
+                build_reviewed_corpus(
+                    ledger,
+                    {"source-candidate-1": _candidate(vulnerable)},
+                    {"source-candidate-1": repository},
+                    root / "output",
+                    b"synthetic-key",
+                    suite="canary",
+                )
+        submodule = b"160000 commit " + b"1" * 40 + b"\tthird-party\0"
+        with patch.object(corpus_builder, "_git_bytes", return_value=submodule):
+            with self.assertRaisesRegex(CorpusBuildError, "unsupported entry"):
+                corpus_builder._read_tree(Path("synthetic"), "2" * 40)
+
+    def test_builder_rejects_quarantining_the_reviewed_license_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, fixed = _synthetic_pair(root)
+            selected = _selected_row(repository, vulnerable, fixed)
+            selected["quarantine_paths"] = ["LICENSE"]
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [selected])
+            with self.assertRaisesRegex(CorpusBuildError, "license"):
+                build_reviewed_corpus(
+                    ledger,
+                    {"source-candidate-1": _candidate(vulnerable)},
+                    {"source-candidate-1": repository},
+                    root / "output",
+                    b"synthetic-key",
+                    suite="canary",
+                )
+
+    def test_tree_reader_validates_quarantined_symlink_paths_before_skipping(self) -> None:
+        object_id = b"1" * 40
+        unsafe = b"120000 blob " + object_id + b"\t../escape\0"
+        with patch.object(corpus_builder, "_git_bytes", return_value=unsafe):
+            with self.assertRaisesRegex(CorpusBuildError, "unsafe path"):
+                corpus_builder._read_tree(Path("synthetic"), "2" * 40, ("../escape",))
+        collision = (
+            b"120000 blob " + object_id + b"\tReadme\0"
+            b"100644 blob " + object_id + b"\tREADME\0"
+        )
+        with patch.object(corpus_builder, "_git_bytes", return_value=collision):
+            with self.assertRaisesRegex(CorpusBuildError, "case-fold"):
+                corpus_builder._read_tree(Path("synthetic"), "2" * 40, ("Readme",))
 
     def test_builder_ignores_inherited_git_repository_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -92,6 +92,12 @@ class CorpusBuildResult:
     oracle_sha256: str
 
 
+@dataclass(frozen=True)
+class TreeReadResult:
+    files: dict[str, bytes]
+    quarantined_symlink_paths: frozenset[str]
+
+
 def derive_anonymous_id(
     key: bytes,
     domain: Literal["vulnerable", "fixed", "group"],
@@ -230,11 +236,20 @@ def _build_stage(
         if candidate is None or repository is None:
             raise CorpusBuildError("selected ledger row lacks a reviewed candidate or local repository")
         _verify_candidate(row, candidate)
-        vulnerable_tree, fixed_tree = _verify_git_revisions(repository, row)
+        vulnerable_result, fixed_result = _verify_git_revisions(repository, row)
+        vulnerable_tree = vulnerable_result.files
+        fixed_tree = fixed_result.files
+        _verify_quarantine_paths(
+            candidate.gold_path,
+            row.fixed_locations,
+            row.license_path,
+            row.quarantine_paths,
+            vulnerable_result,
+            fixed_result,
+        )
         _verify_gold_locations(candidate.gold_path, vulnerable_tree, "vulnerable gold")
         _verify_fixed_locations(candidate.gold_path, row.fixed_locations, fixed_tree)
         _verify_root_changed(candidate.gold_path, vulnerable_tree, fixed_tree)
-        _verify_quarantine_paths(candidate.gold_path, row.fixed_locations, row.quarantine_paths, vulnerable_tree, fixed_tree)
         _verify_disclosure_metadata_is_quarantined(row.quarantine_paths, vulnerable_tree, fixed_tree)
         redacted_fixed_tree = _apply_comment_redactions(candidate.gold_path, row, fixed_tree)
         materialized_vulnerable_tree = _without_quarantine(vulnerable_tree, row.quarantine_paths)
@@ -331,7 +346,7 @@ def _build_stage(
             "manifest_sha256": manifest_hash,
             "oracle_sha256": oracle_hash,
             "quarantine_policy": "reject-unsupported-or-contaminated",
-            "unsupported_git_entries": "reject",
+            "unsupported_git_entries": "reject-except-explicit-quarantined-symlink",
             "tasks": receipt_rows,
             "selected_count": len(selected_rows),
             "excluded_count": sum(isinstance(row, ExcludedLedgerRow) for row in all_rows),
@@ -433,7 +448,9 @@ def _verify_group_splits(rows: tuple[LedgerRow, ...]) -> None:
             raise CorpusBuildError("reviewed group must remain in one split")
 
 
-def _verify_git_revisions(repository: Path, row: SelectedLedgerRow) -> tuple[dict[str, bytes], dict[str, bytes]]:
+def _verify_git_revisions(
+    repository: Path, row: SelectedLedgerRow
+) -> tuple[TreeReadResult, TreeReadResult]:
     if not repository.is_dir() or repository.is_symlink():
         raise CorpusBuildError("local Git repository must be a real directory")
     _git(repository, "rev-parse", "--git-dir")
@@ -446,10 +463,10 @@ def _verify_git_revisions(repository: Path, row: SelectedLedgerRow) -> tuple[dic
         raise CorpusBuildError("vulnerable tree does not match reviewed commit")
     if _git(repository, "rev-parse", f"{row.fixed_commit}^{{tree}}") != row.fixed_tree:
         raise CorpusBuildError("fixed tree does not match reviewed commit")
-    vulnerable_tree = _read_tree(repository, row.vulnerable_tree)
-    fixed_tree = _read_tree(repository, row.fixed_tree)
-    vulnerable_license = vulnerable_tree.get(row.license_path)
-    fixed_license = fixed_tree.get(row.license_path)
+    vulnerable_result = _read_tree(repository, row.vulnerable_tree, row.quarantine_paths)
+    fixed_result = _read_tree(repository, row.fixed_tree, row.quarantine_paths)
+    vulnerable_license = vulnerable_result.files.get(row.license_path)
+    fixed_license = fixed_result.files.get(row.license_path)
     if (
         vulnerable_license is None
         or fixed_license is None
@@ -457,12 +474,16 @@ def _verify_git_revisions(repository: Path, row: SelectedLedgerRow) -> tuple[dic
         or hashlib.sha256(fixed_license).hexdigest() != row.license_sha256
     ):
         raise CorpusBuildError("license blob does not match reviewed license hash")
-    return vulnerable_tree, fixed_tree
+    return vulnerable_result, fixed_result
 
 
-def _read_tree(repository: Path, tree: str) -> dict[str, bytes]:
+def _read_tree(
+    repository: Path, tree: str, quarantine_paths: tuple[str, ...] = ()
+) -> TreeReadResult:
     raw = _git_bytes(repository, "ls-tree", "-r", "-z", tree)
     paths: list[tuple[str, str]] = []
+    quarantined_symlink_paths: set[str] = set()
+    quarantined = set(quarantine_paths)
     folded: set[str] = set()
     for entry in raw.split(b"\0"):
         if not entry:
@@ -477,16 +498,22 @@ def _read_tree(repository: Path, tree: str) -> dict[str, bytes]:
         if path.casefold() in folded:
             raise CorpusBuildError("Git tree contains case-fold-colliding paths")
         folded.add(path.casefold())
-        if object_type != "blob" or mode not in {"100644", "100755"}:
-            raise CorpusBuildError("Git tree contains an unsupported entry")
         if _COMMIT_PATTERN.fullmatch(object_id) is None:
             raise CorpusBuildError("Git tree entry has an invalid object ID")
+        if mode == "120000" and object_type == "blob" and path in quarantined:
+            quarantined_symlink_paths.add(path)
+            continue
+        if object_type != "blob" or mode not in {"100644", "100755"}:
+            raise CorpusBuildError("Git tree contains an unsupported entry")
         paths.append((path, object_id))
     if not paths:
         raise CorpusBuildError("Git tree must contain regular files")
     object_ids = tuple(dict.fromkeys(object_id for _, object_id in paths))
     contents = _read_batch_blobs(repository, object_ids)
-    return {path: contents[object_id] for path, object_id in paths}
+    return TreeReadResult(
+        files={path: contents[object_id] for path, object_id in paths},
+        quarantined_symlink_paths=frozenset(quarantined_symlink_paths),
+    )
 
 
 def _read_batch_blobs(
@@ -543,15 +570,24 @@ def _verify_root_changed(path: GoldPath, vulnerable: Mapping[str, bytes], fixed:
 def _verify_quarantine_paths(
     vulnerable: GoldPath,
     fixed: tuple[GoldPath, ...],
+    license_path: str,
     quarantine_paths: tuple[str, ...],
-    vulnerable_tree: Mapping[str, bytes],
-    fixed_tree: Mapping[str, bytes],
+    vulnerable_tree: TreeReadResult,
+    fixed_tree: TreeReadResult,
 ) -> None:
     protected = {location.path for path in (vulnerable, *fixed) for location in _all_locations(path)}
+    available = (
+        set(vulnerable_tree.files)
+        | set(fixed_tree.files)
+        | set(vulnerable_tree.quarantined_symlink_paths)
+        | set(fixed_tree.quarantined_symlink_paths)
+    )
     for path in quarantine_paths:
         if path in protected:
             raise CorpusBuildError("quarantine path cannot contain a gold or root source file")
-        if path not in vulnerable_tree and path not in fixed_tree:
+        if path == license_path:
+            raise CorpusBuildError("quarantine path cannot contain the reviewed license path")
+        if path not in available:
             raise CorpusBuildError("quarantine path must exist in at least one pinned tree")
 
 
