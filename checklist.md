@@ -22,7 +22,7 @@
 
 - [x] Write failing tests for benchmark schemas and scorer behavior.
 - [x] Implement benchmark schemas and prediction contracts.
-- [ ] Implement source and metadata sanitization.
+- [x] Implement source and metadata sanitization.
 - [x] Implement paired endpoint and trace scoring.
 - [x] Implement fixed-negative and adjudication handling.
 - [x] Implement reproducible run receipts and separated token accounting.
