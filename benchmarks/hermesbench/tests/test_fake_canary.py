@@ -137,6 +137,26 @@ def _expected_usage(source: bytes) -> TokenUsage:
     return TokenUsage(1 + digest[0] % 17, 1 + digest[1] % 17, 1 + digest[2] % 17)
 
 
+def _validated_task_receipt_usages(
+    rows: list[dict[str, object]], expected: tuple[tuple[str, TokenUsage], ...]
+) -> tuple[TokenUsage, ...]:
+    if len(rows) != len(TASKS):
+        raise AssertionError("task receipt count must match the manifest")
+    expected_ids = tuple(task_id for task_id, _ in expected)
+    actual_ids = tuple(row.get("task_id") for row in rows)
+    if actual_ids != expected_ids or actual_ids != TASKS:
+        raise AssertionError("task receipt IDs must match manifest order exactly once")
+    usages: list[TokenUsage] = []
+    for row, (task_id, expected_usage) in zip(rows, expected, strict=True):
+        if row["task_id"] != task_id:
+            raise AssertionError("task receipt ID must match its source-specific usage")
+        usage = TokenUsage.from_json(row["token_usage"])
+        if usage != expected_usage:
+            raise AssertionError("task receipt usage must match its source bytes")
+        usages.append(usage)
+    return tuple(usages)
+
+
 def _task_artifact_names() -> set[str]:
     return {
         f"tasks/{hashlib.sha256(task_id.encode()).hexdigest()}/{name}"
@@ -169,6 +189,19 @@ def _run(
 
 
 class FakeCanaryTests(unittest.TestCase):
+    def test_duplicate_task_receipt_rows_are_rejected_before_usage_aggregation(self) -> None:
+        expected = (
+            (TASKS[0], _expected_usage(VULNERABLE_SOURCE)),
+            (TASKS[1], _expected_usage(FIXED_SOURCE)),
+        )
+        duplicated_rows = [
+            {"task_id": TASKS[0], "token_usage": expected[0][1].to_json()},
+            {"task_id": TASKS[0], "token_usage": expected[0][1].to_json()},
+        ]
+
+        with self.assertRaises(AssertionError):
+            _validated_task_receipt_usages(duplicated_rows, expected)
+
     def test_source_bytes_control_predictions_under_neutral_ids_and_renamed_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -254,21 +287,23 @@ class FakeCanaryTests(unittest.TestCase):
             standard = _run(manifest, snapshots, outputs, "standard-001", "standard", policy, adapter)
             hunt = _run(manifest, snapshots, outputs, "hunt-001", "hunt", policy, adapter)
 
-            expected = {TASKS[0]: _expected_usage(VULNERABLE_SOURCE), TASKS[1]: _expected_usage(FIXED_SOURCE)}
-            self.assertNotEqual(expected[TASKS[0]], expected[TASKS[1]])
+            expected = (
+                (TASKS[0], _expected_usage(VULNERABLE_SOURCE)),
+                (TASKS[1], _expected_usage(FIXED_SOURCE)),
+            )
+            self.assertNotEqual(expected[0][1], expected[1][1])
             for receipt, run_id in ((standard, "standard-001"), (hunt, "hunt-001")):
                 rows = [json.loads(line) for line in (outputs / run_id / "task-receipts.jsonl").read_text(encoding="utf-8").splitlines()]
-                actual = {row["task_id"]: TokenUsage.from_json(row["token_usage"]) for row in rows}
-                self.assertEqual(actual, expected)
+                actual = _validated_task_receipt_usages(rows, expected)
                 self.assertEqual(
                     receipt.token_usage,
                     TokenUsage(
-                        sum(usage.cached_input_tokens for usage in actual.values()),
-                        sum(usage.uncached_input_tokens for usage in actual.values()),
-                        sum(usage.output_tokens for usage in actual.values()),
+                        sum(usage.cached_input_tokens for usage in actual),
+                        sum(usage.uncached_input_tokens for usage in actual),
+                        sum(usage.output_tokens for usage in actual),
                     ),
                 )
-                for task_id in TASKS:
+                for (task_id, _), usage in zip(expected, actual, strict=True):
                     task_dir = outputs / run_id / "tasks" / hashlib.sha256(task_id.encode()).hexdigest()
                     response = json.loads((task_dir / "adapter-response.json").read_text(encoding="utf-8"))
                     response_usage = TokenUsage(
@@ -276,7 +311,7 @@ class FakeCanaryTests(unittest.TestCase):
                         response["usage"]["input_tokens"] - response["usage"]["cached_input_tokens"],
                         response["usage"]["output_tokens"],
                     )
-                    self.assertEqual(response_usage, actual[task_id])
+                    self.assertEqual(response_usage, usage)
             self.assertEqual(standard.token_usage, hunt.token_usage)
             self.assertEqual(standard.config, hunt.config)
             standard_predictions = load_predictions(outputs / "standard-001" / "predictions.jsonl")
