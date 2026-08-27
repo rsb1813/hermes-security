@@ -17,6 +17,7 @@
 - [x] Receive approval for the written design specification.
 - [x] Write the file-by-file HermesBench foundation implementation plan.
 - [x] Write the file-by-file Hunt workflow implementation plan after the foundation is verified.
+- [x] Write the file-by-file isolated HermesBench runner and Canary plan.
 
 ## Benchmark foundation
 
@@ -33,6 +34,10 @@
 
 ## Standard baseline
 
+- [ ] Define the strict model-adapter request, response, and task receipt contracts.
+- [ ] Implement the snapshot-safe paired runner and deterministic fake Canary.
+- [ ] Implement and verify the hardened Docker execution boundary.
+- [ ] Connect one common Codex non-interactive adapter to Standard and Hunt.
 - [ ] Connect the benchmark runner to the unchanged Standard workflow.
 - [ ] Run and verify Canary.
 - [ ] Freeze the Mini task manifest and configuration.
