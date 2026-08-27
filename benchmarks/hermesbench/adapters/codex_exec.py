@@ -31,6 +31,8 @@ _MIN_AUTH_MARGIN_SECONDS = 60
 _PUBLIC_ERROR_CODES = frozenset({"invalid_json_schema"})
 _CHILD_FAILURE_CATEGORIES = (
     "auth_unauthorized",
+    "auth_unauthorized_before_replay",
+    "auth_unauthorized_after_replay",
     "auth_token_unavailable",
     "auth_refresh",
     "auth_not_logged_in",

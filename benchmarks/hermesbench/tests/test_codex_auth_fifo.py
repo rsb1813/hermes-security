@@ -242,7 +242,74 @@ class CodexAuthFifoTests(unittest.TestCase):
                 wrapper.subprocess, "Popen", return_value=_Child()
             ), patch.object(wrapper.sys, "stdin", stdin), patch.object(wrapper.sys, "stderr", stderr):
                 self.assertEqual(wrapper.main(["--auth-readers", "2", "--", "codex", "exec"]), 7)
-        self.assertEqual(stderr.getvalue(), "hermesbench-child-category:auth_unauthorized\n")
+        self.assertEqual(
+            stderr.getvalue(),
+            "hermesbench-child-category:auth_unauthorized_before_replay\n",
+        )
+
+    def test_completed_auth_replay_is_reflected_in_fixed_unauthorized_category(self) -> None:
+        wrapper = _load_wrapper()
+        payload = json.dumps(
+            {
+                "auth_mode": "chatgptAuthTokens",
+                "tokens": {
+                    "id_token": "header.payload.signature",
+                    "access_token": "header.payload.signature",
+                    "refresh_token": "",
+                    "account_id": "account",
+                },
+                "last_refresh": "2026-08-27T00:00:00Z",
+            }
+        ).encode("utf-8")
+
+        class _Child:
+            returncode = 7
+            stderr = io.BytesIO(b"401 unauthorized credential-sentinel")
+
+            def poll(self) -> int:
+                return self.returncode
+
+            def wait(self) -> None:
+                return None
+
+        class _Feeder:
+            failed = False
+
+            def wait_for_readers(self, count: int, timeout_seconds: float) -> bool:
+                return count == 2
+
+            def cancel(self) -> None:
+                return None
+
+        stderr = io.StringIO()
+        stdin = io.TextIOWrapper(io.BytesIO(_auth_envelope(payload)), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            auth_directory = Path(directory) / "auth"
+            auth_directory.mkdir()
+            with patch.object(
+                wrapper,
+                "start_auth_fifo",
+                return_value=(
+                    auth_directory,
+                    auth_directory / "auth.json",
+                    _Feeder(),
+                ),
+            ), patch.object(
+                wrapper.subprocess, "Popen", return_value=_Child()
+            ), patch.object(
+                wrapper.sys, "stdin", stdin
+            ), patch.object(
+                wrapper.sys, "stderr", stderr
+            ):
+                self.assertEqual(
+                    wrapper.main(["--auth-readers", "2", "--", "codex", "exec"]),
+                    7,
+                )
+        self.assertEqual(
+            stderr.getvalue(),
+            "hermesbench-child-category:auth_unauthorized_after_replay\n",
+        )
+        self.assertNotIn("credential-sentinel", stderr.getvalue())
 
     def test_setup_failures_emit_only_fixed_stage_tokens(self) -> None:
         wrapper = _load_wrapper()

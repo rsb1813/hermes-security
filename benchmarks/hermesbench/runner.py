@@ -38,6 +38,8 @@ _PUBLIC_FAILURE_CODES = frozenset(
         "terminal_response_incomplete",
         "terminal_response_invalid",
         "child_auth_unauthorized",
+        "child_auth_unauthorized_before_replay",
+        "child_auth_unauthorized_after_replay",
         "child_auth_token_unavailable",
         "child_auth_refresh",
         "child_auth_not_logged_in",

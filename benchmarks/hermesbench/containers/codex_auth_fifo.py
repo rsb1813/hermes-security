@@ -346,7 +346,13 @@ def main(argv: list[str]) -> int:
             feeder.cancel()
         if early_exit is not None:
             if early_exit != 0:
-                sys.stderr.write(_child_failure_token(drainer.category()))
+                sys.stderr.write(
+                    _child_failure_token(
+                        _auth_replay_failure_category(
+                            drainer.category(), replay_completed=False
+                        )
+                    )
+                )
                 return early_exit
             sys.stderr.write(_setup_failure_token("setup_child_zero_before_readers"))
             return 2
@@ -354,7 +360,13 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(_setup_failure_token("setup_feeder"))
             return 2
         if child.returncode != 0:
-            sys.stderr.write(_child_failure_token(drainer.category()))
+            sys.stderr.write(
+                _child_failure_token(
+                    _auth_replay_failure_category(
+                        drainer.category(), replay_completed=readers == 2
+                    )
+                )
+            )
         return child.returncode
     except (OSError, subprocess.SubprocessError):
         sys.stderr.write(_setup_failure_token("setup_wrapper_os_error"))
@@ -381,6 +393,14 @@ def _write_all(descriptor: int, payload: bytes, cancelled: threading.Event) -> b
 def _child_failure_token(category: str) -> str:
     """Builds the fixed public wrapper token from one finite category."""
     return f"{_CHILD_FAILURE_PREFIX}{category}\n"
+
+
+def _auth_replay_failure_category(category: str, replay_completed: bool) -> str:
+    """Splits only unauthorized failures by the bounded second auth read."""
+    if category != "auth_unauthorized":
+        return category
+    suffix = "after_replay" if replay_completed else "before_replay"
+    return f"auth_unauthorized_{suffix}"
 
 
 def _setup_failure_token(stage: str) -> str:

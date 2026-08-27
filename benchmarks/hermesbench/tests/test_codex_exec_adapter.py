@@ -570,15 +570,26 @@ class CodexExecAdapterTests(unittest.TestCase):
         self.assertEqual(str(malformed.exception), "container execution failed")
         self.assertNotIn("credential-sentinel", str(malformed.exception))
 
-        auth_runtime = _Runtime(
-            b"",
-            exit_code=1,
-            stderr=b"hermesbench-child-category:auth_unauthorized\n",
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(CodexExecError) as auth_error:
-                self._adapter("standard", "baseline", auth_runtime)(_request(), Path(directory), 60)
-        self.assertEqual(str(auth_error.exception), "container execution failed: child_auth_unauthorized")
+        for category in (
+            "auth_unauthorized_before_replay",
+            "auth_unauthorized_after_replay",
+        ):
+            with self.subTest(category=category):
+                auth_runtime = _Runtime(
+                    b"",
+                    exit_code=1,
+                    stderr=f"hermesbench-child-category:{category}\n".encode("ascii"),
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(CodexExecError) as auth_error:
+                        self._adapter("standard", "baseline", auth_runtime)(
+                            _request(), Path(directory), 60
+                        )
+                self.assertEqual(
+                    str(auth_error.exception),
+                    f"container execution failed: child_{category}",
+                )
+                self.assertEqual(auth_error.exception.failure_code, f"child_{category}")
 
         configuration_runtime = _Runtime(
             b"",

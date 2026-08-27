@@ -60,6 +60,7 @@
   - [x] Persist only a bounded public failure code, safely replace partial runner artifacts, and bind descriptor-verified failure sidecars to phase receipts.
   - [x] Diagnose the paid smoke failure without retaining model text or private identities.
   - [ ] Read the schema-bound result from Codex `--output-last-message` instead of intermediate agent events.
+  - [ ] Classify unauthorized failures before or after the bounded auth replay without retaining child stderr.
   - [ ] Complete a fresh paid Canary smoke without retaining confidential output.
 - [x] Implement paired discovery and verification runner.
   - [x] Record focused RED evidence.
