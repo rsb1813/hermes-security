@@ -310,5 +310,7 @@ def _terminate_attach(process: subprocess.Popen[bytes]) -> None:
 def _attempt_cleanup(label: str, action: Callable[[], None], failures: list[str]) -> None:
     try:
         action()
+    except KeyboardInterrupt:
+        failures.append(label)
     except Exception:
         failures.append(label)

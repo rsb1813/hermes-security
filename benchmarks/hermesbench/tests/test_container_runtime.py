@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,8 +44,61 @@ class _AttachProcess:
         return None
 
 
+class _InterruptingAttachProcess(_AttachProcess):
+    def terminate(self) -> None:
+        self.terminated = True
+        raise KeyboardInterrupt()
+
+
 def _completed(argv: list[str], stdout: bytes = b"", returncode: int = 0) -> subprocess.CompletedProcess[bytes]:
     return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr=b"")
+
+
+_DOCKER_BUILD_TIMEOUT_SECONDS = 180
+_DOCKER_CONTROL_TIMEOUT_SECONDS = 30
+
+
+def _run_live_docker(
+    argv: list[str], *, timeout_seconds: int, operation: str
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            shell=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(f"Docker {operation} timed out") from exc
+    if completed.returncode != 0:
+        raise AssertionError(f"Docker {operation} failed")
+    return completed
+
+
+def _require_new_receipt_target(receipt_path: Path) -> None:
+    if receipt_path.exists():
+        raise AssertionError("Docker smoke receipt target already exists")
+    if not receipt_path.parent.is_dir():
+        raise AssertionError("Docker smoke receipt directory does not exist")
+
+
+def _publish_receipt(receipt_path: Path, receipt: dict[str, object], forbidden_values: tuple[str, ...]) -> None:
+    _require_new_receipt_target(receipt_path)
+    serialized = (json.dumps(receipt, sort_keys=True) + "\n").encode("utf-8")
+    for forbidden_value in forbidden_values:
+        if forbidden_value and forbidden_value.encode("utf-8") in serialized:
+            raise AssertionError("Docker smoke receipt contains forbidden data")
+    temporary_path = receipt_path.parent / f".{receipt_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary_path.open("xb") as temporary_file:
+            temporary_file.write(serialized)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, receipt_path)
+    except (Exception, KeyboardInterrupt):
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 class ContainerRuntimeTests(unittest.TestCase):
@@ -395,6 +449,106 @@ class ContainerRuntimeTests(unittest.TestCase):
                 with self.assertRaises(container_runtime.ContainerCleanupError):
                     ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
 
+    def test_interrupt_during_kill_still_terminates_attach_and_removes_exact_container(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def kill_interrupt(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                calls.append((argv, kwargs))
+                if argv[1] == "kill":
+                    raise KeyboardInterrupt()
+                return self._docker_run([])(argv, **kwargs)
+
+            attach = _AttachProcess(KeyboardInterrupt())
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=kill_interrupt), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", return_value=attach
+            ):
+                with self.assertRaises(container_runtime.ContainerCleanupError):
+                    ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
+
+            self.assertTrue(attach.terminated)
+            self.assertEqual(calls[-2][0], ["docker", "kill", CONTAINER_ID])
+            self.assertEqual(calls[-1][0], ["docker", "rm", "--force", CONTAINER_ID])
+
+    def test_interrupt_during_attach_termination_still_removes_exact_container(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+            attach = _InterruptingAttachProcess(KeyboardInterrupt())
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=self._docker_run(calls)), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", return_value=attach
+            ):
+                with self.assertRaises(container_runtime.ContainerCleanupError):
+                    ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
+
+            self.assertTrue(attach.terminated)
+            self.assertEqual(calls[-2][0], ["docker", "kill", CONTAINER_ID])
+            self.assertEqual(calls[-1][0], ["docker", "rm", "--force", CONTAINER_ID])
+
+    def test_interrupt_during_normal_remove_is_not_reported_as_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+
+            def remove_interrupt(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                if argv[1] == "rm":
+                    raise KeyboardInterrupt()
+                return self._docker_run([])(argv, **kwargs)
+
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=remove_interrupt), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", return_value=_AttachProcess()
+            ):
+                with self.assertRaises(container_runtime.ContainerCleanupError):
+                    ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
+
+    def test_cleanup_does_not_swallow_system_exit(self) -> None:
+        failures: list[str] = []
+
+        def exit_action() -> None:
+            raise SystemExit()
+
+        with self.assertRaises(SystemExit):
+            container_runtime._attempt_cleanup("remove", exit_action, failures)
+        self.assertEqual(failures, [])
+
+
+class LiveSmokeReceiptTests(unittest.TestCase):
+    def test_existing_receipt_target_is_rejected_without_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "receipt.json"
+            receipt_path.write_text("stale", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "already exists"):
+                _require_new_receipt_target(receipt_path)
+            self.assertEqual(receipt_path.read_text(encoding="utf-8"), "stale")
+
+    def test_receipt_publish_checks_forbidden_data_and_writes_a_complete_json_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "receipt.json"
+            receipt = {"schema_version": 1, "status": "passed"}
+            _publish_receipt(receipt_path, receipt, ("/host/mount", "container-id", "private"))
+            self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8")), receipt)
+            self.assertFalse(list(Path(directory).glob("*.tmp")))
+            with self.assertRaisesRegex(AssertionError, "forbidden"):
+                _publish_receipt(Path(directory) / "bad.json", {"path": "/host/mount"}, ("/host/mount",))
+
+    def test_live_docker_call_fails_for_nonzero_and_timeout(self) -> None:
+        with patch(__name__ + ".subprocess.run", return_value=_completed(["docker"], returncode=1)):
+            with self.assertRaisesRegex(AssertionError, "failed"):
+                _run_live_docker(["docker", "version"], timeout_seconds=1, operation="version")
+        with patch(__name__ + ".subprocess.run", side_effect=subprocess.TimeoutExpired(["docker"], 1)):
+            with self.assertRaisesRegex(AssertionError, "timed out"):
+                _run_live_docker(["docker", "version"], timeout_seconds=1, operation="version")
+
+    def test_live_docker_call_uses_argv_shell_false_and_the_requested_timeout(self) -> None:
+        with patch(__name__ + ".subprocess.run", return_value=_completed(["docker", "version"])) as docker_run:
+            _run_live_docker(["docker", "version"], timeout_seconds=7, operation="version")
+        self.assertEqual(docker_run.call_args.args[0], ["docker", "version"])
+        self.assertIs(docker_run.call_args.kwargs["shell"], False)
+        self.assertEqual(docker_run.call_args.kwargs["timeout"], 7)
+
 
 @unittest.skipUnless(
     os.environ.get("HERMESBENCH_RUN_DOCKER_SMOKE") == "1",
@@ -408,16 +562,18 @@ class DockerIsolationSmokeTests(unittest.TestCase):
         if not receipt_path_value:
             self.fail("HERMESBENCH_DOCKER_RECEIPT_PATH is required for the Docker isolation smoke")
         receipt_path = Path(receipt_path_value)
-        build = subprocess.run(
-            ["docker", "build", "-f", str(runtime_directory / "Dockerfile"), "-t", image_ref, str(runtime_directory)],
-            capture_output=True,
-            check=False,
-            shell=False,
-        )
-        if build.returncode != 0:
-            self.fail("Docker runtime image build failed")
-
+        _require_new_receipt_target(receipt_path)
+        build_succeeded = False
+        resolved_image_id: str | None = None
+        docker_server: str | None = None
+        receipt_forbidden_values: tuple[str, ...] | None = None
         try:
+            _run_live_docker(
+                ["docker", "build", "-f", str(runtime_directory / "Dockerfile"), "-t", image_ref, str(runtime_directory)],
+                timeout_seconds=_DOCKER_BUILD_TIMEOUT_SECONDS,
+                operation="runtime image build",
+            )
+            build_succeeded = True
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 snapshot, plugin, scratch = ContainerRuntimeTests()._paths(root)
@@ -519,10 +675,11 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                     ("sleep", "10"),
                 )
                 try:
-                    inspection = subprocess.run(
-                        ["docker", "inspect", container_id], capture_output=True, check=False, shell=False
+                    inspection = _run_live_docker(
+                        ["docker", "inspect", container_id],
+                        timeout_seconds=_DOCKER_CONTROL_TIMEOUT_SECONDS,
+                        operation="exact-ID container inspection",
                     )
-                    self.assertEqual(inspection.returncode, 0)
                     inspected = json.loads(inspection.stdout)[0]
                     self.assertNotEqual(inspected["HostConfig"]["NetworkMode"], "none")
                     self.assertTrue(inspected["HostConfig"]["ReadonlyRootfs"])
@@ -540,56 +697,67 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                     self.assertTrue(mounts["/workspace/scratch"]["RW"])
                     self.assertNotIn(final_artifact_root.name, json.dumps(inspected))
                     self.assertNotIn("/var/run/docker.sock", json.dumps(inspected))
-                    docker_version = subprocess.run(
+                    docker_version = _run_live_docker(
                         ["docker", "version", "--format", "{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}"],
-                        capture_output=True,
-                        check=False,
-                        shell=False,
+                        timeout_seconds=_DOCKER_CONTROL_TIMEOUT_SECONDS,
+                        operation="server version inspection",
                     )
-                    self.assertEqual(docker_version.returncode, 0)
-                    receipt = {
-                        "schema_version": 1,
-                        "task": "HermesBench Task 4 Docker isolation smoke",
-                        "image_ref": image_ref,
-                        "resolved_image_id": image_id,
-                        "docker_server": docker_version.stdout.decode("utf-8", errors="strict").strip(),
-                        "observations": {
-                            "snapshot_write_rejected": True,
-                            "plugin_write_rejected": True,
-                            "root_filesystem_write_rejected": True,
-                            "scratch_write_succeeded": True,
-                            "docker_socket_absent": True,
-                            "outer_network_mode_is_not_none": True,
-                            "outer_container_reached_host_local_sentinel": True,
-                            "codex_sandbox_child_started": True,
-                            "codex_sandbox_child_host_local_sentinel_rejected": True,
-                            "host_pid_namespace_absent": True,
-                            "inspect_has_only_snapshot_plugin_and_scratch_mounts": True,
-                            "snapshot_and_plugin_mounts_read_only": True,
-                            "scratch_mount_writable": True,
-                            "final_artifact_root_absent": True,
-                        },
-                    }
-                    receipt_path.parent.mkdir(parents=True, exist_ok=True)
-                    receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
-                    recorded = json.loads(receipt_path.read_text(encoding="utf-8"))
-                    self.assertEqual(recorded, receipt)
-                    self.assertNotIn(str(root), json.dumps(recorded))
-                    self.assertNotIn(final_artifact_root.name, json.dumps(recorded))
+                    resolved_image_id = image_id
+                    docker_server = docker_version.stdout.decode("utf-8", errors="strict").strip()
+                    receipt_forbidden_values = (
+                        str(root.resolve()),
+                        str(snapshot.resolve()),
+                        str(plugin.resolve()),
+                        str(scratch.resolve()),
+                        str(final_artifact_root.resolve()),
+                        final_artifact_root.name,
+                        container_id,
+                        "oracle",
+                        "private",
+                    )
                 finally:
-                    subprocess.run(
+                    _run_live_docker(
                         ["docker", "rm", "--force", container_id],
-                        capture_output=True,
-                        check=False,
-                        shell=False,
+                        timeout_seconds=_DOCKER_CONTROL_TIMEOUT_SECONDS,
+                        operation="exact-ID container removal",
                     )
         finally:
-            subprocess.run(
-                ["docker", "image", "rm", "--force", image_ref],
-                capture_output=True,
-                check=False,
-                shell=False,
-            )
+            if build_succeeded:
+                _run_live_docker(
+                    ["docker", "image", "rm", "--force", image_ref],
+                    timeout_seconds=_DOCKER_CONTROL_TIMEOUT_SECONDS,
+                    operation="smoke image removal",
+                )
+        if resolved_image_id is None or docker_server is None or receipt_forbidden_values is None:
+            raise AssertionError("Docker smoke did not collect complete receipt evidence")
+        receipt = {
+            "schema_version": 1,
+            "task": "HermesBench Task 4 Docker isolation smoke",
+            "image_ref": image_ref,
+            "resolved_image_id": resolved_image_id,
+            "docker_server": docker_server,
+            "observations": {
+                "snapshot_write_rejected": True,
+                "plugin_write_rejected": True,
+                "root_filesystem_write_rejected": True,
+                "scratch_write_succeeded": True,
+                "docker_socket_absent": True,
+                "outer_network_mode_is_not_none": True,
+                "outer_container_reached_host_local_sentinel": True,
+                "codex_sandbox_child_started": True,
+                "codex_sandbox_child_host_local_sentinel_rejected": True,
+                "host_pid_namespace_absent": True,
+                "inspect_has_only_snapshot_plugin_and_scratch_mounts": True,
+                "snapshot_and_plugin_mounts_read_only": True,
+                "scratch_mount_writable": True,
+                "final_artifact_root_absent": True,
+            },
+        }
+        _publish_receipt(
+            receipt_path,
+            receipt,
+            receipt_forbidden_values,
+        )
 
 
 class _local_sentinel:
