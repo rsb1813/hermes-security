@@ -51,7 +51,7 @@
 - [x] Implement validated draft reporting.
 - [x] Bundle the explicit experimental Hunt skill and workflow contract.
 - [x] Run fresh-context GREEN behavior tests with the bundled skill.
-- [ ] Verify Standard CLI and SDK compatibility.
+- [x] Verify Standard CLI and SDK compatibility.
 
 ## Performance work
 
@@ -65,7 +65,7 @@
 
 ## Completion
 
-- [ ] Run the complete repository test suite.
+- [x] Run the complete repository test suite.
 - [ ] Review the final diff for scope, safety, and public-data boundaries.
 - [ ] Commit each verified logical unit.
 - [ ] Publish the evidence-backed comparison report.
