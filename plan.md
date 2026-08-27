@@ -86,3 +86,14 @@ Latest no-model verification: rebuilt `hermesbench-runtime-task5-local:latest` p
 - Keep the frozen model, effort, image, policy, timeout, manifest, and snapshot hashes unchanged while fixing the live response boundary.
 
 Verification: focused RED/GREEN tests prove that sensitive exception text cannot enter task artifacts, the complete HermesBench suite remains green, the source snapshots retain their pre-run hashes, the storage-only diagnostic identifies one viable boundary without persisting credentials or model text, and the next paid smoke reaches independent verification.
+
+## Current discovery-performance checkpoint
+
+- Treat paid diagnostic v10 as the first valid live baseline: the two-phase workflow completed and revalidated, but its single high-confidence candidate missed the advisory and was rejected by the fresh verifier.
+- Reject a prompt-only correction because the documented Hunt artifact sequence is not a host-validated completion condition.
+- Introduce a bounded internal discovery pool of at most 12 candidates while retaining the existing maximum of five final findings. Preserve a short blinded hypothesis, vulnerability family, search pass, evidence, counterevidence, and expected control with each candidate so the fresh verifier receives meaning rather than locations alone.
+- Add a deterministic Hunt artifact gate as the next logical unit. Bind inventory, frontier, coverage debt, normalized candidates, and candidate-to-frontier references to receipts instead of claiming that every file in a large repository was manually reviewed.
+- Keep the first performance experiment at two model invocations. Add complementary discovery scouts only for `hunt-max` if the richer packet and artifact gate still fail the fixed diagnostic.
+- Change one material variable per paid rerun and keep model, effort, image, policy, timeout, manifest, and snapshot hashes fixed.
+
+Verification: RED/GREEN tests prove that more than five internal candidates survive discovery, every packet is bounded and source-local, only five accepted findings can reach scoring, missing or mismatched Hunt evidence fails closed, and the fixed diagnostic improves recall before broader Canary or Mini promotion.

@@ -91,6 +91,11 @@
 
 ## Performance work
 
+- [x] Record a completed two-phase paid diagnostic baseline with separated token classes and post-run integrity evidence.
+- [ ] Preserve up to 12 bounded internal Hunt candidates with blinded hypothesis, family, pass, evidence, counterevidence, and expected-control fields.
+- [ ] Require one terminal verifier decision per internal candidate and project no more than five accepted findings to the public prediction contract.
+- [ ] Bind deterministic inventory, frontier, candidate references, and explicit coverage debt into the Hunt receipts.
+- [ ] Rerun the fixed single-task diagnostic with one material strategy change at a time.
 - [ ] Measure `hunt-balanced` and `hunt-max` on Canary.
 - [ ] Tune one material variable at a time on Mini.
 - [ ] Add safe caching and progressive-context reuse.
