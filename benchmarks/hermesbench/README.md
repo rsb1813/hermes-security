@@ -189,11 +189,53 @@ count match. The command never retries a top-level phase automatically.
 The comparison artifact includes the exact public artifact paths for both arms
 of every repeat, including a score path when host-side scoring was requested.
 
+## Build a reviewed corpus
+
+`corpus_builder.py` is a library-only preparation boundary. It takes a private,
+reviewed JSONL ledger plus pinned local Git repositories; it has no network
+code and invokes Git only with argument vectors to read object metadata, trees,
+and blobs. It never checks out a target revision or executes target repository
+code, tests, package managers, or hooks.
+
+A selected ledger row has an exact versioned shape. It binds one imported
+candidate identity, vulnerable and independently reviewed fixed commits, primary
+evidence, license identifier and blob hash, both tree IDs, language, anonymous
+group input, split, suites, time limit, explicit fixed retired-path locations,
+fixed-only comment redactions, and symmetric quarantine paths. The vulnerable
+gold path remains the single source of truth in the imported `CorpusCandidate`;
+the ledger does not duplicate it. An excluded row has only its version, terminal
+state, dataset revision, entry ID, and a concrete exclusion reason.
+
+Fixed comment redactions bind the fixed tree, complete original blob SHA-256,
+exact line or line range, and SHA-256 of the original selected line bytes. The
+builder accepts only language-appropriate comment-only lines, preserves line
+count and newline style with a fixed comment marker, and rejects overlaps with
+gold entry, root, trace, or retired-path locations. `quarantine_paths` must be
+present in both pinned trees and cannot contain any gold or root source file.
+They are excluded symmetrically before snapshot auditing. Files with `.patch` or
+`.diff` metadata extensions must be explicitly quarantined or the build fails.
+
+For every selected row, the builder requires exact local commit objects, exact
+tree IDs, the expected vulnerable-tree license blob hash, a strict
+vulnerable-to-fixed ancestry relationship, and a changed critical root file. It
+materializes only regular Git blobs into a builder-owned temporary directory,
+rejects unsafe paths, non-regular entries, case-fold collisions, source or
+advisory contamination, then publishes by same-parent atomic rename. Existing
+output roots are never overwritten.
+
+The resulting directory contains anonymous snapshot directories, an
+identity-free manifest and summary, and private oracle and provenance files.
+Keep the ledger, keys, built corpora, private oracles, provenance receipts, and
+run outputs outside Git. The repository ignore rules cover conventional paths
+under `benchmarks/hermesbench/`, but an external private storage location is
+still preferred.
+
 ## Current limits
 
-This foundation does not infer fixed commits, clone repositories, or materialize
-snapshots. Those corpus-preparation steps remain separate so fixed revisions
-can be reviewed rather than guessed.
+The builder intentionally does not infer fixed commits, clone repositories, or
+perform network access. It also does not reuse blobs with hard links: snapshots
+remain independent until a private materializer can add that optimization with
+equivalent audit and publication guarantees.
 
 HermesBench Mini is optimization evidence, not final proof. A final, release,
 or public performance claim always requires the full HermesBench. The first

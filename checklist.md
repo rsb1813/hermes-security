@@ -32,6 +32,11 @@
 - [x] Implement the strict reviewed VulnGym importer and keyed anonymous IDs.
 - [x] Add synthetic end-to-end fixtures.
 
+## Reviewed corpus preparation
+
+- [x] Build and test the generic reviewed-corpus materializer with synthetic Git fixtures.
+- [ ] Review real source provenance, create private ledger rows, and materialize real Canary or Mini snapshots.
+
 ## Standard baseline
 
 - [x] Define the strict model-adapter request, response, and task receipt contracts.

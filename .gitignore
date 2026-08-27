@@ -23,6 +23,10 @@ __pycache__/
 /benchmarks/hermesbench/private/
 /benchmarks/hermesbench/keys/
 /benchmarks/hermesbench/snapshots/
+/benchmarks/hermesbench/ledgers/
+/benchmarks/hermesbench/corpora/
+/benchmarks/hermesbench/oracles/
+/benchmarks/hermesbench/provenance/
 
 # Keep linked development worktrees outside the tracked tree.
 /.worktrees/

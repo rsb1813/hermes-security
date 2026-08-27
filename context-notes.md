@@ -161,3 +161,10 @@
 - Oracle scoring is a host-only callback over verification predictions. It cannot enter adapter requests, prompts, container inputs, or public artifacts; public results and comparison evidence name only identity-free score and phase artifact paths.
 - Windows `os.open` must include `O_BINARY` for the canonical candidate JSONL. Without it, the C runtime rewrites LF to CRLF and a strict byte-level candidate reconstruction check fails.
 - Final Task 6 verification passed 181 HermesBench Python tests with four platform skips, the focused Bun HermesBench bridge, Python bytecode compilation, and `git diff --check`. TypeScript lint and formatting could not start because this worktree lacks `tsc` and `prettier`; the broader Bun suite retains its known Windows credential ACL and missing `fast-check` environment failures.
+
+### Task 7 generic reviewed corpus builder
+
+- The generic builder consumes exact private ledger rows and pinned local Git objects only. It verifies commits, trees, ancestry, license blob hash, candidate identity, vulnerable gold lines, explicit fixed retired-path locations, and a changed critical root file before publication.
+- Vulnerable gold stays solely in `CorpusCandidate`; the ledger stores only the corresponding explicit fixed locations. Anonymous vulnerable, fixed, and group IDs use separate HMAC domains.
+- Fixed-only comment redactions bind tree, original blob hash, line range, and expected line bytes. They accept only comment-only lines, preserve line count and newline style, and reject gold/root/trace/retired-location overlaps. Explicit quarantine paths remove only non-gold files from both snapshots; `.patch` and `.diff` paths require quarantine.
+- The implementation uses independent snapshot copies rather than hard-link reuse. Real ledger rows, source caches, snapshots, oracles, and provenance receipts remain a main-owned private materialization step.
