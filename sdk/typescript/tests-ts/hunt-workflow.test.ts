@@ -36,7 +36,7 @@ function readJsonl<T>(path: string): T[] {
     .map((line) => JSON.parse(line) as T);
 }
 
-function runHunt(...args: string[]): ReturnType<typeof Bun.spawnSync> {
+function runHunt(...args: string[]) {
   return Bun.spawnSync([pythonExecutable(), "-B", huntScript, ...args], {
     cwd: pluginRoot,
     stdout: "pipe",
@@ -201,10 +201,7 @@ function completeClosures(rows: FrontierRow[]): ClosureRow[] {
   }));
 }
 
-function closeFrontier(
-  frontier: string,
-  closures: ClosureRow[],
-): { result: ReturnType<typeof Bun.spawnSync>; receipt: string } {
+function closeFrontier(frontier: string, closures: ClosureRow[]) {
   const root = temporaryRoot();
   const closurePath = join(root, "closures.jsonl");
   const receipt = join(root, "coverage-receipt.json");
@@ -266,7 +263,13 @@ test("keeps deferred review visible as coverage debt", () => {
   expect(closed.result.exitCode, closed.result.stderr.toString()).toBe(0);
   const receipt = JSON.parse(readFileSync(closed.receipt, "utf8")) as {
     deferred: number;
-    coverage_debt: { work_id: string; notes: string }[];
+    coverage_debt: {
+      work_id: string;
+      path: string;
+      component: string;
+      passes: string[];
+      notes: string;
+    }[];
   };
   expect(receipt.deferred).toBe(1);
   expect(receipt.coverage_debt).toEqual([
