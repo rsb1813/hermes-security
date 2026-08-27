@@ -94,6 +94,9 @@ python -m benchmarks.hermesbench score `
 Predictions are capped at five findings per task. The score reports pair
 localization F1, advisory recall, ordered trace-node F1, fixed-snapshot
 specificity, their published weighted composite, and provisional findings.
+It also reports the same aggregate metrics for each deterministically ordered
+split, so held-out performance remains available when the host public score
+excludes task-level details.
 
 ## Compare controlled runs
 
@@ -132,7 +135,7 @@ immutable lowercase digest, and its invocation budget is exactly two per task.
   "tool_versions": [["codex", "0.150.0-alpha.8"]],
   "time_limit_seconds": 300,
   "max_findings": 5,
-  "grader_version": "1",
+  "grader_version": "2",
   "phase_protocol_version": 1,
   "invocations_per_task": 2
 }

@@ -108,6 +108,99 @@ class LocationMatchingTests(unittest.TestCase):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_split_scores_preserve_unseen_split_metrics(self) -> None:
+        hidden_vulnerable = VULNERABLE_ORACLE | {"task_id": "hb-hidden-vulnerable"}
+        hidden_fixed = FIXED_ORACLE | {"task_id": "hb-hidden-fixed"}
+        rotating_vulnerable = VULNERABLE_ORACLE | {
+            "task_id": "hb-rotating-vulnerable",
+            "split": "rotating_audit",
+        }
+        rotating_fixed = FIXED_ORACLE | {
+            "task_id": "hb-rotating-fixed",
+            "split": "rotating_audit",
+        }
+        rotating_clean = FIXED_ORACLE | {
+            "task_id": "hb-rotating-clean",
+            "kind": "clean",
+            "split": "rotating_audit",
+            "retired_paths": [],
+        }
+        result = score_run(
+            {
+                oracle["task_id"]: parse_oracle(oracle)
+                for oracle in (
+                    hidden_vulnerable,
+                    hidden_fixed,
+                    rotating_vulnerable,
+                    rotating_fixed,
+                    rotating_clean,
+                )
+            },
+            {
+                "hb-hidden-vulnerable": parsed_prediction(
+                    "hb-hidden-vulnerable", [FINDING]
+                ),
+                "hb-hidden-fixed": parsed_prediction("hb-hidden-fixed", []),
+                "hb-rotating-vulnerable": parsed_prediction(
+                    "hb-rotating-vulnerable", []
+                ),
+                "hb-rotating-fixed": parsed_prediction("hb-rotating-fixed", [FINDING]),
+                "hb-rotating-clean": parsed_prediction("hb-rotating-clean", [FINDING]),
+            },
+        )
+
+        self.assertEqual(
+            tuple(task.split for task in result.tasks),
+            (
+                "hidden_test",
+                "hidden_test",
+                "rotating_audit",
+                "rotating_audit",
+                "rotating_audit",
+            ),
+        )
+        self.assertEqual(
+            tuple(score.split for score in result.split_scores),
+            ("hidden_test", "rotating_audit"),
+        )
+        hidden, rotating = result.split_scores
+        self.assertEqual(
+            (hidden.pair_true_positives, hidden.pair_false_positives, hidden.pair_false_negatives),
+            (1, 0, 0),
+        )
+        self.assertEqual(
+            (hidden.trace_true_positives, hidden.trace_false_positives, hidden.trace_false_negatives),
+            (1, 0, 0),
+        )
+        self.assertEqual(
+            (hidden.advisory_recall, hidden.fixed_snapshot_specificity, hidden.composite_score),
+            (1.0, 1.0, 1.0),
+        )
+        self.assertEqual(
+            (rotating.pair_true_positives, rotating.pair_false_positives, rotating.pair_false_negatives),
+            (0, 0, 1),
+        )
+        self.assertEqual(
+            (rotating.trace_true_positives, rotating.trace_false_positives, rotating.trace_false_negatives),
+            (0, 0, 1),
+        )
+        self.assertEqual(
+            (rotating.advisory_recall, rotating.fixed_snapshot_specificity, rotating.composite_score),
+            (0.0, 0.0, 0.0),
+        )
+        self.assertEqual(
+            (result.pair_true_positives, result.pair_false_positives, result.pair_false_negatives),
+            (1, 0, 1),
+        )
+        self.assertEqual(
+            (result.advisory_recall, result.fixed_snapshot_specificity, result.composite_score),
+            (0.5, 0.5, 0.6),
+        )
+        encoded = result.to_json()
+        self.assertEqual(encoded["split_scores"][0]["split"], "hidden_test")
+        self.assertNotIn("tasks", encoded["split_scores"][0])
+        json.dumps(encoded)
+
     def test_duplicate_predictions_do_not_inflate_pair_recall(self) -> None:
         duplicate = FINDING | {"finding_id": "f-2"}
         result = score_run(

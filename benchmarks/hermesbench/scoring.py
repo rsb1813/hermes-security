@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 
-from .contracts import Finding, GoldPath, Location, OracleTask, TaskPrediction
+from .contracts import Finding, GoldPath, Location, OracleTask, Split, TaskPrediction
 
 DEFAULT_LINE_TOLERANCE = 5
 
@@ -19,6 +19,7 @@ class TaskScore:
     task_id: str
     kind: str
     group_id: str
+    split: Split
     category: str
     pair_true_positives: int
     pair_false_positives: int
@@ -36,7 +37,7 @@ class TaskScore:
 
 
 @dataclass(frozen=True)
-class RunScore:
+class ScoreMetrics:
     pair_true_positives: int
     pair_false_positives: int
     pair_false_negatives: int
@@ -53,10 +54,20 @@ class RunScore:
     fixed_snapshot_specificity: float
     provisional_findings: int
     composite_score: float
-    tasks: tuple[TaskScore, ...]
 
     def to_json(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class SplitScore(ScoreMetrics):
+    split: Split
+
+
+@dataclass(frozen=True)
+class RunScore(ScoreMetrics):
+    tasks: tuple[TaskScore, ...]
+    split_scores: tuple[SplitScore, ...]
 
 
 @dataclass(frozen=True)
@@ -112,6 +123,27 @@ def score_run(
         for task_id, oracle in sorted(oracles.items())
     )
 
+    overall = _aggregate_metrics(task_scores)
+    split_scores = tuple(
+        SplitScore(
+            split=split,
+            **asdict(
+                _aggregate_metrics(
+                    tuple(task for task in task_scores if task.split == split)
+                )
+            ),
+        )
+        for split in sorted({task.split for task in task_scores})
+    )
+
+    return RunScore(
+        tasks=task_scores,
+        split_scores=split_scores,
+        **asdict(overall),
+    )
+
+
+def _aggregate_metrics(task_scores: tuple[TaskScore, ...]) -> ScoreMetrics:
     pair_true_positives = sum(task.pair_true_positives for task in task_scores)
     pair_false_positives = sum(task.pair_false_positives for task in task_scores)
     pair_false_negatives = sum(task.pair_false_negatives for task in task_scores)
@@ -134,7 +166,7 @@ def score_run(
         fixed_true_negatives / fixed_denominator if fixed_denominator else 1.0
     )
 
-    return RunScore(
+    return ScoreMetrics(
         pair_true_positives=pair_true_positives,
         pair_false_positives=pair_false_positives,
         pair_false_negatives=pair_false_negatives,
@@ -151,7 +183,6 @@ def score_run(
         fixed_snapshot_specificity=specificity,
         provisional_findings=provisional_findings,
         composite_score=_composite(pair_f1, advisory_recall, trace_f1, specificity),
-        tasks=task_scores,
     )
 
 
@@ -185,6 +216,7 @@ def _score_task(
             task_id=oracle.task_id,
             kind=oracle.kind,
             group_id=oracle.group_id,
+            split=oracle.split,
             category=oracle.category,
             pair_true_positives=pair_true_positives,
             pair_false_positives=len(prediction.findings) - pair_true_positives,
@@ -213,6 +245,7 @@ def _score_task(
             task_id=oracle.task_id,
             kind=oracle.kind,
             group_id=oracle.group_id,
+            split=oracle.split,
             category=oracle.category,
             pair_true_positives=0,
             pair_false_positives=0,
@@ -230,6 +263,7 @@ def _score_task(
         task_id=oracle.task_id,
         kind=oracle.kind,
         group_id=oracle.group_id,
+        split=oracle.split,
         category=oracle.category,
         pair_true_positives=0,
         pair_false_positives=0,
