@@ -25,7 +25,7 @@
 - [ ] Implement source and metadata sanitization.
 - [x] Implement paired endpoint and trace scoring.
 - [x] Implement fixed-negative and adjudication handling.
-- [ ] Implement reproducible run receipts and separated token accounting.
+- [x] Implement reproducible run receipts and separated token accounting.
 - [ ] Implement Canary, Mini, and Full manifest loaders.
 - [ ] Implement Mini-to-Full escalation decisions.
 - [ ] Add synthetic end-to-end fixtures.
