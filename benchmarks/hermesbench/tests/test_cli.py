@@ -98,6 +98,7 @@ def config() -> RunConfig:
     return RunConfig(
         manifest_sha256="a" * 64,
         task_order_sha256="b" * 64,
+        execution_policy_sha256="c" * 64,
         grader_version="0.1.0",
         model="gpt-test",
         reasoning_effort="medium",
@@ -110,7 +111,7 @@ def config() -> RunConfig:
 
 def receipt(workflow: str, run_config: RunConfig) -> RunReceipt:
     return RunReceipt(
-        schema_version=1,
+        schema_version=2,
         run_id=f"run-{workflow}",
         workflow=workflow,
         profile="baseline" if workflow == "standard" else "hunt-max",

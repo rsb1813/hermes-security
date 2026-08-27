@@ -9,7 +9,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Literal
 
-RECEIPT_SCHEMA_VERSION = 1
+RECEIPT_SCHEMA_VERSION = 2
 RunStatus = Literal["completed", "failed", "timeout", "contaminated"]
 _RUN_STATUSES = frozenset({"completed", "failed", "timeout", "contaminated"})
 
@@ -57,6 +57,7 @@ class TokenUsage:
 class RunConfig:
     manifest_sha256: str
     task_order_sha256: str
+    execution_policy_sha256: str
     grader_version: str
     model: str
     reasoning_effort: str
@@ -69,6 +70,7 @@ class RunConfig:
     def __post_init__(self) -> None:
         _require_sha256(self.manifest_sha256, "manifest_sha256")
         _require_sha256(self.task_order_sha256, "task_order_sha256")
+        _require_sha256(self.execution_policy_sha256, "execution_policy_sha256")
         _require_non_empty_string(self.grader_version, "grader_version")
         _require_non_empty_string(self.model, "model")
         _require_non_empty_string(self.reasoning_effort, "reasoning_effort")
@@ -95,6 +97,7 @@ class RunConfig:
         return {
             "manifest_sha256": self.manifest_sha256,
             "task_order_sha256": self.task_order_sha256,
+            "execution_policy_sha256": self.execution_policy_sha256,
             "grader_version": self.grader_version,
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
@@ -121,6 +124,7 @@ class RunConfig:
         return cls(
             manifest_sha256=data["manifest_sha256"],  # type: ignore[arg-type]
             task_order_sha256=data["task_order_sha256"],  # type: ignore[arg-type]
+            execution_policy_sha256=data["execution_policy_sha256"],  # type: ignore[arg-type]
             grader_version=data["grader_version"],  # type: ignore[arg-type]
             model=data["model"],  # type: ignore[arg-type]
             reasoning_effort=data["reasoning_effort"],  # type: ignore[arg-type]
@@ -191,6 +195,61 @@ class RunReceipt:
             config=RunConfig.from_json(data["config"]),
             elapsed_seconds=data["elapsed_seconds"],  # type: ignore[arg-type]
             status=data["status"],  # type: ignore[arg-type]
+            token_usage=TokenUsage.from_json(data["token_usage"]),
+        )
+
+
+@dataclass(frozen=True)
+class TaskRunReceipt:
+    schema_version: int
+    task_id: str
+    status: RunStatus
+    pre_snapshot_sha256: str
+    post_snapshot_sha256: str
+    elapsed_seconds: float
+    token_usage: TokenUsage
+
+    def __post_init__(self) -> None:
+        if isinstance(self.schema_version, bool) or self.schema_version != RECEIPT_SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {RECEIPT_SCHEMA_VERSION}")
+        _require_non_empty_string(self.task_id, "task_id")
+        if not isinstance(self.status, str) or self.status not in _RUN_STATUSES:
+            raise ValueError(f"unsupported run status: {self.status}")
+        _require_sha256(self.pre_snapshot_sha256, "pre_snapshot_sha256")
+        _require_sha256(self.post_snapshot_sha256, "post_snapshot_sha256")
+        if (
+            isinstance(self.elapsed_seconds, bool)
+            or not isinstance(self.elapsed_seconds, (int, float))
+            or not math.isfinite(self.elapsed_seconds)
+            or self.elapsed_seconds < 0
+        ):
+            raise ValueError("elapsed_seconds must be a finite non-negative number")
+        if not isinstance(self.token_usage, TokenUsage):
+            raise ValueError("token_usage must be a TokenUsage")
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "task_id": self.task_id,
+            "status": self.status,
+            "pre_snapshot_sha256": self.pre_snapshot_sha256,
+            "post_snapshot_sha256": self.post_snapshot_sha256,
+            "elapsed_seconds": self.elapsed_seconds,
+            "token_usage": self.token_usage.to_json(),
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> "TaskRunReceipt":
+        data = _require_object(value, "task receipt")
+        expected = {field.name for field in fields(cls)}
+        _require_exact_fields(data, expected, "task receipt")
+        return cls(
+            schema_version=data["schema_version"],  # type: ignore[arg-type]
+            task_id=data["task_id"],  # type: ignore[arg-type]
+            status=data["status"],  # type: ignore[arg-type]
+            pre_snapshot_sha256=data["pre_snapshot_sha256"],  # type: ignore[arg-type]
+            post_snapshot_sha256=data["post_snapshot_sha256"],  # type: ignore[arg-type]
+            elapsed_seconds=data["elapsed_seconds"],  # type: ignore[arg-type]
             token_usage=TokenUsage.from_json(data["token_usage"]),
         )
 

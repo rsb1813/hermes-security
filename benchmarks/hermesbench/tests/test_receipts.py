@@ -7,8 +7,10 @@ import unittest
 from pathlib import Path
 
 from benchmarks.hermesbench.receipts import (
+    RECEIPT_SCHEMA_VERSION,
     RunConfig,
     RunReceipt,
+    TaskRunReceipt,
     TokenUsage,
     comparison_mismatches,
     load_receipt,
@@ -20,6 +22,7 @@ from benchmarks.hermesbench.receipts import (
 CONFIG = RunConfig(
     manifest_sha256="a" * 64,
     task_order_sha256="b" * 64,
+    execution_policy_sha256="c" * 64,
     grader_version="0.1.0",
     model="gpt-test",
     reasoning_effort="medium",
@@ -34,7 +37,7 @@ USAGE = TokenUsage(
     output_tokens=90,
 )
 RECEIPT = RunReceipt(
-    schema_version=1,
+    schema_version=RECEIPT_SCHEMA_VERSION,
     run_id="run-001",
     workflow="standard",
     profile="baseline",
@@ -66,6 +69,12 @@ class TokenUsageTests(unittest.TestCase):
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_comparison_rejects_different_execution_policy(self) -> None:
+        hunt = CONFIG.replace(execution_policy_sha256="d" * 64)
+        self.assertEqual(
+            comparison_mismatches(CONFIG, hunt), ["execution_policy_sha256"]
+        )
+
     def test_comparison_rejects_different_reasoning_effort(self) -> None:
         hunt = CONFIG.replace(reasoning_effort="high")
         self.assertEqual(comparison_mismatches(CONFIG, hunt), ["reasoning_effort"])
@@ -85,6 +94,30 @@ class ComparisonTests(unittest.TestCase):
 
 
 class ReceiptSerializationTests(unittest.TestCase):
+    def test_task_receipt_records_terminal_status_and_snapshot_hashes(self) -> None:
+        receipt = TaskRunReceipt(
+            schema_version=RECEIPT_SCHEMA_VERSION,
+            task_id="task-001",
+            status="contaminated",
+            pre_snapshot_sha256="e" * 64,
+            post_snapshot_sha256="f" * 64,
+            elapsed_seconds=1.5,
+            token_usage=USAGE,
+        )
+
+        self.assertEqual(
+            receipt.to_json(),
+            {
+                "schema_version": 2,
+                "task_id": "task-001",
+                "status": "contaminated",
+                "pre_snapshot_sha256": "e" * 64,
+                "post_snapshot_sha256": "f" * 64,
+                "elapsed_seconds": 1.5,
+                "token_usage": USAGE.to_json(),
+            },
+        )
+
     def test_receipt_serialization_is_stable_and_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "receipt.json"
