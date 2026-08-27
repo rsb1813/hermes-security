@@ -21,7 +21,7 @@
 ## Benchmark foundation
 
 - [ ] Write failing tests for benchmark schemas and scorer behavior.
-- [ ] Implement benchmark schemas and prediction contracts.
+- [x] Implement benchmark schemas and prediction contracts.
 - [ ] Implement source and metadata sanitization.
 - [ ] Implement paired endpoint and trace scoring.
 - [ ] Implement fixed-negative and adjudication handling.
