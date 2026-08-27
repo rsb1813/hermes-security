@@ -35,7 +35,7 @@
 ## Standard baseline
 
 - [ ] Define the strict model-adapter request, response, and task receipt contracts.
-- [ ] Implement the snapshot-safe paired runner and deterministic fake Canary.
+- [x] Implement the snapshot-safe paired runner and deterministic fake Canary.
 - [ ] Implement and verify the hardened Docker execution boundary.
 - [ ] Connect one common Codex non-interactive adapter to Standard and Hunt.
 - [ ] Connect the benchmark runner to the unchanged Standard workflow.
