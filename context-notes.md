@@ -1,0 +1,75 @@
+# Hermes Security Context Notes
+
+## 2026-08-27
+
+### Repository state
+
+- The upstream repository is `openai/codex-security` under Apache-2.0.
+- The public fork is `rsb1813/hermes-security`.
+- Development uses an isolated local Git worktree.
+- `origin` points to the Hermes fork and `upstream` points to OpenAI.
+- Foundation work uses the branch `hermes/benchmark-foundation`.
+- The starting upstream commit is `fd98a9009b0a3a919b6cbce7c541b09d543dcaec`.
+
+### User intent
+
+- The main goal is materially higher vulnerability discovery quality.
+- Cost reduction remains useful, but it must not cap the maximum-performance path.
+- Hermes should validate candidates automatically and produce a draft report.
+- The benchmark must avoid exploit generation and offensive success criteria.
+- `HermesBench-mini` is for fast, economical iteration.
+- If Mini cannot distinguish configurations, the larger and more diverse `HermesBench` must decide.
+- The final-stage result always requires `HermesBench`, even when Mini appears decisive.
+
+### Evidence gathered
+
+- VulnGym v0.1.4 exposes human-review status and entry-point, critical-operation, and trace labels suitable for defensive localization scoring.
+- The inspected VulnGym data reports 393 human-reviewed entries out of 408 and covers 178 of 184 advisories.
+- The upstream evaluator emphasizes recall and endpoint tolerance, so Hermes adds precision-aware matching, trace scoring, fixed negatives, and adjudication.
+- IRIS demonstrates a useful architecture pattern that combines generated source and sink specifications, CodeQL paths, and model-based false-positive filtering.
+- Fuzz Introspector and OSS-Fuzz-Gen provide optional future signals for reachable sinks and coverage gaps; they are not first-milestone dependencies.
+- The bundled Codex Security plugin already contains deterministic rank-input generation, sharding, schema validation, merge receipts, and deep-review selection in `generate_rank_input.py`.
+
+### Design decisions
+
+- Standard remains unchanged and is the compatibility baseline.
+- Hunt is an experimental sibling workflow.
+- Ranking changes processing order but cannot permanently exclude low-ranked components.
+- Discovery searches both forward from low-trust entry points and backward from sensitive operations.
+- An independent verifier challenges each candidate before reporting.
+- Only accepted, deduplicated findings reach the draft report.
+- Public CLI and npm package names remain unchanged in the first milestone.
+- CodeQL, Fuzz Introspector, and OSS-Fuzz-Gen are optional adapters after the benchmark and core Hunt loop work.
+
+### Benchmark decisions
+
+- Mini uses 48 vulnerable entries split into 16 Public Dev, 16 Hidden Test, and 16 Rotating Audit entries, with an eight-entry Canary subset.
+- Every Mini vulnerable snapshot has an anonymously fixed negative, for 96 evaluated snapshots in a complete run.
+- Public Dev and Canary are diagnostic only; promotion statistics use unseen Hidden Test and Rotating Audit groups.
+- Full uses every eligible deduplicated VulnGym `verify=1` case, matched fixed negatives, curated clean controls, and compatible diversity lanes.
+- Full is not ready for a final claim below 144 vulnerable tasks or without adding previously absent cases on at least three diversity axes.
+- Splits are grouped by repository and advisory to reduce leakage.
+- The agent never receives labels, patches, advisory IDs, commit history, PoCs, or flags.
+- Predictions are capped at five findings per task.
+- The primary score combines pair localization F1, advisory recall, trace-node F1, and fixed-snapshot specificity.
+- Paired comparisons hold task, model, effort, seed support, tools, time, and grader constant.
+- Cached input, uncached input, and output tokens are recorded separately.
+
+### Escalation decision
+
+- Full is mandatory for final or release evidence.
+- Full is triggered when the paired confidence interval includes zero, the Hidden Test gain is below two additional localized advisories, repeat winners are unstable, a category recall regression exceeds five percentage points, or comparison semantics changed.
+- The two-of-sixteen rule is an iteration heuristic. It is not treated as statistical proof.
+
+### Public and private boundary
+
+- Public code may include builders, schemas, scorers, synthetic fixtures, safe aggregate results, and reviewed Public Dev metadata.
+- Hidden oracles, generated third-party snapshots, customer code, private findings, credentials, and account-specific logs are never committed.
+- Corpus preparation may use pinned public network sources, but evaluation is offline.
+
+### Open implementation questions
+
+- Confirm the narrowest integration point for invoking Hunt without changing the public CLI.
+- Confirm the exact VulnGym revision and eligible corpus count during corpus preparation.
+- Decide whether the first runner adapter invokes the existing CLI, plugin skill, or internal SDK after reading the actual call boundaries.
+- Decide which optional diversity lane is reproducible enough for the first full edition.
