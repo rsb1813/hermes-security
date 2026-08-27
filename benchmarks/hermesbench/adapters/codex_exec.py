@@ -348,11 +348,12 @@ def _command_argv(
     config = (
         "project_doc_max_bytes=0",
         'approval_policy="never"',
-        "sandbox_workspace_write.network_access=false",
+        'permissions.hermesbench={filesystem={":minimal"="read","/workspace/snapshot"="read","/workspace/plugin"="read","/workspace/scratch"="write","/tmp/hb-runtime-*"="deny"},network={enabled=false}}',
+        'default_permissions="hermesbench"',
         'web_search="disabled"',
         "allow_login_shell=false",
         'shell_environment_policy.inherit="none"',
-        'shell_environment_policy.set={PATH="/usr/local/bin:/usr/bin:/bin",HOME="/tmp/hermesbench",LANG="C.UTF-8",LC_ALL="C.UTF-8",TERM="dumb",TMPDIR="/tmp"}',
+        'shell_environment_policy.set={PATH="/usr/local/bin:/usr/bin:/bin",HOME="/workspace/scratch",LANG="C.UTF-8",LC_ALL="C.UTF-8",TERM="dumb",TMPDIR="/workspace/scratch"}',
         "features.multi_agent=false",
         f'model_reasoning_effort="{reasoning_effort}"',
     )
@@ -384,8 +385,6 @@ def _command_argv(
             _SCHEMA_PATH,
             "--model",
             model,
-            "--sandbox",
-            "workspace-write",
             "--cd",
             "/workspace/scratch",
             prompt,

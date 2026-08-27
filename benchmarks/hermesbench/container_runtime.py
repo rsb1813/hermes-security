@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
@@ -16,6 +17,8 @@ _CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z")
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 _DOCKER_CLI_TIMEOUT_SECONDS = 15
 MAX_CONFIDENTIAL_STDIN_BYTES = 16 * 1024
+_SECCOMP_PROFILE_PATH = Path(__file__).parent / "containers" / "seccomp-hermesbench.json"
+_SECCOMP_PROFILE_SHA256 = "be61bd3d6278d6cf5c5a78ae68a8b6d483d0d23f98dc7edaf47a9f01d20a5943"
 
 
 class ContainerRuntimeError(RuntimeError):
@@ -140,6 +143,7 @@ class ContainerRuntime:
         command: tuple[str, ...],
         interactive: bool = False,
     ) -> str:
+        seccomp_profile = _resolve_seccomp_profile()
         argv = [
             self._docker_binary,
             "create",
@@ -148,6 +152,8 @@ class ContainerRuntime:
             "10001:10001",
             "--cap-drop",
             "ALL",
+            "--security-opt",
+            f"seccomp={seccomp_profile}",
             "--security-opt",
             "no-new-privileges:true",
             "--ipc",
@@ -286,6 +292,29 @@ def _resolve_mount_source(value: Path, name: str) -> Path:
     _assert_safe_path_components(resolved, name)
     if "," in str(resolved):
         raise ContainerRuntimeError(f"{name} cannot contain a comma")
+    return resolved
+
+
+def _resolve_seccomp_profile() -> Path:
+    """Returns the immutable production seccomp profile after fail-closed validation."""
+    try:
+        original = _SECCOMP_PROFILE_PATH.absolute()
+    except OSError as exc:
+        raise ContainerRuntimeError("seccomp profile cannot be inspected") from exc
+    _assert_safe_path_components(original, "seccomp profile")
+    try:
+        resolved = _SECCOMP_PROFILE_PATH.resolve(strict=True)
+    except OSError as exc:
+        raise ContainerRuntimeError("seccomp profile cannot be resolved") from exc
+    if not resolved.is_file():
+        raise ContainerRuntimeError("seccomp profile must be a regular file")
+    _assert_safe_path_components(resolved, "seccomp profile")
+    try:
+        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise ContainerRuntimeError("seccomp profile cannot be inspected") from exc
+    if digest != _SECCOMP_PROFILE_SHA256:
+        raise ContainerRuntimeError("seccomp profile is invalid")
     return resolved
 
 

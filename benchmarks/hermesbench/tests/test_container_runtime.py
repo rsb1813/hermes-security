@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import stat
@@ -155,6 +156,7 @@ class ContainerRuntimeTests(unittest.TestCase):
             resolved_scratch = str(scratch.resolve())
             expected_create = [
                 "docker", "create", "--read-only", "--user", "10001:10001", "--cap-drop", "ALL",
+                "--security-opt", f"seccomp={container_runtime._SECCOMP_PROFILE_PATH.resolve()}",
                 "--security-opt", "no-new-privileges:true", "--ipc", "private",
                 "--cgroupns", "private", "--pids-limit", "128", "--memory", "512m", "--cpus", "1.0",
                 "--shm-size", "64m", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777",
@@ -175,6 +177,38 @@ class ContainerRuntimeTests(unittest.TestCase):
             for _argv, kwargs in calls:
                 self.assertIs(kwargs["shell"], False)
             self.assertIs(popen.call_args.kwargs["shell"], False)
+
+    def test_rejects_missing_tampered_or_linked_seccomp_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = root / "seccomp.json"
+            with patch.object(container_runtime, "_SECCOMP_PROFILE_PATH", profile):
+                with self.assertRaisesRegex(ContainerRuntimeError, "cannot be inspected"):
+                    container_runtime._resolve_seccomp_profile()
+            profile.write_text('{"defaultAction":"SCMP_ACT_ERRNO"}', encoding="utf-8")
+            expected_sha256 = hashlib.sha256(profile.read_bytes()).hexdigest()
+            with patch.object(container_runtime, "_SECCOMP_PROFILE_PATH", profile), patch.object(
+                container_runtime, "_SECCOMP_PROFILE_SHA256", expected_sha256
+            ):
+                self.assertEqual(container_runtime._resolve_seccomp_profile(), profile.resolve())
+
+            profile.write_text('{"defaultAction":"SCMP_ACT_ALLOW"}', encoding="utf-8")
+            with patch.object(container_runtime, "_SECCOMP_PROFILE_PATH", profile), patch.object(
+                container_runtime, "_SECCOMP_PROFILE_SHA256", expected_sha256
+            ):
+                with self.assertRaisesRegex(ContainerRuntimeError, "seccomp profile is invalid"):
+                    container_runtime._resolve_seccomp_profile()
+
+            linked = root / "linked-seccomp.json"
+            try:
+                linked.symlink_to(profile)
+            except OSError:
+                self.skipTest("symbolic links are unavailable on this platform")
+            with patch.object(container_runtime, "_SECCOMP_PROFILE_PATH", linked), patch.object(
+                container_runtime, "_SECCOMP_PROFILE_SHA256", hashlib.sha256(profile.read_bytes()).hexdigest()
+            ):
+                with self.assertRaisesRegex(ContainerRuntimeError, "link or junction"):
+                    container_runtime._resolve_seccomp_profile()
 
     def test_confidential_stdin_is_limited_to_interactive_attach(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -897,6 +931,85 @@ class DockerIsolationSmokeTests(unittest.TestCase):
             receipt,
             receipt_forbidden_values,
         )
+
+    def test_named_permission_profile_denies_auth_source_writes_and_network(self) -> None:
+        image_ref = "hermesbench-runtime-task5-local:latest"
+        with tempfile.TemporaryDirectory() as directory, _local_sentinel() as (host, port, connected):
+            root = Path(directory)
+            snapshot, plugin, scratch = ContainerRuntimeTests()._paths(root)
+            (snapshot / "source.py").write_text("value = 1\n", encoding="utf-8")
+            (scratch / "mount-target").mkdir()
+            child = plugin / "assert_named_permissions.py"
+            child.write_text(
+                "\n".join(
+                    (
+                        "import socket",
+                        "from pathlib import Path",
+                        "scratch = Path('/workspace/scratch')",
+                        "Path('/workspace/snapshot/source.py').read_text(encoding='utf-8')",
+                        "Path('/workspace/plugin/launch-sandbox.sh').read_text(encoding='utf-8')",
+                        "(scratch / 'named-profile-scratch-write').write_text('ok', encoding='utf-8')",
+                        "def denied(marker, operation):",
+                        "    try:",
+                        "        operation()",
+                        "    except OSError:",
+                        "        (scratch / marker).write_text('denied', encoding='utf-8')",
+                        "        return",
+                        "    raise SystemExit(marker)",
+                        "denied('named-profile-snapshot-write-denied', lambda: Path('/workspace/snapshot/new').write_text('x'))",
+                        "denied('named-profile-plugin-write-denied', lambda: Path('/workspace/plugin/new').write_text('x'))",
+                        "denied('named-profile-root-write-denied', lambda: Path('/usr/local/bin/hb-root-write').write_text('x'))",
+                        "denied('named-profile-auth-direct-denied', lambda: Path('/tmp/hb-runtime-sentinel/auth.json').read_text())",
+                        "denied('named-profile-auth-dotdot-denied', lambda: Path('/tmp/hb-runtime-sentinel/../hb-runtime-sentinel/auth.json').read_text())",
+                        f"denied('named-profile-network-denied', lambda: socket.create_connection(({host!r}, {port}), timeout=2).close())",
+                    )
+                ) + "\n",
+                encoding="utf-8",
+            )
+            launcher = plugin / "launch-sandbox.sh"
+            launcher.write_bytes(
+                "\n".join(
+                    (
+                        "#!/bin/sh",
+                        "set -eu",
+                        "mkdir -p /tmp/hb-runtime-sentinel",
+                        "printf sentinel > /tmp/hb-runtime-sentinel/auth.json",
+                        "exec codex sandbox -c 'permissions.hermesbench={filesystem={\":minimal\"=\"read\",\"/workspace/snapshot\"=\"read\",\"/workspace/plugin\"=\"read\",\"/workspace/scratch\"=\"write\",\"/tmp/hb-runtime-*\"=\"deny\"},network={enabled=false}}' -c 'default_permissions=\"hermesbench\"' -P hermesbench -C /workspace/scratch -- python3 /workspace/plugin/assert_named_permissions.py",
+                    )
+                ).encode("utf-8") + b"\n",
+            )
+            runtime = ContainerRuntime(image_ref)
+            self.assertEqual(
+                runtime.execute(snapshot, scratch, plugin, ("unshare", "--user", "--map-root-user", "/bin/true"), 20).exit_code,
+                0,
+            )
+            self.assertNotEqual(
+                runtime.execute(snapshot, scratch, plugin, ("unshare", "--mount", "/bin/true"), 20).exit_code,
+                0,
+            )
+            self.assertNotEqual(
+                runtime.execute(snapshot, scratch, plugin, ("unshare", "--user", "--map-root-user", "--mount", "/bin/true"), 20).exit_code,
+                0,
+            )
+            self.assertNotEqual(
+                runtime.execute(snapshot, scratch, plugin, ("mount", "-t", "tmpfs", "tmpfs", "/workspace/scratch/mount-target"), 20).exit_code,
+                0,
+            )
+            result = runtime.execute(
+                snapshot, scratch, plugin, ("sh", "/workspace/plugin/launch-sandbox.sh"), 30
+            )
+            self.assertEqual(result.exit_code, 0, result.stderr.decode("utf-8", errors="replace"))
+            for marker in (
+                "named-profile-scratch-write",
+                "named-profile-snapshot-write-denied",
+                "named-profile-plugin-write-denied",
+                "named-profile-root-write-denied",
+                "named-profile-auth-direct-denied",
+                "named-profile-auth-dotdot-denied",
+                "named-profile-network-denied",
+            ):
+                self.assertTrue((scratch / marker).is_file(), marker)
+            self.assertFalse(connected.wait(1), "named sandbox child reached the host sentinel")
 
 
 class _local_sentinel:

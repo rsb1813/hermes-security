@@ -219,14 +219,18 @@ class CodexExecAdapterTests(unittest.TestCase):
             json.loads(hunt["confidential_stdin"])["auth"]["tokens"],
         )
         self.assertTrue(all(flag in standard_command for flag in ("--ephemeral", "--json", "--output-schema", "--strict-config", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check")))
+        self.assertNotIn("--sandbox", standard_command)
+        self.assertNotIn("workspace-write", standard_command)
         self.assertIn("features.multi_agent=false", standard_command)
         for value in (
             "project_doc_max_bytes=0",
             'approval_policy="never"',
-            "sandbox_workspace_write.network_access=false",
+            'permissions.hermesbench={filesystem={":minimal"="read","/workspace/snapshot"="read","/workspace/plugin"="read","/workspace/scratch"="write","/tmp/hb-runtime-*"="deny"},network={enabled=false}}',
+            'default_permissions="hermesbench"',
             'web_search="disabled"',
             "allow_login_shell=false",
             'shell_environment_policy.inherit="none"',
+            'shell_environment_policy.set={PATH="/usr/local/bin:/usr/bin:/bin",HOME="/workspace/scratch",LANG="C.UTF-8",LC_ALL="C.UTF-8",TERM="dumb",TMPDIR="/workspace/scratch"}',
         ):
             self.assertIn(value, standard_command)
         for feature in ("apps", "browser_use", "computer_use", "enable_mcp_apps", "hooks", "plugins", "skill_search", "tool_search", "tool_suggest"):

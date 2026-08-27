@@ -53,6 +53,11 @@
 - [x] Connect one common Codex non-interactive adapter to Standard and Hunt.
   - [x] Verify host `codex exec --output-schema` acceptance for the pinned prediction schema.
   - [x] Complete the managed-auth container model smoke with a valid public result.
+  - [x] Preserve the Docker default seccomp boundary while enabling the pinned Codex internal sandbox.
+  - [x] Deny tool access to the private authentication runtime with a named permission profile.
+  - [x] Extend and verify the bounded two-reader authentication handshake.
+  - [x] Rebuild the pinned image and pass the exact no-model filesystem and network boundary smoke.
+  - [ ] Complete a fresh paid Canary smoke without retaining confidential output.
 - [x] Implement paired discovery and verification runner.
   - [x] Record focused RED evidence.
   - [x] Bind canonical candidate transfer and independently auditable phase receipts.

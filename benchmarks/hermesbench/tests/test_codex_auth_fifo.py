@@ -517,7 +517,7 @@ class CodexAuthFifoTests(unittest.TestCase):
 
     def test_handshake_deadline_is_bounded_and_missing_reader_fails_closed(self) -> None:
         wrapper = _load_wrapper()
-        self.assertEqual(wrapper._READER_DEADLINE_SECONDS, 30.0)
+        self.assertEqual(wrapper._READER_DEADLINE_SECONDS, 60.0)
         with tempfile.TemporaryDirectory() as directory:
             feeder = wrapper.AuthFifoFeeder(Path(directory) / "missing-auth-reader", b"payload")
             try:
