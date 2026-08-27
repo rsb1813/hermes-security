@@ -83,6 +83,7 @@
 - Hunt will initially enter through a standalone bundled skill because adding it to `ScanMode` would change the public CLI and SDK contracts.
 - The pre-change TypeScript baseline on Windows completed with 1,800 passing, 63 skipped, and 79 failing tests. The failures are dominated by credential-home ACL checks and unavailable symlink creation, with one CLI color test timeout, so HermesBench validation must use focused tests while retaining this baseline as environmental evidence.
 - HermesBench contracts use schema version `1`, exact top-level field sets, repository-relative normalized locations, immutable parsed objects, a five-finding cap, and task-kind-specific oracle invariants.
+- Scoring uses bounded one-to-one endpoint matching, ordered trace LCS credit, advisory-level recall, and per-fixed-snapshot specificity. Findings unrelated to the retired path remain provisional instead of becoming automatic false positives.
 - The current deterministic repository inventory, rank shards, bounded worker plan, validation, and merge commands can be reused without modifying `generate_rank_input.py`.
 - `select-deep-review-input` is not suitable for Hunt coverage because its top-percent behavior can discard low-ranked files. Hunt must preserve the whole inventory and use ranking only for processing order.
 - The locally inspected VulnGym revision is `cd69f7e163e08485ab5496115ae03439cda6e27e`.

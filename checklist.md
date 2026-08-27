@@ -20,11 +20,11 @@
 
 ## Benchmark foundation
 
-- [ ] Write failing tests for benchmark schemas and scorer behavior.
+- [x] Write failing tests for benchmark schemas and scorer behavior.
 - [x] Implement benchmark schemas and prediction contracts.
 - [ ] Implement source and metadata sanitization.
-- [ ] Implement paired endpoint and trace scoring.
-- [ ] Implement fixed-negative and adjudication handling.
+- [x] Implement paired endpoint and trace scoring.
+- [x] Implement fixed-negative and adjudication handling.
 - [ ] Implement reproducible run receipts and separated token accounting.
 - [ ] Implement Canary, Mini, and Full manifest loaders.
 - [ ] Implement Mini-to-Full escalation decisions.
