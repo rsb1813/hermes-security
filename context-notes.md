@@ -175,3 +175,11 @@
 - Comment redactions rewrite only fixed snapshot bytes, so their protected coordinates are exactly `fixed_locations`. Vulnerable gold lines remain the vulnerable oracle source and must not block a reviewed non-retired fixed comment merely because a line number matches after the fix shifts code.
 - Corpus publication stages under `output_root.parent` with the fixed short `.hb-` prefix. Windows real corpus builds should use a short external root outside the repository; no source path is removed or shortened to compensate for host path-length limits.
 - Builder Git subprocesses scrub inherited `GIT_*` state and then force `GIT_NO_LAZY_FETCH=1`. Missing partial-clone objects now fail locally instead of invoking a promisor remote; real corpus preparation must hydrate objects or use a full clone beforehand.
+
+### Task 8 real corpus and live-run readiness
+
+- The real Canary contains four reviewed vulnerable/fixed pairs and eight snapshots. Independent post-build verification found zero bundle-audit violations and exact tree-hash matches for all eight snapshots.
+- The current Mini materialization target is a 24-pair, 48-snapshot Public Dev calibration slice. It is not the complete 48-pair, 96-snapshot Mini and cannot support a promotion or final performance claim until Hidden Test and Rotating Audit groups are added.
+- One calibration row was rejected because its reviewed vulnerable and fixed commits were on divergent branches. The strict-descendant invariant remained unchanged, and a previously reviewed Canary Python path-traversal pair was promoted into the Mini subset to preserve task count, language balance, and vulnerability-family coverage.
+- Live Hunt CLI runs now fail before adapter creation unless the execution policy contains the exact read-only `rg` prefix and all six bundled Hunt helper prefixes. Standard-only runs retain their independent minimal-policy behavior.
+- Score schema version 2 preserves deterministic per-split aggregates after task-level details are removed from the host-visible score. Overall scalar fields remain backward compatible, and cached input, uncached input, and output usage remain separate.

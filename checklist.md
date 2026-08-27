@@ -40,7 +40,7 @@
 - [x] Apply fixed-comment redactions only against fixed-tree retired-path coordinates.
 - [x] Use short sibling corpus stage paths for Windows materialization budgets.
 - [x] Disable Git lazy fetches so missing partial-clone objects fail closed.
-- [ ] Review real source provenance, create private ledger rows, and materialize real Canary or Mini snapshots.
+- [x] Review real source provenance, create private ledger rows, and materialize real Canary or Mini snapshots.
 
 ## Standard baseline
 
@@ -57,7 +57,7 @@
   - [x] Record focused RED evidence.
   - [x] Bind canonical candidate transfer and independently auditable phase receipts.
   - [x] Verify single-workflow and exact seedless AB/BA/AB paired execution.
-- [ ] Connect the benchmark runner to the unchanged Standard workflow.
+- [x] Connect the benchmark runner to the unchanged Standard workflow.
 - [ ] Run and verify Canary.
 - [ ] Freeze the Mini task manifest and configuration.
 - [ ] Run the Standard Mini baseline.
