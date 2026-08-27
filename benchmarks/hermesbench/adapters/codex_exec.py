@@ -57,10 +57,8 @@ _CHILD_FAILURE_PREFIX = b"hermesbench-child-category:"
 _SETUP_FAILURE_STAGES = (
     "setup_invalid_args",
     "setup_invalid_payload",
-    "setup_fifo",
+    "setup_auth_runtime",
     "setup_child_start",
-    "setup_feeder",
-    "setup_child_zero_before_readers",
     "setup_wrapper_os_error",
 )
 _SETUP_FAILURE_PREFIX = b"hermesbench-setup-stage:"
@@ -69,7 +67,7 @@ _MAX_ERROR_JSON_DEPTH = 4
 _STANDARD_SKILL = "/workspace/plugin/skills/security-scan/SKILL.md"
 _HUNT_SKILL = "/workspace/plugin/skills/hunt-security-scan/SKILL.md"
 _SCHEMA_PATH = "/workspace/schema/prediction-response.schema.json"
-_WRAPPER_PATH = "/usr/local/bin/codex_auth_fifo.py"
+_WRAPPER_PATH = "/usr/local/bin/codex_auth_runtime.py"
 _FINAL_RESPONSE_CONTAINER_PATH = "/workspace/scratch/final-response.json"
 _FINAL_RESPONSE_NAME = "final-response.json"
 _MAX_FINAL_RESPONSE_BYTES = 256 * 1024
@@ -380,7 +378,7 @@ def _command_argv(
         "tool_search",
         "tool_suggest",
     )
-    argv: list[str] = ["python3", _WRAPPER_PATH, "--auth-readers", "2", "--", "codex", "exec", "--ephemeral", "--json"]
+    argv: list[str] = ["python3", _WRAPPER_PATH, "--", "codex", "exec", "--ephemeral", "--json"]
     for entry in config:
         argv.extend(("-c", entry))
     for feature in disabled:

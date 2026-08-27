@@ -13,10 +13,10 @@ RUN apt-get update \
     && codex --version \
     && npm cache clean --force
 
-COPY containers/codex_auth_fifo.py /usr/local/bin/codex_auth_fifo.py
+COPY containers/codex_auth_runtime.py /usr/local/bin/codex_auth_runtime.py
 COPY schemas/prediction-response.schema.json /workspace/schema/prediction-response.schema.json
 
-RUN chmod 0755 /usr/local/bin/codex_auth_fifo.py \
+RUN chmod 0755 /usr/local/bin/codex_auth_runtime.py \
     && chmod 0444 /workspace/schema/prediction-response.schema.json
 
 RUN groupadd --gid 10001 hermesbench \

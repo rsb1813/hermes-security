@@ -61,10 +61,8 @@ _PUBLIC_FAILURE_CODES = frozenset(
         "child_unknown",
         "setup_invalid_args",
         "setup_invalid_payload",
-        "setup_fifo",
+        "setup_auth_runtime",
         "setup_child_start",
-        "setup_feeder",
-        "setup_child_zero_before_readers",
         "setup_wrapper_os_error",
     }
 )

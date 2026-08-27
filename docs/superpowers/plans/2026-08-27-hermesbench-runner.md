@@ -112,6 +112,8 @@
 
 ### Task 5: Codex non-interactive adapter
 
+> Historical note: this task records the initial FIFO-based implementation plan. The later live auth-boundary diagnostic established that a private tmpfs regular file is required, and the current implementation is documented in `context-notes.md`.
+
 **Files:**
 - Modify: `benchmarks/hermesbench/container_runtime.py`
 - Modify: `benchmarks/hermesbench/tests/test_container_runtime.py`

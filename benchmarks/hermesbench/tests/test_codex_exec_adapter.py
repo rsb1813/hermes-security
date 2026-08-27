@@ -230,10 +230,10 @@ class CodexExecAdapterTests(unittest.TestCase):
         standard_command = standard["command_argv"]
         hunt_command = hunt["command_argv"]
         self.assertEqual(
-            standard_command[:5],
-            ("python3", "/usr/local/bin/codex_auth_fifo.py", "--auth-readers", "2", "--"),
+            standard_command[:3],
+            ("python3", "/usr/local/bin/codex_auth_runtime.py", "--"),
         )
-        self.assertEqual(hunt_command[:5], standard_command[:5])
+        self.assertEqual(hunt_command[:3], standard_command[:3])
         self.assertIn("/workspace/plugin/skills/security-scan/SKILL.md", standard_command[-1])
         self.assertIn("/workspace/plugin/skills/hunt-security-scan/SKILL.md", hunt_command[-1])
         self.assertIn("hunt-balanced", hunt_command[-1])
@@ -607,17 +607,17 @@ class CodexExecAdapterTests(unittest.TestCase):
         setup_runtime = _Runtime(
             b"",
             exit_code=2,
-            stderr=b"hermesbench-setup-stage:setup_fifo\n",
+            stderr=b"hermesbench-setup-stage:setup_auth_runtime\n",
         )
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as setup_error:
                 self._adapter("standard", "baseline", setup_runtime)(_request(), Path(directory), 60)
-        self.assertEqual(str(setup_error.exception), "container execution failed: setup_fifo")
+        self.assertEqual(str(setup_error.exception), "container execution failed: setup_auth_runtime")
 
         malformed_setup_runtime = _Runtime(
             b"",
             exit_code=2,
-            stderr=b"hermesbench-setup-stage:setup_fifo\ncredential-sentinel",
+            stderr=b"hermesbench-setup-stage:setup_auth_runtime\ncredential-sentinel",
         )
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as malformed_setup_error:
