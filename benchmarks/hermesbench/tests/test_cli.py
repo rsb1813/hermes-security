@@ -300,7 +300,7 @@ class RunCommandTests(unittest.TestCase):
                 "schema_version": 1, "model": "fake", "reasoning_effort": "low",
                 "seed_supported": True, "seed": "1", "image_digest": "sha256:" + "a" * 64,
                 "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
-                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
+                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1, "hunt_candidate_protocol_version": 1,
                 "invocations_per_task": 2,
             })
             write_json(policy, {"allowed_command_prefixes": [["rg"]]})
@@ -352,7 +352,7 @@ class RunCommandTests(unittest.TestCase):
                 "schema_version": 1, "model": "fake", "reasoning_effort": "low",
                 "seed_supported": True, "seed": "1", "image_digest": "sha256:" + "a" * 64,
                 "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
-                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
+                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1, "hunt_candidate_protocol_version": 1,
                 "invocations_per_task": 2,
             })
             write_json(policy, {"allowed_command_prefixes": [["python"]]})
@@ -397,7 +397,7 @@ class RunCommandTests(unittest.TestCase):
                 "schema_version": 1, "model": "fake", "reasoning_effort": "low",
                 "seed_supported": False, "seed": None, "image_digest": "sha256:" + "a" * 64,
                 "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
-                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
+                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1, "hunt_candidate_protocol_version": 1,
                 "invocations_per_task": 2,
             })
             write_json(policy, {"allowed_command_prefixes": HUNT_READ_ONLY_COMMAND_PREFIXES})

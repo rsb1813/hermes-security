@@ -69,6 +69,7 @@ def _controls() -> FrozenControls:
             "max_findings": 5,
             "grader_version": "test",
             "phase_protocol_version": 1,
+            "hunt_candidate_protocol_version": 1,
             "invocations_per_task": 2,
         }
     )
@@ -434,7 +435,7 @@ class WorkflowTests(unittest.TestCase):
             predictions = [json.loads(line) for line in predictions_path.read_text(encoding="utf-8").splitlines()]
             predictions[0]["findings"][0]["entry_point"]["line"] = 2
             predictions_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in predictions), encoding="utf-8")
-            with self.assertRaisesRegex(PhaseRunnerError, "transferred candidate"):
+            with self.assertRaisesRegex(PhaseRunnerError, "verification predictions hash"):
                 validate_workflow_receipt(
                     manifest,
                     root / "snapshots",
@@ -462,11 +463,32 @@ class WorkflowTests(unittest.TestCase):
                     return ExecutorResult(response, ({"event": "done"},), ())
                 return verification
 
+            def hunt_executor(request: object, *_: object) -> ExecutorResult:
+                candidate = _prediction(request.task_id)["prediction"]["findings"][0]
+                candidate |= {
+                    "vulnerability_family": "injection", "search_pass": "forward_trace",
+                    "hypothesis": "Input reaches the operation.", "evidence": "Trace exists.",
+                    "counterevidence": "No guard found.", "expected_control": "Validate input.",
+                }
+                return ExecutorResult(
+                    {"prediction": {"schema_version": 1, "task_id": request.task_id, "candidates": [candidate]}, "usage": _prediction(request.task_id)["usage"]},
+                    ({"event": "done"},), (),
+                )
+
+            def hunt_factory(candidate_sets: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    candidate = candidate_sets[request.task_id][0]
+                    finding = _prediction(request.task_id)["prediction"]["findings"][0]
+                    finding["finding_id"] = candidate.candidate_id
+                    decision = {"candidate_id": candidate.candidate_id, "disposition": "accepted", "attacker_control": "proven", "reachability": "proven", "impact": "proven", "guard_failure": "proven", "evidence": "Confirmed.", "counterevidence": "", "proof_gaps": "", "confidence": 0.9}
+                    return ExecutorResult({"prediction": {"schema_version": 1, "task_id": request.task_id, "findings": [finding], "decisions": [decision]}, "usage": _prediction(request.task_id)["usage"]}, ({"event": "done"},), ())
+                return verification
+
             paired = run_paired(
                 manifest, root / "snapshots", outputs, "paired", _controls(),
                 ExecutionPolicy((("python",),)),
-                {"standard": executor, "hunt": executor},
-                {"standard": factory, "hunt": factory},
+                {"standard": executor, "hunt": hunt_executor},
+                {"standard": factory, "hunt": hunt_factory},
                 {"standard": "baseline", "hunt": "hunt-balanced"},
             )
             comparison_artifact = json.loads((outputs / "paired-comparison.json").read_text(encoding="utf-8"))

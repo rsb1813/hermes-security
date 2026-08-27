@@ -13,6 +13,15 @@ from dataclasses import dataclass, fields
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .contracts import BenchmarkManifest, Finding, Location, TaskPrediction, parse_prediction
+from .hunt_protocol import (
+    HUNT_CANDIDATE_PROTOCOL_VERSION,
+    HUNT_DISCOVERY_MAX_CANDIDATES,
+    HuntDiscoveryCandidate,
+    HuntProtocolError,
+    HuntTerminalDecision,
+    parse_hunt_discovery_prediction,
+    parse_hunt_verification_prediction,
+)
 from .receipts import (
     RECEIPT_SCHEMA_VERSION,
     RunConfig,
@@ -60,6 +69,7 @@ class FrozenControls:
     max_findings: int
     grader_version: str
     phase_protocol_version: int
+    hunt_candidate_protocol_version: int
     invocations_per_task: int
 
     def __post_init__(self) -> None:
@@ -86,6 +96,8 @@ class FrozenControls:
         _required_text(self.grader_version, "grader_version")
         if self.phase_protocol_version != PHASE_PROTOCOL_VERSION:
             raise PhaseRunnerError("phase_protocol_version is unsupported")
+        if self.hunt_candidate_protocol_version != HUNT_CANDIDATE_PROTOCOL_VERSION:
+            raise PhaseRunnerError("hunt_candidate_protocol_version is unsupported")
         if self.invocations_per_task != 2:
             raise PhaseRunnerError("invocations_per_task must be exactly 2")
 
@@ -114,6 +126,7 @@ class FrozenControls:
             max_findings=data["max_findings"],
             grader_version=data["grader_version"],
             phase_protocol_version=data["phase_protocol_version"],
+            hunt_candidate_protocol_version=data["hunt_candidate_protocol_version"],
             invocations_per_task=data["invocations_per_task"],
         )
 
@@ -130,6 +143,7 @@ class FrozenControls:
             "max_findings": self.max_findings,
             "grader_version": self.grader_version,
             "phase_protocol_version": self.phase_protocol_version,
+            "hunt_candidate_protocol_version": self.hunt_candidate_protocol_version,
             "invocations_per_task": self.invocations_per_task,
         }
 
@@ -159,15 +173,31 @@ class CanonicalCandidate:
     critical_operation: Location
     trace: tuple[Location, ...]
     confidence: float
+    vulnerability_family: str | None = None
+    search_pass: str | None = None
+    hypothesis: str | None = None
+    evidence: str | None = None
+    counterevidence: str | None = None
+    expected_control: str | None = None
 
     def to_json(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "candidate_id": self.candidate_id,
             "entry_point": _location_json(self.entry_point),
             "critical_operation": _location_json(self.critical_operation),
             "trace": [_location_json(location) for location in self.trace],
             "confidence": self.confidence,
         }
+        if self.vulnerability_family is not None:
+            value |= {
+                "vulnerability_family": self.vulnerability_family,
+                "search_pass": self.search_pass,
+                "hypothesis": self.hypothesis,
+                "evidence": self.evidence,
+                "counterevidence": self.counterevidence,
+                "expected_control": self.expected_control,
+            }
+        return value
 
 
 @dataclass(frozen=True)
@@ -183,9 +213,11 @@ class WorkflowReceipt:
     snapshot_set_sha256: str
     discovery_receipt_sha256: str
     discovery_commands_sha256: str
+    discovery_predictions_sha256: str
     candidate_transfer_sha256: str
     verification_receipt_sha256: str | None
     verification_commands_sha256: str | None
+    verification_predictions_sha256: str | None
     phase_protocol_version: int
     top_level_invocation_count: int
     status: str
@@ -205,6 +237,7 @@ class WorkflowReceipt:
             "snapshot_set_sha256",
             "discovery_receipt_sha256",
             "discovery_commands_sha256",
+            "discovery_predictions_sha256",
             "candidate_transfer_sha256",
         ):
             _sha256(getattr(self, name), name)
@@ -212,6 +245,8 @@ class WorkflowReceipt:
             _sha256(self.verification_receipt_sha256, "verification_receipt_sha256")
         if self.verification_commands_sha256 is not None:
             _sha256(self.verification_commands_sha256, "verification_commands_sha256")
+        if self.verification_predictions_sha256 is not None:
+            _sha256(self.verification_predictions_sha256, "verification_predictions_sha256")
         if self.phase_protocol_version != PHASE_PROTOCOL_VERSION:
             raise PhaseRunnerError("workflow receipt phase protocol is unsupported")
         if self.status not in {"completed", "incomplete"}:
@@ -221,11 +256,12 @@ class WorkflowReceipt:
             if (
                 self.verification_receipt_sha256 is None
                 or self.verification_commands_sha256 is None
+                or self.verification_predictions_sha256 is None
             ):
                 raise PhaseRunnerError("completed workflow receipt must bind two phases")
         elif (
-            (self.verification_receipt_sha256 is None and self.verification_commands_sha256 is not None)
-            or (self.verification_receipt_sha256 is not None and self.verification_commands_sha256 is None)
+            (self.verification_receipt_sha256 is None and (self.verification_commands_sha256 is not None or self.verification_predictions_sha256 is not None))
+            or (self.verification_receipt_sha256 is not None and (self.verification_commands_sha256 is None or self.verification_predictions_sha256 is None))
         ):
             raise PhaseRunnerError("incomplete workflow receipt has an invalid phase count")
         if not isinstance(self.elapsed_seconds, (int, float)) or isinstance(self.elapsed_seconds, bool) or not math.isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0:
@@ -246,9 +282,11 @@ class WorkflowReceipt:
             "snapshot_set_sha256": self.snapshot_set_sha256,
             "discovery_receipt_sha256": self.discovery_receipt_sha256,
             "discovery_commands_sha256": self.discovery_commands_sha256,
+            "discovery_predictions_sha256": self.discovery_predictions_sha256,
             "candidate_transfer_sha256": self.candidate_transfer_sha256,
             "verification_receipt_sha256": self.verification_receipt_sha256,
             "verification_commands_sha256": self.verification_commands_sha256,
+            "verification_predictions_sha256": self.verification_predictions_sha256,
             "phase_protocol_version": self.phase_protocol_version,
             "top_level_invocation_count": self.top_level_invocation_count,
             "status": self.status,
@@ -266,7 +304,7 @@ class WorkflowReceipt:
             task_order_sha256=data["task_order_sha256"], execution_policy_sha256=data["execution_policy_sha256"],
             snapshot_set_sha256=data["snapshot_set_sha256"], discovery_receipt_sha256=data["discovery_receipt_sha256"],
             discovery_commands_sha256=data["discovery_commands_sha256"], candidate_transfer_sha256=data["candidate_transfer_sha256"],
-            verification_receipt_sha256=data["verification_receipt_sha256"], verification_commands_sha256=data["verification_commands_sha256"],
+            discovery_predictions_sha256=data["discovery_predictions_sha256"], verification_receipt_sha256=data["verification_receipt_sha256"], verification_commands_sha256=data["verification_commands_sha256"], verification_predictions_sha256=data["verification_predictions_sha256"],
             phase_protocol_version=data["phase_protocol_version"], top_level_invocation_count=data["top_level_invocation_count"],
             status=data["status"], elapsed_seconds=data["elapsed_seconds"], token_usage=TokenUsage.from_json(data["token_usage"]),
         )
@@ -298,6 +336,7 @@ def canonicalize_candidates(
     manifest: BenchmarkManifest,
     snapshots_root: Path,
     discovery_predictions: Mapping[str, object],
+    workflow: str = "standard",
 ) -> dict[str, tuple[CanonicalCandidate, ...]]:
     """Converts discovery findings into the bounded verification-only contract."""
     if set(discovery_predictions) != {task.task_id for task in manifest.tasks}:
@@ -305,19 +344,36 @@ def canonicalize_candidates(
     result: dict[str, tuple[CanonicalCandidate, ...]] = {}
     for task in manifest.tasks:
         raw_prediction = discovery_predictions[task.task_id]
-        if isinstance(raw_prediction, dict):
-            raw_findings = raw_prediction.get("findings")
-            if isinstance(raw_findings, list) and len(raw_findings) > 5:
+        if workflow == "hunt":
+            try:
+                hunt_prediction = parse_hunt_discovery_prediction(raw_prediction, task.task_id)
+            except HuntProtocolError as error:
+                raise PhaseRunnerError("Hunt discovery prediction is invalid") from error
+            snapshot = _snapshot_root(snapshots_root, task.task_id)
+            candidates = [
+                _canonical_hunt_candidate(candidate, number, snapshot)
+                for number, candidate in enumerate(hunt_prediction.candidates, start=1)
+            ]
+        else:
+            if workflow != "standard":
+                raise PhaseRunnerError("candidate workflow is unsupported")
+            if isinstance(raw_prediction, dict):
+                raw_findings = raw_prediction.get("findings")
+                if isinstance(raw_findings, list) and len(raw_findings) > 5:
+                    raise PhaseRunnerError("discovery predictions may contain at most five candidates")
+                _validate_raw_candidate_paths(raw_findings)
+            prediction = _prediction_for_task(raw_prediction, task.task_id)
+            snapshot = _snapshot_root(snapshots_root, task.task_id)
+            if len(prediction.findings) > 5:
                 raise PhaseRunnerError("discovery predictions may contain at most five candidates")
-            _validate_raw_candidate_paths(raw_findings)
-        prediction = _prediction_for_task(raw_prediction, task.task_id)
-        snapshot = _snapshot_root(snapshots_root, task.task_id)
-        if len(prediction.findings) > 5:
-            raise PhaseRunnerError("discovery predictions may contain at most five candidates")
-        candidates: list[CanonicalCandidate] = []
+            candidates = [
+                _canonical_candidate(finding, number, snapshot)
+                for number, finding in enumerate(prediction.findings, start=1)
+            ]
+        if len(candidates) > (HUNT_DISCOVERY_MAX_CANDIDATES if workflow == "hunt" else 5):
+            raise PhaseRunnerError("discovery candidate count exceeds the protocol limit")
         seen: set[tuple[object, ...]] = set()
-        for number, finding in enumerate(prediction.findings, start=1):
-            candidate = _canonical_candidate(finding, number, snapshot)
+        for candidate in candidates:
             identity = (
                 candidate.entry_point, candidate.critical_operation, candidate.trace,
                 candidate.confidence,
@@ -325,7 +381,6 @@ def canonicalize_candidates(
             if identity in seen:
                 raise PhaseRunnerError("discovery candidates must not duplicate locations")
             seen.add(identity)
-            candidates.append(candidate)
         result[task.task_id] = tuple(candidates)
     return result
 
@@ -355,7 +410,8 @@ def run_workflow(
     _safe_output_root(output_root)
     snapshot_hash = _snapshot_set_sha256(manifest)
     discovery_run_id = f"{run_id}-discovery"
-    discovery = run_suite(manifest, snapshots_root, output_root, discovery_run_id, workflow, profile, config, execution_policy, discovery_executor)
+    discovery_kind = "hunt-discovery" if workflow == "hunt" else "standard"
+    discovery = run_suite(manifest, snapshots_root, output_root, discovery_run_id, workflow, profile, config, execution_policy, discovery_executor, discovery_kind)
     discovery_dir = output_root / discovery_run_id
     _validate_phase(manifest, discovery_dir, discovery, config)
 
@@ -372,14 +428,15 @@ def run_workflow(
         _write_json(output_root / f"{run_id}-result.json", paths)
         return WorkflowResult(receipt, paths)
 
-    discovery_predictions = _load_phase_predictions(manifest, discovery_dir / "predictions.jsonl")
-    candidates = canonicalize_candidates(manifest, snapshots_root, discovery_predictions)
+    discovery_predictions = _load_phase_predictions(manifest, discovery_dir / "predictions.jsonl", discovery_kind)
+    candidates = canonicalize_candidates(manifest, snapshots_root, discovery_predictions, workflow)
     _write_jsonl(candidate_path, (_candidate_row(task.task_id, candidates[task.task_id]) for task in manifest.tasks))
     verification_executor = verification_executor_factory(candidates)
     if not callable(verification_executor):
         raise PhaseRunnerError("verification executor factory returned an invalid executor")
     verification_run_id = f"{run_id}-verification"
-    verification = run_suite(manifest, snapshots_root, output_root, verification_run_id, workflow, profile, config, execution_policy, verification_executor)
+    verification_kind = "hunt-verification" if workflow == "hunt" else "standard"
+    verification = run_suite(manifest, snapshots_root, output_root, verification_run_id, workflow, profile, config, execution_policy, verification_executor, verification_kind)
     verification_dir = output_root / verification_run_id
     _validate_phase(manifest, verification_dir, verification, config)
     if verification.status != "completed":
@@ -394,8 +451,8 @@ def run_workflow(
         paths = _artifact_paths(run_id, verification_started=True, completed=False)
         _write_json(output_root / f"{run_id}-result.json", paths)
         return WorkflowResult(receipt, paths)
-    verification_predictions = _load_phase_predictions(manifest, verification_dir / "predictions.jsonl")
-    _validate_verification_subset(candidates, verification_predictions)
+    verification_predictions = _load_phase_predictions(manifest, verification_dir / "predictions.jsonl", verification_kind)
+    _validate_verification_subset(candidates, verification_predictions, workflow)
     receipt = _workflow_receipt(
         run_id, workflow, profile, controls, config, snapshot_hash, len(manifest.tasks), discovery_dir / "receipt.json",
         discovery_dir / "commands.jsonl", candidate_path, verification_dir / "receipt.json", verification_dir / "commands.jsonl",
@@ -533,13 +590,17 @@ def validate_workflow_receipt(
     discovery_commands_path = discovery_dir / "commands.jsonl"
     if sha256_file(discovery_commands_path) != receipt.discovery_commands_sha256:
         raise PhaseRunnerError("workflow receipt discovery commands hash does not match")
+    discovery_predictions_path = discovery_dir / "predictions.jsonl"
+    if sha256_file(discovery_predictions_path) != receipt.discovery_predictions_sha256:
+        raise PhaseRunnerError("workflow receipt discovery predictions hash does not match")
     discovery = load_receipt(discovery_path)
     _validate_phase(manifest, discovery_dir, discovery, config)
     candidate_path = output_root / f"{receipt.run_id}-candidates.jsonl"
     if sha256_file(candidate_path) != receipt.candidate_transfer_sha256:
         raise PhaseRunnerError("workflow receipt candidate hash does not match")
-    discovery_predictions = _load_phase_predictions(manifest, discovery_dir / "predictions.jsonl")
-    candidates = canonicalize_candidates(manifest, snapshots_root, discovery_predictions)
+    discovery_kind = "hunt-discovery" if receipt.workflow == "hunt" else "standard"
+    discovery_predictions = _load_phase_predictions(manifest, discovery_predictions_path, discovery_kind)
+    candidates = canonicalize_candidates(manifest, snapshots_root, discovery_predictions, receipt.workflow)
     expected_candidate_bytes = _jsonl_bytes(
         _candidate_row(task.task_id, candidates[task.task_id]) for task in manifest.tasks
     )
@@ -555,12 +616,16 @@ def validate_workflow_receipt(
         verification_commands_path = verification_dir / "commands.jsonl"
         if receipt.verification_commands_sha256 is None or sha256_file(verification_commands_path) != receipt.verification_commands_sha256:
             raise PhaseRunnerError("workflow receipt verification commands hash does not match")
+        verification_predictions_path = verification_dir / "predictions.jsonl"
+        if receipt.verification_predictions_sha256 is None or sha256_file(verification_predictions_path) != receipt.verification_predictions_sha256:
+            raise PhaseRunnerError("workflow receipt verification predictions hash does not match")
         verification = load_receipt(verification_path)
         _validate_phase(manifest, verification_dir, verification, config)
         _validate_phase_commands(manifest, verification_commands_path, execution_policy)
         if receipt.status == "completed":
-            verification_predictions = _load_phase_predictions(manifest, verification_dir / "predictions.jsonl")
-            _validate_verification_subset(candidates, verification_predictions)
+            verification_kind = "hunt-verification" if receipt.workflow == "hunt" else "standard"
+            verification_predictions = _load_phase_predictions(manifest, verification_predictions_path, verification_kind)
+            _validate_verification_subset(candidates, verification_predictions, receipt.workflow)
             if discovery.status != "completed" or verification.status != "completed":
                 raise PhaseRunnerError("completed workflow receipt has an incomplete phase")
         elif discovery.status != "completed" or verification.status == "completed":
@@ -582,9 +647,11 @@ def _workflow_receipt(
         task_order_sha256=config.task_order_sha256, execution_policy_sha256=config.execution_policy_sha256,
         snapshot_set_sha256=snapshot_hash, discovery_receipt_sha256=sha256_file(discovery_path),
         discovery_commands_sha256=sha256_file(discovery_commands_path),
+        discovery_predictions_sha256=sha256_file(discovery_path.parent / "predictions.jsonl"),
         candidate_transfer_sha256=sha256_file(candidate_path),
         verification_receipt_sha256=sha256_file(verification_path) if verification_path else None,
         verification_commands_sha256=sha256_file(verification_commands_path) if verification_commands_path else None,
+        verification_predictions_sha256=sha256_file(verification_path.parent / "predictions.jsonl") if verification_path else None,
         phase_protocol_version=controls.phase_protocol_version,
         top_level_invocation_count=task_count * (2 if verification_path else 1),
         status=status or ("completed" if verification_path else "incomplete"), elapsed_seconds=elapsed, token_usage=usage,
@@ -629,13 +696,20 @@ def _validate_phase(manifest: BenchmarkManifest, directory: Path, receipt: RunRe
         raise PhaseRunnerError("phase failure evidence hash does not match")
 
 
-def _load_phase_predictions(manifest: BenchmarkManifest, path: Path) -> dict[str, object]:
+def _load_phase_predictions(
+    manifest: BenchmarkManifest, path: Path, response_kind: str = "standard"
+) -> dict[str, object]:
     rows = _read_jsonl(path, "phase predictions")
     if len(rows) != len(manifest.tasks):
         raise PhaseRunnerError("phase predictions are incomplete")
     loaded: dict[str, object] = {}
     for task, row in zip(manifest.tasks, rows, strict=True):
-        prediction = _prediction_for_task(row, task.task_id)
+        if response_kind == "hunt-discovery":
+            prediction = parse_hunt_discovery_prediction(row, task.task_id)
+        elif response_kind == "hunt-verification":
+            prediction = parse_hunt_verification_prediction(row, task.task_id)
+        else:
+            prediction = _prediction_for_task(row, task.task_id)
         if prediction.task_id in loaded:
             raise PhaseRunnerError("phase predictions contain duplicate task IDs")
         loaded[prediction.task_id] = row
@@ -645,9 +719,16 @@ def _load_phase_predictions(manifest: BenchmarkManifest, path: Path) -> dict[str
 
 
 def _validate_verification_subset(
-    candidates: Mapping[str, tuple[CanonicalCandidate, ...]], predictions: Mapping[str, object]
+    candidates: Mapping[str, tuple[CanonicalCandidate, ...]], predictions: Mapping[str, object], workflow: str = "standard"
 ) -> None:
     for task_id, raw_prediction in predictions.items():
+        if workflow == "hunt":
+            try:
+                hunt_prediction = parse_hunt_verification_prediction(raw_prediction, task_id)
+            except HuntProtocolError as error:
+                raise PhaseRunnerError("Hunt verification prediction is invalid") from error
+            _validate_hunt_decisions(candidates[task_id], hunt_prediction.decisions, hunt_prediction.findings)
+            continue
         prediction = _prediction_for_task(raw_prediction, task_id)
         allowed = {candidate.candidate_id: candidate for candidate in candidates[task_id]}
         seen: set[str] = set()
@@ -660,6 +741,24 @@ def _validate_verification_subset(
                 raise PhaseRunnerError("verification finding changed a transferred candidate")
 
 
+def _validate_hunt_decisions(
+    candidates: Sequence[CanonicalCandidate], decisions: Sequence[HuntTerminalDecision], findings: Sequence[Finding]
+) -> None:
+    allowed = {candidate.candidate_id: candidate for candidate in candidates}
+    if set(decision.candidate_id for decision in decisions) != set(allowed) or len(decisions) != len(allowed):
+        raise PhaseRunnerError("Hunt verification must contain one terminal decision per transferred candidate")
+    accepted = {decision.candidate_id for decision in decisions if decision.disposition == "accepted"}
+    if len(accepted) > 5:
+        raise PhaseRunnerError("Hunt verification accepted findings exceed the final limit")
+    finding_ids = {finding.finding_id for finding in findings}
+    if finding_ids != accepted or len(findings) != len(accepted):
+        raise PhaseRunnerError("Hunt verification findings do not exactly match accepted decisions")
+    for finding in findings:
+        candidate = allowed.get(finding.finding_id)
+        if candidate is None or (finding.entry_point, finding.critical_operation, finding.trace) != (candidate.entry_point, candidate.critical_operation, candidate.trace):
+            raise PhaseRunnerError("verification finding changed a transferred candidate")
+
+
 def _canonical_candidate(finding: Finding, number: int, snapshot: Path) -> CanonicalCandidate:
     locations = (finding.entry_point, finding.critical_operation, *finding.trace)
     if len(finding.trace) > _MAX_CANDIDATE_TRACE:
@@ -669,6 +768,29 @@ def _canonical_candidate(finding: Finding, number: int, snapshot: Path) -> Canon
     return CanonicalCandidate(
         candidate_id=f"candidate-{number}", entry_point=finding.entry_point,
         critical_operation=finding.critical_operation, trace=finding.trace, confidence=finding.confidence,
+    )
+
+
+def _canonical_hunt_candidate(
+    candidate: HuntDiscoveryCandidate, number: int, snapshot: Path
+) -> CanonicalCandidate:
+    locations = (candidate.entry_point, candidate.critical_operation, *candidate.trace)
+    if len(candidate.trace) > _MAX_CANDIDATE_TRACE:
+        raise PhaseRunnerError("candidate trace exceeds the bounded length")
+    for location in locations:
+        _validate_candidate_location(location, snapshot)
+    return CanonicalCandidate(
+        candidate_id=f"candidate-{number}",
+        entry_point=candidate.entry_point,
+        critical_operation=candidate.critical_operation,
+        trace=candidate.trace,
+        confidence=candidate.confidence,
+        vulnerability_family=candidate.vulnerability_family,
+        search_pass=candidate.search_pass,
+        hypothesis=candidate.hypothesis,
+        evidence=candidate.evidence,
+        counterevidence=candidate.counterevidence,
+        expected_control=candidate.expected_control,
     )
 
 

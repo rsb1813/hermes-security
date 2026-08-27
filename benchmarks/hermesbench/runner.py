@@ -132,6 +132,7 @@ def run_suite(
     config: RunConfig,
     execution_policy: ExecutionPolicy,
     executor: Executor,
+    response_kind: str = "standard",
 ) -> RunReceipt:
     """Runs one manifest in order after completing every snapshot preflight."""
     _require_safe_run_id(run_id)
@@ -173,6 +174,7 @@ def run_suite(
             tasks_directory,
             execution_policy,
             executor,
+            response_kind,
         )
         records.append(record)
         commands.extend(task_commands)
@@ -255,6 +257,7 @@ def _run_task(
     tasks_directory: Path,
     policy: ExecutionPolicy,
     executor: Executor,
+    response_kind: str,
 ) -> tuple[TaskRunReceipt, dict[str, object] | None, tuple[dict[str, object], ...]]:
     descriptor = prepared.descriptor
     task_directory = tasks_directory / _task_directory_name(descriptor.task_id)
@@ -286,11 +289,45 @@ def _run_task(
                 with tempfile.TemporaryDirectory(prefix="hermesbench-executor-") as scratch:
                     result = executor(request, Path(scratch), descriptor.time_limit_seconds)
                 _assert_artifact_tree(task_directory, {"request.json"})
-                parsed = parse_adapter_response(result.raw_response, descriptor.task_id)
+                if response_kind == "standard":
+                    parsed = parse_adapter_response(result.raw_response, descriptor.task_id)
+                    prediction_value = _prediction_json(parsed.prediction)
+                else:
+                    from .hunt_protocol import (
+                        HuntProtocolError,
+                        parse_hunt_discovery_prediction,
+                        parse_hunt_verification_prediction,
+                    )
+
+                    if not isinstance(result.raw_response, dict) or set(result.raw_response) != {"prediction", "usage"}:
+                        raise HuntProtocolError("Hunt adapter response is invalid")
+                    usage = parse_adapter_response(
+                        {"prediction": {"schema_version": 1, "task_id": descriptor.task_id, "findings": []}, "usage": result.raw_response["usage"]},
+                        descriptor.task_id,
+                    ).token_usage
+                    if response_kind == "hunt-discovery":
+                        parsed_prediction = parse_hunt_discovery_prediction(result.raw_response["prediction"], descriptor.task_id)
+                        prediction_value = result.raw_response["prediction"]
+                    elif response_kind == "hunt-verification":
+                        parsed_prediction = parse_hunt_verification_prediction(result.raw_response["prediction"], descriptor.task_id)
+                        prediction_value = result.raw_response["prediction"]
+                    else:
+                        raise HuntProtocolError("Hunt response kind is invalid")
+                    parsed = type("HuntParsed", (), {"token_usage": usage, "prediction": parsed_prediction})()
                 event_rows = _normalize_event_rows(result.event_rows)
                 command_rows = _command_rows(descriptor.task_id, result.observed_argv)
                 usage = parsed.token_usage
-                _write_json(task_directory / "adapter-response.json", _adapter_response_json(parsed))
+                _write_json(
+                    task_directory / "adapter-response.json",
+                    {
+                        "prediction": prediction_value,
+                        "usage": {
+                            "input_tokens": usage.cached_input_tokens + usage.uncached_input_tokens,
+                            "cached_input_tokens": usage.cached_input_tokens,
+                            "output_tokens": usage.output_tokens,
+                        },
+                    },
+                )
                 _write_jsonl(task_directory / "events.jsonl", event_rows)
                 _write_jsonl(
                     task_directory / "commands.jsonl",
@@ -309,7 +346,7 @@ def _run_task(
                         status = "contaminated"
                     else:
                         status = "completed"
-                        prediction = _prediction_json(parsed.prediction)
+                        prediction = prediction_value
             except ExecutorTimeoutError:
                 status = "timeout"
                 _write_task_failure(task_directory, "executor_timeout")

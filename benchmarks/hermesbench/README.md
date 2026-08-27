@@ -137,6 +137,7 @@ immutable lowercase digest, and its invocation budget is exactly two per task.
   "max_findings": 5,
   "grader_version": "2",
   "phase_protocol_version": 1,
+  "hunt_candidate_protocol_version": 1,
   "invocations_per_task": 2
 }
 ```

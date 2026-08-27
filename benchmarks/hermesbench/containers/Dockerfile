@@ -15,9 +15,11 @@ RUN apt-get update \
 
 COPY containers/codex_auth_runtime.py /usr/local/bin/codex_auth_runtime.py
 COPY schemas/prediction-response.schema.json /workspace/schema/prediction-response.schema.json
+COPY schemas/hunt-discovery-response.schema.json /workspace/schema/hunt-discovery-response.schema.json
+COPY schemas/hunt-verification-response.schema.json /workspace/schema/hunt-verification-response.schema.json
 
 RUN chmod 0755 /usr/local/bin/codex_auth_runtime.py \
-    && chmod 0444 /workspace/schema/prediction-response.schema.json
+    && chmod 0444 /workspace/schema/prediction-response.schema.json /workspace/schema/hunt-discovery-response.schema.json /workspace/schema/hunt-verification-response.schema.json
 
 RUN groupadd --gid 10001 hermesbench \
     && useradd --uid 10001 --gid 10001 --no-create-home hermesbench \
