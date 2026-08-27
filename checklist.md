@@ -40,7 +40,9 @@
   - [x] Record Task 4 RED unit evidence.
   - [x] Verify the exact Docker lifecycle and mount boundary with unit tests.
   - [x] Verify the opt-in live Docker isolation smoke and private receipt.
-- [ ] Connect one common Codex non-interactive adapter to Standard and Hunt.
+- [x] Connect one common Codex non-interactive adapter to Standard and Hunt.
+  - [x] Verify host `codex exec --output-schema` acceptance for the pinned prediction schema.
+  - [x] Complete the managed-auth container model smoke with a valid public result.
 - [ ] Connect the benchmark runner to the unchanged Standard workflow.
 - [ ] Run and verify Canary.
 - [ ] Freeze the Mini task manifest and configuration.

@@ -15,6 +15,7 @@ _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z")
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 _DOCKER_CLI_TIMEOUT_SECONDS = 15
+MAX_CONFIDENTIAL_STDIN_BYTES = 16 * 1024
 
 
 class ContainerRuntimeError(RuntimeError):
@@ -53,6 +54,7 @@ class ContainerRuntime:
         plugin_path: Path | None,
         command_argv: Sequence[str],
         timeout_seconds: int,
+        confidential_stdin: bytes | None = None,
     ) -> ContainerResult:
         """Runs command_argv with only read-only inputs and writable task scratch."""
         snapshot = _resolve_mount_source(snapshot_path, "snapshot path")
@@ -63,13 +65,25 @@ class ContainerRuntime:
         _assert_disjoint_mount_sources(snapshot, scratch, plugin)
         command = _require_command(command_argv)
         timeout = _require_timeout(timeout_seconds)
+        confidential = _require_confidential_stdin(confidential_stdin)
         image_id = self._resolve_image_id()
-        container_id = self._create(image_id, snapshot, scratch, plugin, command)
+        container_id = self._create(
+            image_id,
+            snapshot,
+            scratch,
+            plugin,
+            command,
+            interactive=confidential is not None,
+        )
         process: subprocess.Popen[bytes] | None = None
         try:
+            start_argv = [self._docker_binary, "start", "--attach"]
+            if confidential is not None:
+                start_argv.append("--interactive")
+            start_argv.append(container_id)
             process = subprocess.Popen(
-                [self._docker_binary, "start", "--attach", container_id],
-                stdin=subprocess.DEVNULL,
+                start_argv,
+                stdin=subprocess.PIPE if confidential is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 shell=False,
@@ -80,7 +94,7 @@ class ContainerRuntime:
                 raise cleanup_error from exc
             raise ContainerRuntimeError("Docker container start failed") from exc
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            stdout, stderr = process.communicate(input=confidential, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             cleanup_error = self._cleanup_container(container_id, process, stop_container=True)
             if cleanup_error is not None:
@@ -124,6 +138,7 @@ class ContainerRuntime:
         scratch: Path,
         plugin: Path | None,
         command: tuple[str, ...],
+        interactive: bool = False,
     ) -> str:
         argv = [
             self._docker_binary,
@@ -155,6 +170,8 @@ class ContainerRuntime:
             "--mount",
             _readonly_mount(snapshot, "/workspace/snapshot"),
         ]
+        if interactive:
+            argv.append("--interactive")
         if plugin is not None:
             argv.extend(["--mount", _readonly_mount(plugin, "/workspace/plugin")])
         argv.extend(
@@ -241,6 +258,14 @@ def _require_command(value: Sequence[str]) -> tuple[str, ...]:
 def _require_timeout(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("timeout_seconds must be a positive integer")
+    return value
+
+
+def _require_confidential_stdin(value: object) -> bytes | None:
+    if value is None:
+        return None
+    if not isinstance(value, bytes) or not value or len(value) > MAX_CONFIDENTIAL_STDIN_BYTES:
+        raise ValueError("confidential_stdin must be non-empty bytes when provided")
     return value
 
 

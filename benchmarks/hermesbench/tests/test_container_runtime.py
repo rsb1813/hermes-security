@@ -32,7 +32,8 @@ class _AttachProcess:
         self.terminated = False
         self.returncode = 0
 
-    def communicate(self, timeout: int) -> tuple[bytes, bytes]:
+    def communicate(self, input: bytes | None = None, timeout: int | None = None) -> tuple[bytes, bytes]:
+        self.stdin_bytes = input
         if isinstance(self.outcome, BaseException):
             raise self.outcome
         return self.outcome  # type: ignore[return-value]
@@ -174,6 +175,67 @@ class ContainerRuntimeTests(unittest.TestCase):
             for _argv, kwargs in calls:
                 self.assertIs(kwargs["shell"], False)
             self.assertIs(popen.call_args.kwargs["shell"], False)
+
+    def test_confidential_stdin_is_limited_to_interactive_attach(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+            attach = _AttachProcess()
+            secret = b'{"access_token":"secret-value","account_id":"account"}'
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=self._docker_run(calls)), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", return_value=attach
+            ) as popen:
+                result = ContainerRuntime("runtime:mutable").execute(
+                    snapshot,
+                    scratch,
+                    plugin,
+                    ("true",),
+                    17,
+                    confidential_stdin=secret,
+                )
+
+            self.assertEqual(popen.call_args.args[0], ["docker", "start", "--attach", "--interactive", CONTAINER_ID])
+            self.assertIs(popen.call_args.kwargs["stdin"], subprocess.PIPE)
+            self.assertEqual(attach.stdin_bytes, secret)
+            self.assertEqual(result.stdout, b"stdout")
+            self.assertIn("--interactive", calls[1][0])
+            public_values = " ".join(token for argv, _kwargs in calls for token in argv)
+            self.assertNotIn("secret-value", public_values)
+            self.assertNotIn("secret-value", str(popen.call_args))
+
+    def test_rejects_oversized_confidential_stdin_before_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run") as docker_run:
+                with self.assertRaisesRegex(ValueError, "confidential_stdin"):
+                    ContainerRuntime("runtime:mutable").execute(
+                        snapshot,
+                        scratch,
+                        plugin,
+                        ("true",),
+                        17,
+                        confidential_stdin=b"x" * (container_runtime.MAX_CONFIDENTIAL_STDIN_BYTES + 1),
+                    )
+            docker_run.assert_not_called()
+
+    def test_confidential_stdin_never_enters_start_failure_or_cleanup_argv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+            secret = b'{"access_token":"secret-value","account_id":"account"}'
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=self._docker_run(calls)), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", side_effect=OSError("attach failed")
+            ) as popen:
+                with self.assertRaisesRegex(ContainerRuntimeError, "start failed") as error:
+                    ContainerRuntime("runtime:mutable").execute(
+                        snapshot, scratch, plugin, ("true",), 17, confidential_stdin=secret
+                    )
+            self.assertNotIn("secret-value", str(error.exception))
+            self.assertEqual(popen.call_args.args[0], ["docker", "start", "--attach", "--interactive", CONTAINER_ID])
+            self.assertNotIn("secret-value", " ".join(token for argv, _kwargs in calls for token in argv))
 
     def test_does_not_expose_final_artifact_path_to_docker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -646,7 +708,7 @@ class DockerIsolationSmokeTests(unittest.TestCase):
         receipt_forbidden_values: tuple[str, ...] | None = None
         try:
             _run_live_docker(
-                ["docker", "build", "-f", str(runtime_directory / "Dockerfile"), "-t", image_ref, str(runtime_directory)],
+                ["docker", "build", "-f", str(runtime_directory / "Dockerfile"), "-t", image_ref, str(runtime_directory.parent)],
                 timeout_seconds=_DOCKER_BUILD_TIMEOUT_SECONDS,
                 operation="runtime image build",
             )

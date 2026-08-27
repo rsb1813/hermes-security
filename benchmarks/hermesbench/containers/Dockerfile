@@ -13,6 +13,12 @@ RUN apt-get update \
     && codex --version \
     && npm cache clean --force
 
+COPY containers/codex_auth_fifo.py /usr/local/bin/codex_auth_fifo.py
+COPY schemas/prediction-response.schema.json /workspace/schema/prediction-response.schema.json
+
+RUN chmod 0755 /usr/local/bin/codex_auth_fifo.py \
+    && chmod 0444 /workspace/schema/prediction-response.schema.json
+
 RUN groupadd --gid 10001 hermesbench \
     && useradd --uid 10001 --gid 10001 --no-create-home hermesbench \
     && mkdir -p /workspace/scratch \
