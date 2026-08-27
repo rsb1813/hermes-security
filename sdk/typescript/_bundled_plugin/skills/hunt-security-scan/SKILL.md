@@ -31,7 +31,7 @@ Use `hunt-max` when maximum discovery is requested. Cost controls may change bat
 
 1. Resolve the repository, scope, target identity, plugin root, work directory, profile, and discovery actor. Generate `in-scope-files.txt` with `generate_in_scope_files.py` and authoritative `rank-input.jsonl` with `generate_rank_input.py make-repo-rank-input`.
 2. If ranking workers are available, run `make-rank-shards`, `make-rank-pool-plan`, worker ranking, `validate-rank-worker`, `validate-rank-pool`, and `merge-rank-outputs`. Otherwise omit rank output and use the deterministic signal fallback.
-3. Run `hunt_workflow.py make-frontier`. Map once and review priority batches. Join entry points, controls, and sinks across files; cache reusable maps and bounded evidence. Process every pass and write one closure per item.
+3. Pass the resolved `--work-dir` and `--repository` to every `hunt_workflow.py` command. The directories must be disjoint and every helper input and output must remain inside the work directory. Run `make-frontier`, map once, and review priority batches. Join entry points, controls, and sinks across files; cache reusable maps and bounded evidence. Process every pass and write one closure per item.
 4. Write raw discovery candidates using the contract, then run `normalize_candidates.py`. Run `hunt_workflow.py close-frontier`; missing, duplicate, or unknown work must fail closed.
 5. Run `prepare-validation`. Give its blinded hypotheses and required source files to a fresh verifier. The verifier emits one safe decision per candidate; run `validate-decisions` to enforce proof and transitions.
 6. Run `finalize` to produce accepted findings, the defensive draft report, and the finalization receipt. Do not add rejected or inconclusive prose manually.

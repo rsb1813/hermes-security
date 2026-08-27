@@ -8,7 +8,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import benchmarks.hermesbench.cli as hermes_cli
 from benchmarks.hermesbench.receipts import (
     RunConfig,
     RunReceipt,
@@ -256,6 +258,38 @@ class CompareCommandTests(unittest.TestCase):
 
 
 class ImportCommandTests(unittest.TestCase):
+    def test_private_import_inside_repository_is_restricted_to_ignored_root(self) -> None:
+        unsafe = REPOSITORY_ROOT / "benchmarks" / "hermesbench" / "public.json"
+        safe = REPOSITORY_ROOT / "benchmarks" / "hermesbench" / "private" / "data.json"
+        with self.assertRaisesRegex(ValueError, "private output"):
+            hermes_cli._require_private_output_path(unsafe)
+        self.assertEqual(hermes_cli._require_private_output_path(safe), safe)
+
+    def test_private_import_rejects_a_linked_private_root(self) -> None:
+        original = Path.is_symlink
+
+        def simulated_symlink(path: Path) -> bool:
+            return path == hermes_cli._PRIVATE_OUTPUT_ROOT or original(path)
+
+        with patch.object(Path, "is_symlink", simulated_symlink):
+            with self.assertRaisesRegex(ValueError, "link or junction"):
+                hermes_cli._require_private_output_path(
+                    hermes_cli._PRIVATE_OUTPUT_ROOT / "data.json"
+                )
+
+    def test_private_import_rejects_a_junction_private_root(self) -> None:
+        def simulated_junction(path: Path) -> bool:
+            return path == hermes_cli._PRIVATE_OUTPUT_ROOT
+
+        with (
+            patch.object(Path, "is_symlink", return_value=False),
+            patch.object(Path, "is_junction", simulated_junction, create=True),
+        ):
+            with self.assertRaisesRegex(ValueError, "link or junction"):
+                hermes_cli._require_private_output_path(
+                    hermes_cli._PRIVATE_OUTPUT_ROOT / "data.json"
+                )
+
     def test_import_writes_private_candidates_and_identity_free_summary(self) -> None:
         report = {
             "report_id": "GHSA-2345-6789-cfgh",

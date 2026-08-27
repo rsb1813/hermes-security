@@ -42,6 +42,18 @@ class SanitizeTests(unittest.TestCase):
                 {"advisory_identifier"},
             )
 
+    def test_vulngym_source_identifiers_contaminate_a_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "private-record.json").write_text(
+                '{"entry_id":"entry-00001","origin":"VulnGym"}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                {violation.code for violation in audit_bundle(root)},
+                {"source_identifier"},
+            )
+
     def test_clean_source_is_not_rewritten(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

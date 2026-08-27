@@ -22,7 +22,7 @@ Use this contract for every `hunt-security-scan` run. All paths are repository-r
 
 ## Artifact Sequence
 
-Use a dedicated work directory and preserve every intermediate artifact.
+Use a dedicated work directory outside the target repository and preserve every intermediate artifact. Every `hunt_workflow.py` invocation requires `--work-dir <work-dir> --repository <repo>`. The helper resolves both roots, rejects any overlap, and rejects every input or output outside the work directory before writing.
 
 ```text
 in-scope-files.txt
@@ -75,7 +75,7 @@ make-rank-shards -> make-rank-pool-plan -> validate-rank-worker -> validate-rank
 Do not call `select-deep-review-input`. Pass the complete rank input and optional exact-cover rank output to `make-frontier`.
 
 ```text
-hunt_workflow.py make-frontier --rank-input <rank-input.jsonl> [--rank-output <rank-output.jsonl>] --profile <hunt-balanced|hunt-max> --out <frontier.jsonl> --receipt <frontier-receipt.json>
+hunt_workflow.py make-frontier --work-dir <work-dir> --repository <repo> --rank-input <rank-input.jsonl> [--rank-output <rank-output.jsonl>] --profile <hunt-balanced|hunt-max> --out <frontier.jsonl> --receipt <frontier-receipt.json>
 ```
 
 Each frontier row is machine-authored and contains exactly `work_id`, `path`, `area`, `component`, `risk_score`, `rank_include`, `rank_reason`, `signals`, `passes`, and `priority`. Do not edit it manually. `rank_include` is retained evidence and never an eligibility decision.
@@ -102,7 +102,7 @@ Supported roles are `entrypoint`, `entrypoint/wrapper`, `source`, `root_control`
 
 ```text
 normalize_candidates.py --input <raw-candidate.jsonl> [...] --out <normalized-candidates.jsonl> --repo-root <repo> --in-scope-files <in-scope-files.txt>
-hunt_workflow.py close-frontier --frontier <frontier.jsonl> --closures <closures.jsonl> --out <coverage-receipt.json>
+hunt_workflow.py close-frontier --work-dir <work-dir> --repository <repo> --frontier <frontier.jsonl> --closures <closures.jsonl> --out <coverage-receipt.json>
 ```
 
 ## Independent Validation Contract
@@ -110,7 +110,7 @@ hunt_workflow.py close-frontier --frontier <frontier.jsonl> --closures <closures
 Create blinded hypotheses first.
 
 ```text
-hunt_workflow.py prepare-validation --candidates <normalized-candidates.jsonl> --out <validation-input.jsonl>
+hunt_workflow.py prepare-validation --work-dir <work-dir> --repository <repo> --candidates <normalized-candidates.jsonl> --out <validation-input.jsonl>
 ```
 
 The verifier receives hypotheses rather than discovery confidence or a requested conclusion. It writes exactly one decision per candidate with these fields.
@@ -127,7 +127,7 @@ Allowed methods are `static_trace`, `existing_test`, `build`, `type_check`, and 
 An accepted decision requires all four proof values to be `proven`, concrete evidence, remediation, and source, `root_control`, and `sink` locations. A rejected decision requires a disproven claim and counterevidence. An inconclusive decision requires an unknown claim and explicit proof gaps.
 
 ```text
-hunt_workflow.py validate-decisions --candidates <normalized-candidates.jsonl> --validations <validation-decisions.jsonl> --discovery-actor <actor-id> --out <validated-candidates.jsonl>
+hunt_workflow.py validate-decisions --work-dir <work-dir> --repository <repo> --candidates <normalized-candidates.jsonl> --validations <validation-decisions.jsonl> --discovery-actor <actor-id> --out <validated-candidates.jsonl>
 ```
 
 The command rejects self-validation case-insensitively and derives the terminal state history. Do not hand-author or patch state history.
@@ -135,7 +135,7 @@ The command rejects self-validation case-insensitively and derives the terminal 
 ## Finalization Contract
 
 ```text
-hunt_workflow.py finalize --validated <validated-candidates.jsonl> --findings-out <accepted-findings.json> --report-out <draft-report.md> --receipt <finalization-receipt.json>
+hunt_workflow.py finalize --work-dir <work-dir> --repository <repo> --validated <validated-candidates.jsonl> --findings-out <accepted-findings.json> --report-out <draft-report.md> --receipt <finalization-receipt.json>
 ```
 
 Finalization includes accepted candidates only. It deduplicates only an exact normalized tuple of CWE IDs, root-control locations, and sink locations, while retaining every candidate ID, instance, and affected location. Similar prose, CWE family, or entry point alone is never a merge key.

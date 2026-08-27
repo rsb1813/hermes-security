@@ -17,6 +17,8 @@ existing Standard scan, `ScanMode`, CLI, API, and SDK behavior.
 - Ranking changes review order, never file eligibility.
 - Hunt runs only on the authorized local repository and uses no network during
   evaluation.
+- Every helper invocation declares disjoint repository and work-directory
+  roots, and all helper inputs and outputs remain inside the work directory.
 - Validation permits static tracing, existing tests, builds, type checking,
   and non-triggering invariant checks. It rejects exploit, PoC, crash, and
   remote-attack validation methods.
@@ -52,6 +54,8 @@ Implementation contract.
 
 ```text
 hunt_workflow.py make-frontier
+  --work-dir <work-dir>
+  --repository <repo>
   --rank-input <rank_input.jsonl>
   [--rank-output <rank_output.jsonl>]
   --profile hunt-balanced|hunt-max
@@ -102,6 +106,8 @@ Implementation contract.
 
 ```text
 hunt_workflow.py close-frontier
+  --work-dir <work-dir>
+  --repository <repo>
   --frontier <frontier.jsonl>
   --closures <closures.jsonl>
   --out <coverage-receipt.json>
@@ -142,10 +148,14 @@ Implementation contracts.
 
 ```text
 hunt_workflow.py prepare-validation
+  --work-dir <work-dir>
+  --repository <repo>
   --candidates <normalized-candidates.jsonl>
   --out <validation-input.jsonl>
 
 hunt_workflow.py validate-decisions
+  --work-dir <work-dir>
+  --repository <repo>
   --candidates <normalized-candidates.jsonl>
   --validations <validations.jsonl>
   --discovery-actor <actor-id>
@@ -186,6 +196,8 @@ Implementation contract.
 
 ```text
 hunt_workflow.py finalize
+  --work-dir <work-dir>
+  --repository <repo>
   --validated <validated-candidates.jsonl>
   --findings-out <accepted-findings.json>
   --report-out <draft-report.md>

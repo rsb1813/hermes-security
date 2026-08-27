@@ -75,6 +75,11 @@ class HuntWorkflowError(ValueError):
     """Signals an invalid or incomplete Hunt workflow artifact."""
 
 
+def _add_boundary_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--work-dir", required=True)
+    parser.add_argument("--repository", required=True)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build deterministic experimental Hunt workflow artifacts."
@@ -83,6 +88,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     frontier = commands.add_parser(
         "make-frontier", help="Build a full-coverage risk-ordered review frontier."
     )
+    _add_boundary_arguments(frontier)
     frontier.add_argument("--rank-input", required=True)
     frontier.add_argument("--rank-output")
     frontier.add_argument("--profile", choices=PROFILES, required=True)
@@ -91,17 +97,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     closure = commands.add_parser(
         "close-frontier", help="Require a terminal closure for every review item."
     )
+    _add_boundary_arguments(closure)
     closure.add_argument("--frontier", required=True)
     closure.add_argument("--closures", required=True)
     closure.add_argument("--out", required=True)
     preparation = commands.add_parser(
         "prepare-validation", help="Convert discoveries into unverified hypotheses."
     )
+    _add_boundary_arguments(preparation)
     preparation.add_argument("--candidates", required=True)
     preparation.add_argument("--out", required=True)
     validation = commands.add_parser(
         "validate-decisions", help="Validate independent terminal candidate decisions."
     )
+    _add_boundary_arguments(validation)
     validation.add_argument("--candidates", required=True)
     validation.add_argument("--validations", required=True)
     validation.add_argument("--discovery-actor", required=True)
@@ -109,6 +118,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     finalization = commands.add_parser(
         "finalize", help="Deduplicate accepted roots and write a defensive draft."
     )
+    _add_boundary_arguments(finalization)
     finalization.add_argument("--validated", required=True)
     finalization.add_argument("--findings-out", required=True)
     finalization.add_argument("--report-out", required=True)
@@ -150,6 +160,13 @@ def make_frontier(args: argparse.Namespace) -> None:
     output_path = Path(args.out).expanduser().resolve(strict=False)
     receipt_path = Path(args.receipt).expanduser().resolve(strict=False)
     _reject_output_collisions(
+        inputs=tuple(
+            path for path in (rank_input_path, rank_output_path) if path is not None
+        ),
+        outputs=(output_path, receipt_path),
+    )
+    _require_artifact_boundaries(
+        args,
         inputs=tuple(
             path for path in (rank_input_path, rank_output_path) if path is not None
         ),
@@ -249,6 +266,11 @@ def close_frontier(args: argparse.Namespace) -> None:
     _reject_output_collisions(
         inputs=(frontier_path, closures_path), outputs=(output_path,)
     )
+    _require_artifact_boundaries(
+        args,
+        inputs=(frontier_path, closures_path),
+        outputs=(output_path,),
+    )
     frontier = _load_jsonl(frontier_path, "frontier", _validate_frontier)
     closures = _load_jsonl(closures_path, "closure", _validate_closure)
     _require_unique_field(frontier, "work_id", "frontier")
@@ -304,6 +326,11 @@ def prepare_validation(args: argparse.Namespace) -> None:
     candidates_path = Path(args.candidates).expanduser().resolve(strict=True)
     output_path = Path(args.out).expanduser().resolve(strict=False)
     _reject_output_collisions(inputs=(candidates_path,), outputs=(output_path,))
+    _require_artifact_boundaries(
+        args,
+        inputs=(candidates_path,),
+        outputs=(output_path,),
+    )
     candidates = _load_jsonl(candidates_path, "candidate", _validate_candidate)
     _require_unique_field(candidates, "candidate_id", "candidates")
     hypotheses = []
@@ -332,6 +359,11 @@ def validate_decisions(args: argparse.Namespace) -> None:
     discovery_actor = _standalone_identifier(args.discovery_actor, "discovery actor")
     _reject_output_collisions(
         inputs=(candidates_path, validations_path), outputs=(output_path,)
+    )
+    _require_artifact_boundaries(
+        args,
+        inputs=(candidates_path, validations_path),
+        outputs=(output_path,),
     )
     candidates = _load_jsonl(candidates_path, "candidate", _validate_candidate)
     validations = _load_jsonl(
@@ -384,6 +416,11 @@ def finalize(args: argparse.Namespace) -> None:
     report_path = Path(args.report_out).expanduser().resolve(strict=False)
     receipt_path = Path(args.receipt).expanduser().resolve(strict=False)
     _reject_output_collisions(
+        inputs=(validated_path,),
+        outputs=(findings_path, report_path, receipt_path),
+    )
+    _require_artifact_boundaries(
+        args,
         inputs=(validated_path,),
         outputs=(findings_path, report_path, receipt_path),
     )
@@ -1161,6 +1198,38 @@ def _reject_output_collisions(
         raise HuntWorkflowError("output paths must be distinct")
     if any(output in set(inputs) for output in outputs):
         raise HuntWorkflowError("output paths must not overwrite input files")
+
+
+def _require_artifact_boundaries(
+    args: argparse.Namespace,
+    *,
+    inputs: tuple[Path, ...],
+    outputs: tuple[Path, ...],
+) -> None:
+    work_dir = Path(args.work_dir).expanduser().resolve(strict=True)
+    repository = Path(args.repository).expanduser().resolve(strict=True)
+    if not work_dir.is_dir():
+        raise HuntWorkflowError("Hunt work directory must be an existing directory")
+    if not repository.is_dir():
+        raise HuntWorkflowError("target repository must be an existing directory")
+    if (
+        work_dir == repository
+        or work_dir.is_relative_to(repository)
+        or repository.is_relative_to(work_dir)
+    ):
+        raise HuntWorkflowError(
+            "Hunt work directory and target repository must not overlap"
+        )
+    for path in inputs:
+        if not path.is_relative_to(work_dir):
+            raise HuntWorkflowError(
+                f"input path is outside Hunt work directory: {path}"
+            )
+    for path in outputs:
+        if not path.is_relative_to(work_dir):
+            raise HuntWorkflowError(
+                f"output path is outside Hunt work directory: {path}"
+            )
 
 
 def _sha256_file(path: Path) -> str:

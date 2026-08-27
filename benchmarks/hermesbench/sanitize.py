@@ -12,6 +12,10 @@ ADVISORY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 ADVISORY_URL = b"github.com/advisories/"
+SOURCE_IDENTIFIER_PATTERN = re.compile(
+    rb"(?:\bentry-\d{5}\b|\bvulngym\b)",
+    re.IGNORECASE,
+)
 _VCS_DIRECTORIES = frozenset({".git", ".hg", ".svn"})
 _SCAN_CHUNK_SIZE = 1024 * 1024
 _SCAN_OVERLAP = 128
@@ -34,8 +38,8 @@ def audit_bundle(root: Path) -> tuple[BundleViolation, ...]:
         relative_path = path.relative_to(resolved)
         relative = relative_path.as_posix()
         relative_bytes = relative.encode("utf-8", errors="surrogatepass")
-        if _contains_advisory(relative_bytes):
-            violations.add(BundleViolation("advisory_identifier", relative))
+        for code in _identifier_codes(relative_bytes):
+            violations.add(BundleViolation(code, relative))
         if path.is_symlink():
             violations.add(BundleViolation("symbolic_link", relative))
             continue
@@ -48,8 +52,9 @@ def audit_bundle(root: Path) -> tuple[BundleViolation, ...]:
                 continue
             violations.add(BundleViolation(code, relative))
             continue
-        if path.is_file() and _file_contains_advisory(path):
-            violations.add(BundleViolation("advisory_identifier", relative))
+        if path.is_file():
+            for code in _file_identifier_codes(path):
+                violations.add(BundleViolation(code, relative))
     return tuple(sorted(violations))
 
 
@@ -89,15 +94,24 @@ def _sorted_tree(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()))
 
 
-def _file_contains_advisory(path: Path) -> bool:
+def _file_identifier_codes(path: Path) -> frozenset[str]:
     overlap = b""
+    codes: set[str] = set()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(_SCAN_CHUNK_SIZE), b""):
             window = overlap + chunk
-            if _contains_advisory(window):
-                return True
+            codes.update(_identifier_codes(window))
             overlap = window[-_SCAN_OVERLAP:]
-    return False
+    return frozenset(codes)
+
+
+def _identifier_codes(value: bytes) -> frozenset[str]:
+    codes: set[str] = set()
+    if _contains_advisory(value):
+        codes.add("advisory_identifier")
+    if SOURCE_IDENTIFIER_PATTERN.search(value) is not None:
+        codes.add("source_identifier")
+    return frozenset(codes)
 
 
 def _contains_advisory(value: bytes) -> bool:

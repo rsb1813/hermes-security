@@ -1,6 +1,12 @@
 // Verifies the experimental Hunt workflow helper.
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
@@ -37,7 +43,18 @@ function readJsonl<T>(path: string): T[] {
 }
 
 function runHunt(...args: string[]) {
-  return Bun.spawnSync([pythonExecutable(), "-B", huntScript, ...args], {
+  const [command, ...commandArgs] = args;
+  const boundedArgs = args.includes("--work-dir")
+    ? args
+    : [
+        command!,
+        "--work-dir",
+        tmpdir(),
+        "--repository",
+        pluginRoot,
+        ...commandArgs,
+      ];
+  return Bun.spawnSync([pythonExecutable(), "-B", huntScript, ...boundedArgs], {
     cwd: pluginRoot,
     stdout: "pipe",
     stderr: "pipe",
@@ -142,6 +159,38 @@ function makeFrontier(profile: "hunt-balanced" | "hunt-max") {
   );
   return { result, frontier, receipt };
 }
+
+test("rejects Hunt outputs outside the declared work directory", () => {
+  const root = temporaryRoot();
+  const work = join(root, "work");
+  const repository = join(root, "repository");
+  mkdirSync(work);
+  mkdirSync(repository);
+  const input = join(work, "rank-input.jsonl");
+  const victim = join(repository, "source.py");
+  writeJsonl(input, rankInput);
+  writeFileSync(victim, "original source\n");
+
+  const result = runHunt(
+    "make-frontier",
+    "--work-dir",
+    work,
+    "--repository",
+    repository,
+    "--rank-input",
+    input,
+    "--profile",
+    "hunt-balanced",
+    "--out",
+    victim,
+    "--receipt",
+    join(work, "receipt.json"),
+  );
+
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr.toString()).toContain("outside Hunt work directory");
+  expect(readFileSync(victim, "utf8")).toBe("original source\n");
+});
 
 test("retains every ranked path and starts with a component coverage round", () => {
   const { result, frontier } = makeFrontier("hunt-balanced");

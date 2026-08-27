@@ -20,6 +20,10 @@ class CliError(ValueError):
     """Signals invalid command input without exposing private contents."""
 
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_PRIVATE_OUTPUT_ROOT = _REPOSITORY_ROOT / "benchmarks" / "hermesbench" / "private"
+
+
 class _JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise CliError(message)
@@ -160,6 +164,7 @@ def _import_command(
     private_output_path: Path,
     summary_output_path: Path,
 ) -> int:
+    private_output_path = _require_private_output_path(private_output_path)
     _reject_output_collisions(
         inputs=(entries_path, reports_path, key_path),
         outputs=(private_output_path, summary_output_path),
@@ -180,6 +185,29 @@ def _import_command(
     )
     _write_json(summary_output_path, summary.to_json())
     return 0
+
+
+def _require_private_output_path(path: Path) -> Path:
+    if _is_link_or_junction(_PRIVATE_OUTPUT_ROOT):
+        raise CliError("private output root must not be a link or junction")
+    resolved = path.expanduser().resolve(strict=False)
+    repository = _REPOSITORY_ROOT.resolve(strict=True)
+    private_root = _PRIVATE_OUTPUT_ROOT.resolve(strict=False)
+    if resolved.is_relative_to(repository) and not resolved.is_relative_to(
+        private_root
+    ):
+        raise CliError(
+            "private output inside the repository must be under "
+            "benchmarks/hermesbench/private"
+        )
+    return resolved
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return callable(is_junction) and bool(is_junction())
 
 
 def _load_evidence(path: Path) -> MiniEvidence:

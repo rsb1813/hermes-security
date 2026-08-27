@@ -58,6 +58,10 @@ python -m benchmarks.hermesbench import-vulngym `
 Only entries whose `verify` value is the integer `1` become candidates. The
 importer validates report membership, repository URL, vulnerable commit, and
 all labeled source locations before deriving a keyed anonymous task ID.
+When `--private-out` points inside this repository, it must remain under
+`benchmarks/hermesbench/private/`; paths outside the repository remain allowed.
+The in-repository private root must be a real directory, not a symbolic link or
+junction.
 
 ## Audit an agent-visible bundle
 
@@ -66,9 +70,9 @@ python -m benchmarks.hermesbench audit-bundle --bundle C:\prepared\hb-task
 ```
 
 Exit code `0` means no known contamination was found. Exit code `2` means the
-bundle contains a forbidden advisory identifier, version-control metadata, a
-symbolic link, or another invalid input. Auditing is read-only and never
-redacts source bytes.
+bundle contains a forbidden advisory or VulnGym source identifier,
+version-control metadata, a symbolic link, or another invalid input. Auditing
+is read-only and never redacts source bytes.
 
 ## Score predictions
 
