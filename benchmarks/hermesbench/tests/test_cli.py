@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import benchmarks.hermesbench.cli as hermes_cli
@@ -159,6 +160,19 @@ class AuditCommandTests(unittest.TestCase):
 
 
 class ScoreCommandTests(unittest.TestCase):
+    def test_host_score_callback_keeps_oracle_details_out_of_public_score(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            oracles = root / "oracles.jsonl"
+            predictions = root / "predictions.jsonl"
+            write_jsonl(oracles, ORACLES)
+            write_jsonl(predictions, PREDICTIONS)
+            public_score = hermes_cli._host_score_callback(oracles)(predictions)
+        encoded = json.dumps(public_score, sort_keys=True)
+        self.assertNotIn("tasks", public_score)
+        self.assertNotIn("authorization", encoded)
+        self.assertNotIn("group-a", encoded)
+
     def test_score_writes_the_machine_readable_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -256,6 +270,83 @@ class CompareCommandTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(comparison["full_required"])
         self.assertIn("final_stage", comparison["reasons"])
+
+
+class RunCommandTests(unittest.TestCase):
+    def test_run_parses_one_frozen_workflow_without_host_scoring_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            controls = root / "controls.json"
+            policy = root / "policy.json"
+            manifest = root / "manifest.json"
+            snapshots = root / "snapshots"
+            outputs = root / "outputs"
+            auth = root / "auth.json"
+            snapshots.mkdir()
+            outputs.mkdir()
+            write_json(controls, {
+                "schema_version": 1, "model": "fake", "reasoning_effort": "low",
+                "seed_supported": True, "seed": "1", "image_digest": "sha256:" + "a" * 64,
+                "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
+                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
+                "invocations_per_task": 2,
+            })
+            write_json(policy, {"allowed_command_prefixes": [["python"]]})
+            write_json(manifest, {"schema_version": 1, "suite": "canary", "manifest_id": "cli-test", "tasks": []})
+            auth.write_text("{}", encoding="utf-8")
+            result_value = SimpleNamespace(
+                artifact_paths={"aggregate_receipt": "single-workflow-receipt.json"},
+                receipt=SimpleNamespace(status="completed"),
+            )
+            with (
+                patch.object(hermes_cli, "load_manifest", return_value=object()),
+                patch.object(hermes_cli, "run_workflow", return_value=result_value) as run_workflow,
+            ):
+                exit_code = hermes_cli.main([
+                    "run", "--manifest", str(manifest), "--snapshots-root", str(snapshots),
+                    "--output-root", str(outputs), "--run-id", "single", "--workflow", "standard",
+                    "--profile", "baseline", "--controls", str(controls), "--execution-policy", str(policy),
+                    "--auth", str(auth),
+                ])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_workflow.call_args.kwargs["workflow"], "standard")
+        self.assertNotIn("oracle", repr(run_workflow.call_args.kwargs))
+
+    def test_run_paired_exposes_the_seedless_comparison_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            controls = root / "controls.json"
+            policy = root / "policy.json"
+            manifest = root / "manifest.json"
+            snapshots = root / "snapshots"
+            outputs = root / "outputs"
+            auth = root / "auth.json"
+            snapshots.mkdir()
+            outputs.mkdir()
+            write_json(controls, {
+                "schema_version": 1, "model": "fake", "reasoning_effort": "low",
+                "seed_supported": False, "seed": None, "image_digest": "sha256:" + "a" * 64,
+                "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
+                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
+                "invocations_per_task": 2,
+            })
+            write_json(policy, {"allowed_command_prefixes": [["python"]]})
+            write_json(manifest, {"schema_version": 1, "suite": "canary", "manifest_id": "cli-test", "tasks": []})
+            auth.write_text("{}", encoding="utf-8")
+            paired = SimpleNamespace(
+                schedule=(("standard", "hunt"), ("hunt", "standard"), ("standard", "hunt")),
+                comparisons=(SimpleNamespace(comparable=True),) * 3,
+            )
+            with (
+                patch.object(hermes_cli, "load_manifest", return_value=object()),
+                patch.object(hermes_cli, "run_paired", return_value=paired),
+            ):
+                exit_code = hermes_cli.main([
+                    "run-paired", "--manifest", str(manifest), "--snapshots-root", str(snapshots),
+                    "--output-root", str(outputs), "--run-id", "paired", "--controls", str(controls),
+                    "--execution-policy", str(policy), "--auth", str(auth), "--hunt-profile", "hunt-balanced",
+                ])
+        self.assertEqual(exit_code, 0)
 
 
 class ImportCommandTests(unittest.TestCase):

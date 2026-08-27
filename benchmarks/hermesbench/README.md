@@ -110,11 +110,89 @@ reasoning effort, seed policy, tool versions, time limit, or finding limit
 differs. Cached input, uncached input, and output tokens remain separate in run
 receipts.
 
+## Run an audited workflow
+
+`run` executes fresh discovery and verification phases. Each phase is a complete
+independent `codex exec` invocation with its own task receipts, event stream,
+predictions, and token usage. The verification phase receives only the bounded,
+canonical candidate JSONL produced from discovery. The final predictions path
+always points to verification output.
+
+The controls document has one exact versioned shape. Its image must be an
+immutable lowercase digest, and its invocation budget is exactly two per task.
+
+```json
+{
+  "schema_version": 1,
+  "model": "gpt-5.6-terra",
+  "reasoning_effort": "high",
+  "seed_supported": false,
+  "seed": null,
+  "image_digest": "sha256:<64-lowercase-hex-characters>",
+  "tool_versions": [["codex", "0.150.0-alpha.8"]],
+  "time_limit_seconds": 300,
+  "max_findings": 5,
+  "grader_version": "1",
+  "phase_protocol_version": 1,
+  "invocations_per_task": 2
+}
+```
+
+The execution-policy document contains only a frozen command-prefix list.
+
+```json
+{"allowed_command_prefixes":[["python","-m","unittest"]]}
+```
+
+```powershell
+python -m benchmarks.hermesbench run `
+  --manifest C:\private\manifest.json `
+  --snapshots-root C:\private\snapshots `
+  --output-root C:\private\work `
+  --run-id standard-canary `
+  --workflow standard `
+  --profile baseline `
+  --controls C:\private\controls.json `
+  --execution-policy C:\private\execution-policy.json `
+  --auth C:\private\auth.json `
+  --oracles C:\private\oracles.jsonl
+```
+
+The machine-readable result manifest lists only public artifact paths. The
+aggregate workflow receipt binds the controls, snapshot set, phase receipt
+bytes, candidate-transfer bytes, invocation count, elapsed time, and separate
+token classes. Private scorer inputs remain host-side and are not command
+arguments, requests, prompts, container mounts, or result-manifest fields.
+When `--oracles` is provided, the public result manifest also names the
+identity-free score artifact produced after verification.
+
+## Run paired repeats
+
+```powershell
+python -m benchmarks.hermesbench run-paired `
+  --manifest C:\private\manifest.json `
+  --snapshots-root C:\private\snapshots `
+  --output-root C:\private\work `
+  --run-id paired-canary `
+  --controls C:\private\controls.json `
+  --execution-policy C:\private\execution-policy.json `
+  --auth C:\private\auth.json `
+  --oracles C:\private\oracles.jsonl `
+  --hunt-profile hunt-balanced
+```
+
+When the backend has no seed support, the realized workflow schedule is exactly
+Standard/Hunt, Hunt/Standard, Standard/Hunt. A comparison is eligible only when
+both aggregate receipts are complete and all frozen controls, manifest and task
+order hashes, execution policy, snapshot set, phase protocol, and invocation
+count match. The command never retries a top-level phase automatically.
+The comparison artifact includes the exact public artifact paths for both arms
+of every repeat, including a score path when host-side scoring was requested.
+
 ## Current limits
 
-This foundation imports vulnerable labels but does not infer fixed commits,
-clone repositories, materialize snapshots, or run Standard or Hunt. Those
-steps require a separate corpus-preparation and runner layer so fixed revisions
+This foundation does not infer fixed commits, clone repositories, or materialize
+snapshots. Those corpus-preparation steps remain separate so fixed revisions
 can be reviewed rather than guessed.
 
 HermesBench Mini is optimization evidence, not final proof. A final, release,

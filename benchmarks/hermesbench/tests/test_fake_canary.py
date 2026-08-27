@@ -161,7 +161,7 @@ def _task_artifact_names() -> set[str]:
     return {
         f"tasks/{hashlib.sha256(task_id.encode()).hexdigest()}/{name}"
         for task_id in TASKS
-        for name in ("request.json", "adapter-response.json", "events.jsonl")
+        for name in ("request.json", "adapter-response.json", "events.jsonl", "commands.jsonl")
     }
 
 
@@ -259,7 +259,7 @@ class FakeCanaryTests(unittest.TestCase):
             self.assertEqual(standard_tree, _tree_bytes(repeat_outputs / "standard-001"))
             self.assertEqual(
                 set(standard_tree),
-                {"predictions.jsonl", "task-receipts.jsonl", "receipt.json"} | _task_artifact_names(),
+                {"predictions.jsonl", "task-receipts.jsonl", "commands.jsonl", "receipt.json"} | _task_artifact_names(),
             )
             for contents in standard_tree.values():
                 self.assertNotIn(sentinel.encode(), contents)

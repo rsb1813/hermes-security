@@ -20,6 +20,7 @@ from .sanitize import BundleAuditError, audit_bundle, tree_sha256
 
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_PUBLIC_COMMAND_TOKEN = re.compile(r"[-A-Za-z0-9_./:=@%+]+\Z")
 _ZERO_USAGE = TokenUsage(0, 0, 0)
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 
@@ -107,21 +108,24 @@ def run_suite(
 
     records: list[TaskRunReceipt] = []
     predictions: list[dict[str, object]] = []
+    commands: list[dict[str, object]] = []
     total_usage = _ZERO_USAGE
     for prepared in preflight:
-        record, prediction = _run_task(
+        record, prediction, task_commands = _run_task(
             prepared,
             tasks_directory,
             execution_policy,
             executor,
         )
         records.append(record)
+        commands.extend(task_commands)
         if prediction is not None:
             predictions.append(prediction)
             total_usage = _add_usage(total_usage, record.token_usage)
 
     _write_jsonl(run_directory / "predictions.jsonl", predictions)
     _write_jsonl(run_directory / "task-receipts.jsonl", (record.to_json() for record in records))
+    _write_jsonl(run_directory / "commands.jsonl", commands)
     receipt = RunReceipt(
         schema_version=RECEIPT_SCHEMA_VERSION,
         run_id=run_id,
@@ -193,7 +197,7 @@ def _run_task(
     tasks_directory: Path,
     policy: ExecutionPolicy,
     executor: Executor,
-) -> tuple[TaskRunReceipt, dict[str, object] | None]:
+) -> tuple[TaskRunReceipt, dict[str, object] | None, tuple[dict[str, object], ...]]:
     descriptor = prepared.descriptor
     task_directory = tasks_directory / _task_directory_name(descriptor.task_id)
     task_directory.mkdir()
@@ -211,6 +215,7 @@ def _run_task(
     usage = _ZERO_USAGE
     status = "failed"
     prediction: dict[str, object] | None = None
+    command_rows: tuple[dict[str, object], ...] = ()
     try:
         pre_sha256 = _audit_and_hash(prepared.snapshot_path, descriptor.task_id)
     except RunnerError:
@@ -225,12 +230,17 @@ def _run_task(
                 _assert_artifact_tree(task_directory, {"request.json"})
                 parsed = parse_adapter_response(result.raw_response, descriptor.task_id)
                 event_rows = _normalize_event_rows(result.event_rows)
+                command_rows = _command_rows(descriptor.task_id, result.observed_argv)
                 usage = parsed.token_usage
                 _write_json(task_directory / "adapter-response.json", _adapter_response_json(parsed))
                 _write_jsonl(task_directory / "events.jsonl", event_rows)
+                _write_jsonl(
+                    task_directory / "commands.jsonl",
+                    ({"argv": row["argv"]} for row in command_rows),
+                )
                 _assert_artifact_tree(
                     task_directory,
-                    {"request.json", "adapter-response.json", "events.jsonl"},
+                    {"request.json", "adapter-response.json", "events.jsonl", "commands.jsonl"},
                 )
                 try:
                     post_sha256 = _audit_and_hash(prepared.snapshot_path, descriptor.task_id)
@@ -259,6 +269,7 @@ def _run_task(
             token_usage=usage,
         ),
         prediction,
+        command_rows,
     )
 
 
@@ -323,6 +334,23 @@ def _commands_allowed(
         if not any(argv[: len(prefix)] == prefix for prefix in allowed):
             return False
     return True
+
+
+def _command_rows(
+    task_id: str, observed: object
+) -> tuple[dict[str, object], ...]:
+    if not isinstance(observed, tuple):
+        raise RunnerError("executor observed commands must be a tuple")
+    rows: list[dict[str, object]] = []
+    for argv in observed:
+        if not isinstance(argv, tuple) or not argv or any(
+            not isinstance(token, str)
+            or _PUBLIC_COMMAND_TOKEN.fullmatch(token) is None
+            for token in argv
+        ):
+            raise RunnerError("executor observed command is unsafe")
+        rows.append({"task_id": task_id, "argv": list(argv)})
+    return tuple(rows)
 
 
 def _post_snapshot_sha256(snapshot: Path, fallback: str) -> str:

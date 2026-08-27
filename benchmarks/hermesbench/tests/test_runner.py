@@ -314,7 +314,15 @@ class SuiteExecutionTests(unittest.TestCase):
             self.assertTrue((run_dir / "receipt.json").is_file())
             self.assertEqual(
                 {path.name for path in task_dirs[0].iterdir()},
-                {"request.json", "adapter-response.json", "events.jsonl"},
+                {"request.json", "adapter-response.json", "events.jsonl", "commands.jsonl"},
+            )
+            self.assertEqual(
+                json.loads((task_dirs[0] / "commands.jsonl").read_text(encoding="utf-8")),
+                {"argv": ["python", "-m", "unittest"]},
+            )
+            self.assertEqual(
+                json.loads((run_dir / "commands.jsonl").read_text(encoding="utf-8")),
+                {"task_id": "nested/task-a", "argv": ["python", "-m", "unittest"]},
             )
 
     def test_malformed_response_and_sensitive_event_are_not_written(self) -> None:

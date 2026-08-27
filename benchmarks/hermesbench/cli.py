@@ -8,10 +8,14 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from .contracts import ContractError, load_oracles, load_predictions
+from .adapters.codex_exec import CodexExecAdapter, load_managed_chatgpt_auth
+from .container_runtime import ContainerRuntime
+from .contracts import ContractError, load_manifest, load_oracles, load_predictions
 from .corpus import load_vulngym_candidates
 from .escalation import MiniEvidence, decide_escalation
 from .receipts import comparison_mismatches, load_receipt
+from .phase_runner import FrozenControls, PhaseRunnerError, run_paired, run_workflow
+from .runner import ExecutionPolicy
 from .sanitize import BundleAuditError, audit_bundle
 from .scoring import ScoringError, score_run
 
@@ -55,6 +59,15 @@ def build_parser() -> argparse.ArgumentParser:
     importer.add_argument("--key-file", type=Path, required=True)
     importer.add_argument("--private-out", type=Path, required=True)
     importer.add_argument("--summary-out", type=Path, required=True)
+
+    run = commands.add_parser("run")
+    _add_run_arguments(run)
+    run.add_argument("--workflow", choices=("standard", "hunt"), required=True)
+    run.add_argument("--profile", required=True)
+
+    paired = commands.add_parser("run-paired")
+    _add_run_arguments(paired)
+    paired.add_argument("--hunt-profile", choices=("hunt-balanced", "hunt-max"), required=True)
     return parser
 
 
@@ -86,6 +99,10 @@ def main(argv: list[str] | None = None) -> int:
                 args.private_out,
                 args.summary_out,
             )
+        if args.command == "run":
+            return _run_command(args)
+        if args.command == "run-paired":
+            return _run_paired_command(args)
         raise AssertionError(f"unhandled command: {args.command}")
     except (
         BundleAuditError,
@@ -100,7 +117,114 @@ def main(argv: list[str] | None = None) -> int:
             {"error": str(error), "error_type": type(error).__name__},
             stream=sys.stderr,
         )
-        return 2
+    return 2
+
+
+def _add_run_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--manifest", type=Path, required=True)
+    command.add_argument("--snapshots-root", type=Path, required=True)
+    command.add_argument("--output-root", type=Path, required=True)
+    command.add_argument("--run-id", required=True)
+    command.add_argument("--controls", type=Path, required=True)
+    command.add_argument("--execution-policy", type=Path, required=True)
+    command.add_argument("--auth", type=Path, required=True)
+    command.add_argument("--oracles", type=Path)
+
+
+def _run_command(args: argparse.Namespace) -> int:
+    manifest, controls, policy = _run_inputs(args)
+    adapter = _codex_adapter(args, controls, args.workflow, args.profile)
+    result = run_workflow(
+        manifest=manifest,
+        snapshots_root=args.snapshots_root,
+        output_root=args.output_root,
+        run_id=args.run_id,
+        workflow=args.workflow,
+        profile=args.profile,
+        controls=controls,
+        execution_policy=policy,
+        discovery_executor=adapter,
+        verification_executor_factory=adapter.for_verification,
+        score_callback=_host_score_callback(args.oracles) if args.oracles is not None else None,
+    )
+    _print_json({"artifacts": result.artifact_paths})
+    return 0 if result.receipt.status == "completed" else 2
+
+
+def _run_paired_command(args: argparse.Namespace) -> int:
+    manifest, controls, policy = _run_inputs(args)
+    standard = _codex_adapter(args, controls, "standard", "baseline")
+    hunt = _codex_adapter(args, controls, "hunt", args.hunt_profile)
+    result = run_paired(
+        manifest,
+        args.snapshots_root,
+        args.output_root,
+        args.run_id,
+        controls,
+        policy,
+        {"standard": standard, "hunt": hunt},
+        {"standard": standard.for_verification, "hunt": hunt.for_verification},
+        {"standard": "baseline", "hunt": args.hunt_profile},
+        (
+            {"standard": _host_score_callback(args.oracles), "hunt": _host_score_callback(args.oracles)}
+            if args.oracles is not None
+            else None
+        ),
+    )
+    _print_json(
+        {
+            "comparison": f"{args.run_id}-comparison.json",
+            "schedule": [list(item) for item in result.schedule],
+        }
+    )
+    return 0 if all(item.comparable for item in result.comparisons) else 2
+
+
+def _run_inputs(args: argparse.Namespace) -> tuple[object, FrozenControls, ExecutionPolicy]:
+    manifest = load_manifest(args.manifest)
+    try:
+        controls_value = json.loads(args.controls.read_text(encoding="utf-8"))
+        policy_value = json.loads(args.execution_policy.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise CliError("run inputs must contain valid JSON") from error
+    controls = FrozenControls.from_json(controls_value)
+    if not isinstance(policy_value, dict) or set(policy_value) != {"allowed_command_prefixes"}:
+        raise CliError("execution policy must contain only allowed_command_prefixes")
+    raw_prefixes = policy_value["allowed_command_prefixes"]
+    if not isinstance(raw_prefixes, list):
+        raise CliError("allowed_command_prefixes must be an array")
+    prefixes: list[tuple[str, ...]] = []
+    for prefix in raw_prefixes:
+        if not isinstance(prefix, list):
+            raise CliError("each allowed command prefix must be an array")
+        prefixes.append(tuple(prefix))
+    return manifest, controls, ExecutionPolicy(tuple(prefixes))
+
+
+def _codex_adapter(
+    args: argparse.Namespace,
+    controls: FrozenControls,
+    workflow: str,
+    profile: str,
+) -> CodexExecAdapter:
+    return CodexExecAdapter(
+        runtime=ContainerRuntime(controls.image_digest),
+        auth_supplier=lambda: load_managed_chatgpt_auth(args.auth),
+        workflow=workflow,
+        profile=profile,
+        model=controls.model,
+        reasoning_effort=controls.reasoning_effort,
+    )
+
+
+def _host_score_callback(oracles_path: Path):
+    oracles = load_oracles(oracles_path)
+
+    def score(predictions_path: Path) -> dict[str, object]:
+        result = score_run(oracles, load_predictions(predictions_path)).to_json()
+        return {key: value for key, value in result.items() if key != "tasks"}
+
+    return score
 
 
 def _audit_command(bundle: Path) -> int:

@@ -43,6 +43,10 @@
 - [x] Connect one common Codex non-interactive adapter to Standard and Hunt.
   - [x] Verify host `codex exec --output-schema` acceptance for the pinned prediction schema.
   - [x] Complete the managed-auth container model smoke with a valid public result.
+- [x] Implement paired discovery and verification runner.
+  - [x] Record focused RED evidence.
+  - [x] Bind canonical candidate transfer and independently auditable phase receipts.
+  - [x] Verify single-workflow and exact seedless AB/BA/AB paired execution.
 - [ ] Connect the benchmark runner to the unchanged Standard workflow.
 - [ ] Run and verify Canary.
 - [ ] Freeze the Mini task manifest and configuration.
@@ -76,6 +80,6 @@
 ## Completion
 
 - [x] Run the complete repository test suite.
-- [ ] Review the final diff for scope, safety, and public-data boundaries.
-- [ ] Commit each verified logical unit.
+- [x] Review the final diff for scope, safety, and public-data boundaries.
+- [x] Commit the verified Task 6 logical unit.
 - [ ] Publish the evidence-backed comparison report.
