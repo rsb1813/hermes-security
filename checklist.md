@@ -14,8 +14,9 @@
 
 - [x] Receive approval for the in-conversation architecture.
 - [x] Write and self-review the detailed design specification.
-- [ ] Receive approval for the written design specification.
-- [ ] Write the file-by-file implementation plan.
+- [x] Receive approval for the written design specification.
+- [x] Write the file-by-file HermesBench foundation implementation plan.
+- [ ] Write the file-by-file Hunt workflow implementation plan after the foundation is verified.
 
 ## Benchmark foundation
 

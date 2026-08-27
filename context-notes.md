@@ -73,3 +73,14 @@
 - Confirm the exact VulnGym revision and eligible corpus count during corpus preparation.
 - Decide whether the first runner adapter invokes the existing CLI, plugin skill, or internal SDK after reading the actual call boundaries.
 - Decide which optional diversity lane is reproducible enough for the first full edition.
+
+### Written design approval and implementation decomposition
+
+- The user approved the written design on 2026-08-27 and explicitly authorized development.
+- The implementation is split into independently testable benchmark-foundation and Hunt-workflow plans.
+- `docs/superpowers/plans/2026-08-27-hermesbench-foundation.md` is the first executable plan.
+- The benchmark foundation remains outside the public SDK and CLI surface under `benchmarks/hermesbench/`.
+- Hunt will initially enter through a standalone bundled skill because adding it to `ScanMode` would change the public CLI and SDK contracts.
+- The current deterministic repository inventory, rank shards, bounded worker plan, validation, and merge commands can be reused without modifying `generate_rank_input.py`.
+- `select-deep-review-input` is not suitable for Hunt coverage because its top-percent behavior can discard low-ranked files. Hunt must preserve the whole inventory and use ranking only for processing order.
+- The locally inspected VulnGym revision is `cd69f7e163e08485ab5496115ae03439cda6e27e`.
