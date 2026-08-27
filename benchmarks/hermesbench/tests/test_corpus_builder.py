@@ -837,6 +837,76 @@ class CorpusBuilderTests(unittest.TestCase):
                 )
             self.assertFalse((root / "rejected").exists())
 
+    def test_builder_redacts_fixed_comments_at_vulnerable_old_line_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, _ = _synthetic_pair(root)
+            fixed_source = (
+                "def process(request):\n"
+                "    # stable fixed context\n"
+                "    # SECURITY FIX CVE-9999-9999\n"
+                "    cleaned_value = sanitize(request[\"value\"])\n"
+                "    execute(cleaned_value)\n"
+            )
+            (repository / "module.py").write_text(fixed_source, encoding="utf-8")
+            fixed = _commit(repository, "moved fixed path")
+            selected = _selected_row(repository, vulnerable, fixed)
+            moved_location = Location("module.py", 4, 4)
+            moved_fixed_path = GoldPath(
+                "path-1",
+                moved_location,
+                Location("module.py", 5, 5),
+                (moved_location,),
+            )
+            comment = b"    # SECURITY FIX CVE-9999-9999\n"
+            selected["fixed_locations"] = [_gold_to_json(moved_fixed_path)]
+            selected["comment_redactions"] = [
+                {
+                    "tree": _tree(repository, fixed),
+                    "path": "module.py",
+                    "blob_sha256": _blob_hash(repository, fixed, "module.py"),
+                    "line": 3,
+                    "expected_line_sha256": hashlib.sha256(comment).hexdigest(),
+                }
+            ]
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [selected])
+            result = build_reviewed_corpus(
+                ledger,
+                {"source-candidate-1": _candidate(vulnerable)},
+                {"source-candidate-1": repository},
+                root / "output",
+                b"synthetic-key",
+                suite="canary",
+            )
+            snapshots = [path.read_bytes() for path in result.snapshots_root.glob("*/module.py")]
+            self.assertIn(VULNERABLE_SOURCE.encode("utf-8"), snapshots)
+            fixed_bytes = next(contents for contents in snapshots if contents != VULNERABLE_SOURCE.encode("utf-8"))
+            self.assertIn(b"    # [redacted]\n", fixed_bytes)
+            self.assertEqual(fixed_bytes.count(b"\n"), fixed_source.encode("utf-8").count(b"\n"))
+
+            overlap_location = Location("module.py", 3, 3)
+            selected["fixed_locations"] = [
+                _gold_to_json(
+                    GoldPath(
+                        "path-1",
+                        overlap_location,
+                        overlap_location,
+                        (overlap_location,),
+                    )
+                )
+            ]
+            _write_ledger(ledger, [selected])
+            with self.assertRaisesRegex(CorpusBuildError, "gold or root"):
+                build_reviewed_corpus(
+                    ledger,
+                    {"source-candidate-1": _candidate(vulnerable)},
+                    {"source-candidate-1": repository},
+                    root / "rejected",
+                    b"synthetic-key",
+                    suite="canary",
+                )
+
     def test_builder_symmetrically_quarantines_only_non_gold_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

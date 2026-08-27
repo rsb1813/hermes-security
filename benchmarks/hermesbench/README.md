@@ -211,7 +211,7 @@ Fixed comment redactions bind the fixed tree, complete original blob SHA-256,
 exact line or line range, and SHA-256 of the original selected line bytes. The
 builder accepts only language-appropriate comment-only lines, preserves line
 count and newline style with a fixed comment marker, and rejects overlaps with
-gold entry, root, trace, or retired-path locations. `quarantine_paths` must be
+fixed-tree retired entry, root, or trace locations. `quarantine_paths` must be
 present in at least one pinned tree and cannot contain a gold or root source
 file or the reviewed `license_path`. They are excluded symmetrically before
 snapshot auditing. An exact quarantine path may also name a mode `120000` blob

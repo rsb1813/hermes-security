@@ -251,7 +251,7 @@ def _build_stage(
         _verify_fixed_locations(candidate.gold_path, row.fixed_locations, fixed_tree)
         _verify_root_changed(candidate.gold_path, vulnerable_tree, fixed_tree)
         _verify_disclosure_metadata_is_quarantined(row.quarantine_paths, vulnerable_tree, fixed_tree)
-        redacted_fixed_tree = _apply_comment_redactions(candidate.gold_path, row, fixed_tree)
+        redacted_fixed_tree = _apply_comment_redactions(row, fixed_tree)
         materialized_vulnerable_tree = _without_quarantine(vulnerable_tree, row.quarantine_paths)
         materialized_fixed_tree = _without_quarantine(redacted_fixed_tree, row.quarantine_paths)
 
@@ -603,14 +603,13 @@ def _verify_disclosure_metadata_is_quarantined(
 
 
 def _apply_comment_redactions(
-    vulnerable: GoldPath,
     row: SelectedLedgerRow,
     fixed_tree: Mapping[str, bytes],
 ) -> dict[str, bytes]:
     redacted = dict(fixed_tree)
     protected = {
         (location.path, line)
-        for path in (vulnerable, *row.fixed_locations)
+        for path in row.fixed_locations
         for location in _all_locations(path)
         for line in range(location.start_line, location.end_line + 1)
     }
