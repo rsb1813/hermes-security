@@ -6,8 +6,10 @@ import base64
 import binascii
 import json
 import math
+import os
 import re
 import shlex
+import stat
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -66,6 +68,10 @@ _STANDARD_SKILL = "/workspace/plugin/skills/security-scan/SKILL.md"
 _HUNT_SKILL = "/workspace/plugin/skills/hunt-security-scan/SKILL.md"
 _SCHEMA_PATH = "/workspace/schema/prediction-response.schema.json"
 _WRAPPER_PATH = "/usr/local/bin/codex_auth_fifo.py"
+_FINAL_RESPONSE_CONTAINER_PATH = "/workspace/scratch/final-response.json"
+_FINAL_RESPONSE_NAME = "final-response.json"
+_MAX_FINAL_RESPONSE_BYTES = 256 * 1024
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 REQUIRED_HUNT_READ_ONLY_COMMAND_PREFIXES = (
     ("rg",),
     ("python3", "/workspace/plugin/scripts/generate_in_scope_files.py"),
@@ -217,6 +223,8 @@ class CodexExecAdapter:
             self._phase,
             self._candidates_for_request(request.task_id),
         )
+        final_response_path = scratch_path / _FINAL_RESPONSE_NAME
+        _require_absent_final_response(final_response_path)
         try:
             result = self._runtime.execute(
                 snapshot_path=Path(request.snapshot_path),
@@ -232,7 +240,7 @@ class CodexExecAdapter:
             raise ExecutorTimeoutError() from error
         except Exception as error:
             raise CodexExecError("container execution failed") from error
-        return _parse_result(result, request.task_id)
+        return _parse_result(result, request.task_id, final_response_path)
 
     def _candidates_for_request(
         self, task_id: str
@@ -383,6 +391,8 @@ def _command_argv(
             "--skip-git-repo-check",
             "--output-schema",
             _SCHEMA_PATH,
+            "--output-last-message",
+            _FINAL_RESPONSE_CONTAINER_PATH,
             "--model",
             model,
             "--cd",
@@ -432,7 +442,99 @@ def _prompt(
     )
 
 
-def _parse_result(result: object, task_id: str) -> ExecutorResult:
+def _require_absent_final_response(path: Path) -> None:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise CodexExecError(
+            "final response is invalid", failure_code="final_response_invalid"
+        ) from error
+    raise CodexExecError(
+        "final response is invalid", failure_code="final_response_invalid"
+    )
+
+
+def _load_final_response(path: Path) -> object:
+    try:
+        encoded = _read_final_response(path)
+        return json.loads(encoded.decode("utf-8"))
+    except (OSError, ValueError) as error:
+        raise CodexExecError(
+            "final response is invalid", failure_code="final_response_invalid"
+        ) from error
+
+
+def _read_final_response(path: Path) -> bytes:
+    before = os.lstat(path)
+    _validate_final_response_metadata(before)
+    identity = _final_response_identity(before)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        _validate_final_response_metadata(opened)
+        if _final_response_identity(opened) != identity:
+            raise ValueError("final response identity changed before open")
+        encoded = _read_bounded_final_response(descriptor)
+    finally:
+        os.close(descriptor)
+    after = os.lstat(path)
+    _validate_final_response_metadata(after)
+    if _final_response_identity(after) != identity:
+        raise ValueError("final response identity changed after read")
+    return encoded
+
+
+def _read_bounded_final_response(descriptor: int) -> bytes:
+    value = bytearray()
+    while True:
+        chunk = os.read(
+            descriptor,
+            min(16 * 1024, _MAX_FINAL_RESPONSE_BYTES + 1 - len(value)),
+        )
+        if not chunk:
+            return bytes(value)
+        value.extend(chunk)
+        if len(value) > _MAX_FINAL_RESPONSE_BYTES:
+            raise ValueError("final response exceeds the maximum size")
+
+
+def _validate_final_response_metadata(metadata: object) -> None:
+    mode = getattr(metadata, "st_mode", None)
+    links = getattr(metadata, "st_nlink", None)
+    if isinstance(mode, bool) or not isinstance(mode, int) or not stat.S_ISREG(mode):
+        raise ValueError("final response is not a regular file")
+    if isinstance(links, bool) or not isinstance(links, int) or links != 1:
+        raise ValueError("final response has an invalid link count")
+    attributes = getattr(metadata, "st_file_attributes", None)
+    if attributes is None:
+        if os.name == "nt":
+            raise ValueError("final response attributes are unavailable")
+        return
+    if isinstance(attributes, bool) or not isinstance(attributes, int):
+        raise ValueError("final response attributes are invalid")
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ValueError("final response is a reparse point")
+
+
+def _final_response_identity(metadata: object) -> tuple[int, int]:
+    device = getattr(metadata, "st_dev", None)
+    inode = getattr(metadata, "st_ino", None)
+    if (
+        isinstance(device, bool)
+        or not isinstance(device, int)
+        or isinstance(inode, bool)
+        or not isinstance(inode, int)
+    ):
+        raise ValueError("final response identity is unavailable")
+    return device, inode
+
+
+def _parse_result(
+    result: object, task_id: str, final_response_path: Path
+) -> ExecutorResult:
     if not isinstance(result, ContainerResult):
         raise CodexExecError(
             "container execution failed", failure_code="container_execution_failed"
@@ -442,7 +544,6 @@ def _parse_result(result: object, task_id: str) -> ExecutorResult:
     rows = _parse_jsonl(result.stdout)
     events: list[dict[str, object]] = []
     commands: list[tuple[str, ...]] = []
-    prediction: object | None = None
     usage: object | None = None
     terminal_seen = False
     for row in rows:
@@ -482,18 +583,11 @@ def _parse_result(result: object, task_id: str) -> ExecutorResult:
                 commands.append(_normalize_command(command))
             elif item_type == "agent_message":
                 text = item.get("text")
-                if prediction is not None or not isinstance(text, str):
+                if not isinstance(text, str):
                     raise CodexExecError(
                         "final response is invalid",
                         failure_code="final_response_invalid",
                     )
-                try:
-                    prediction = json.loads(text)
-                except json.JSONDecodeError as error:
-                    raise CodexExecError(
-                        "final response is invalid",
-                        failure_code="final_response_invalid",
-                    ) from error
             elif item_type in {"reasoning", "file_change"}:
                 pass
             else:
@@ -508,11 +602,12 @@ def _parse_result(result: object, task_id: str) -> ExecutorResult:
                 )
             usage = _normalize_terminal_usage(row["usage"])
             terminal_seen = True
-    if prediction is None or usage is None or not terminal_seen:
+    if usage is None or not terminal_seen:
         raise CodexExecError(
             "terminal response is incomplete",
             failure_code="terminal_response_incomplete",
         )
+    prediction = _load_final_response(final_response_path)
     try:
         response = parse_adapter_response({"prediction": prediction, "usage": usage}, task_id)
     except Exception as error:

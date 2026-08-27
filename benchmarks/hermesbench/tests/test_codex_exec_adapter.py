@@ -19,6 +19,11 @@ from benchmarks.hermesbench.contracts import Location
 from benchmarks.hermesbench.runner import ExecutorTimeoutError
 
 
+_FINAL_PREDICTION = json.dumps(
+    {"schema_version": 1, "task_id": "task-001", "findings": []}
+)
+
+
 def _jwt(expires_at: datetime) -> str:
     header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=")
     payload = base64.urlsafe_b64encode(
@@ -28,14 +33,26 @@ def _jwt(expires_at: datetime) -> str:
 
 
 class _Runtime:
-    def __init__(self, stdout: bytes, exit_code: int = 0, stderr: bytes = b"") -> None:
+    def __init__(
+        self,
+        stdout: bytes,
+        exit_code: int = 0,
+        stderr: bytes = b"",
+        final_message: str | None = _FINAL_PREDICTION,
+    ) -> None:
         self.stdout = stdout
         self.exit_code = exit_code
         self.stderr = stderr
+        self.final_message = final_message
         self.calls: list[dict[str, object]] = []
 
     def execute(self, **kwargs: object) -> ContainerResult:
         self.calls.append(kwargs)
+        if self.exit_code == 0 and self.final_message is not None:
+            Path(kwargs["scratch_path"], "final-response.json").write_text(
+                self.final_message,
+                encoding="utf-8",
+            )
         return ContainerResult(
             stdout=self.stdout,
             stderr=self.stderr,
@@ -195,8 +212,16 @@ class CodexExecAdapterTests(unittest.TestCase):
         hunt_runtime = _Runtime(_stream())
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
-            self._adapter("standard", "baseline", standard_runtime)(_request(), scratch, 60)
-            self._adapter("hunt", "hunt-balanced", hunt_runtime)(_request(), scratch, 60)
+            standard_scratch = scratch / "standard"
+            hunt_scratch = scratch / "hunt"
+            standard_scratch.mkdir()
+            hunt_scratch.mkdir()
+            self._adapter("standard", "baseline", standard_runtime)(
+                _request(), standard_scratch, 60
+            )
+            self._adapter("hunt", "hunt-balanced", hunt_runtime)(
+                _request(), hunt_scratch, 60
+            )
 
         standard = standard_runtime.calls[0]
         hunt = hunt_runtime.calls[0]
@@ -219,6 +244,11 @@ class CodexExecAdapterTests(unittest.TestCase):
             json.loads(hunt["confidential_stdin"])["auth"]["tokens"],
         )
         self.assertTrue(all(flag in standard_command for flag in ("--ephemeral", "--json", "--output-schema", "--strict-config", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check")))
+        self.assertIn("--output-last-message", standard_command)
+        self.assertEqual(
+            standard_command[standard_command.index("--output-last-message") + 1],
+            "/workspace/scratch/final-response.json",
+        )
         self.assertNotIn("--sandbox", standard_command)
         self.assertNotIn("workspace-write", standard_command)
         self.assertIn("features.multi_agent=false", standard_command)
@@ -436,7 +466,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "container execution failed: invalid_json_schema")
         self.assertNotIn(raw_message, str(caught.exception))
 
-    def test_invalid_agent_message_exposes_only_a_bounded_failure_code(self) -> None:
+    def test_intermediate_agent_messages_do_not_replace_the_output_last_message(self) -> None:
         raw_message = "private model text must not persist"
         rows = (
             {
@@ -453,9 +483,35 @@ class CodexExecAdapterTests(unittest.TestCase):
             },
         )
         runtime = _Runtime(
-            b"".join(json.dumps(row).encode("utf-8") + b"\n" for row in rows)
+            b"".join(json.dumps(row).encode("utf-8") + b"\n" for row in rows),
+            final_message=_FINAL_PREDICTION,
         )
 
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._adapter("standard", "baseline", runtime)(
+                _request(), Path(directory), 60
+            )
+
+        self.assertEqual(result.raw_response["prediction"]["task_id"], "task-001")
+        self.assertNotIn(raw_message, json.dumps(result.raw_response))
+
+    def test_missing_or_invalid_output_last_message_is_rejected(self) -> None:
+        for final_message in (None, "not-json"):
+            with self.subTest(final_message=final_message):
+                runtime = _Runtime(_stream(), final_message=final_message)
+                with tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(CodexExecError) as caught:
+                        self._adapter("standard", "baseline", runtime)(
+                            _request(), Path(directory), 60
+                        )
+
+                self.assertEqual(
+                    caught.exception.failure_code,
+                    "final_response_invalid",
+                )
+
+    def test_oversized_output_last_message_is_rejected(self) -> None:
+        runtime = _Runtime(_stream(), final_message="x" * (256 * 1024 + 1))
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as caught:
                 self._adapter("standard", "baseline", runtime)(
@@ -463,7 +519,6 @@ class CodexExecAdapterTests(unittest.TestCase):
                 )
 
         self.assertEqual(caught.exception.failure_code, "final_response_invalid")
-        self.assertNotIn(raw_message, str(caught.exception))
 
     def test_nonzero_result_hides_unknown_or_credential_like_error_values(self) -> None:
         raw_message = "test-sentinel-must-not-escape"
