@@ -353,7 +353,7 @@ class RunCommandTests(unittest.TestCase):
                 "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
                 "invocations_per_task": 2,
             })
-            write_json(policy, {"allowed_command_prefixes": HUNT_READ_ONLY_COMMAND_PREFIXES})
+            write_json(policy, {"allowed_command_prefixes": [["python"]]})
             write_json(manifest, {"schema_version": 1, "suite": "canary", "manifest_id": "cli-test", "tasks": []})
             auth.write_text("{}", encoding="utf-8")
             result_value = SimpleNamespace(
