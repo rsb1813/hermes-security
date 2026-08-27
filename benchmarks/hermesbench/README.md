@@ -240,8 +240,9 @@ The builder intentionally does not infer fixed commits, clone repositories, or
 perform network access. It also does not reuse blobs with hard links: snapshots
 remain independent until a private materializer can add that optimization with
 equivalent audit and publication guarantees. Git reads clear inherited `GIT_*`
-repository-routing state, disable replace-object behavior, and use only the
-provided local repository object store.
+repository-routing state, disable replace-object behavior, and read each tree's
+regular blobs through one checked `cat-file --batch` response. The builder uses
+only the provided local repository object store.
 
 HermesBench Mini is optimization evidence, not final proof. A final, release,
 or public performance claim always requires the full HermesBench. The first

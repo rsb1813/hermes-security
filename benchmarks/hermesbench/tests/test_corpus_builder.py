@@ -100,6 +100,17 @@ def _synthetic_pair(
     return repository, vulnerable, fixed
 
 
+def _synthetic_blob_tree(root: Path, payloads: dict[str, bytes]) -> tuple[Path, str]:
+    repository = root / "blob-repository"
+    repository.mkdir(parents=True)
+    _git(repository, "init", "--quiet")
+    for path, contents in payloads.items():
+        target = repository.joinpath(*path.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+    return repository, _commit(repository, "binary blobs")
+
+
 def _ignored_workspace(root: Path) -> Path:
     workspace = root / "workspace"
     workspace.mkdir()
@@ -464,6 +475,76 @@ class CorpusBuilderTests(unittest.TestCase):
         with patch.object(corpus_builder, "_git_bytes", side_effect=(raw, b"contents")):
             with self.assertRaisesRegex(CorpusBuildError, "Windows-unsafe"):
                 corpus_builder._read_tree(Path("synthetic"), "2" * 40)
+
+    def test_tree_reader_batches_many_binary_blobs_in_two_git_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            payloads = {
+                "binary/embedded-nul.bin": b"\0prefix\nbody\0suffix\n",
+                "binary/empty.bin": b"",
+                "binary/newlines.bin": b"\n\n",
+                "binary/no-final-newline.bin": b"last line",
+            }
+            payloads.update(
+                {
+                    f"many/blob-{index:03d}.bin": f"payload {index}\n".encode("ascii")
+                    for index in range(64)
+                }
+            )
+            repository, commit = _synthetic_blob_tree(root, payloads)
+            tree = _tree(repository, commit)
+            with patch.object(
+                corpus_builder,
+                "_git_completed",
+                wraps=corpus_builder._git_completed,
+            ) as git_completed:
+                loaded = corpus_builder._read_tree(repository, tree)
+            self.assertEqual(loaded, payloads)
+            commands = [call.args[1:] for call in git_completed.call_args_list]
+            self.assertEqual(commands[0], ("ls-tree", "-r", "-z", tree))
+            self.assertEqual(commands[1], ("cat-file", "--batch"))
+            self.assertEqual(
+                git_completed.call_args_list[1].kwargs["input_bytes"].count(b"\n"),
+                len(payloads),
+            )
+            self.assertLessEqual(git_completed.call_count, 2)
+
+    def test_tree_reader_rejects_malformed_batch_framing(self) -> None:
+        object_id = b"1" * 40
+        tree = b"100644 blob " + object_id + b"\tblob.bin\0"
+        malformed = (
+            b"0" * 40 + b" blob 1\nx\n",
+            object_id + b" blob 1\nx",
+            object_id + b" blob 1\nx\ntrailing",
+            object_id + b" missing\n",
+            object_id + b" tree 1\nx\n",
+            object_id + b" blob no-size\nx\n",
+            object_id + b" blob 2\nx\n",
+        )
+        for output in malformed:
+            with self.subTest(output=output), patch.object(
+                corpus_builder,
+                "_git_bytes",
+                side_effect=(tree, output),
+            ):
+                with self.assertRaisesRegex(CorpusBuildError, "batch output"):
+                    corpus_builder._read_tree(Path("synthetic"), "2" * 40)
+
+    def test_tree_reader_rejects_out_of_order_batch_headers(self) -> None:
+        first = b"1" * 40
+        second = b"2" * 40
+        tree = (
+            b"100644 blob " + first + b"\tfirst.bin\0"
+            b"100644 blob " + second + b"\tsecond.bin\0"
+        )
+        reversed_output = second + b" blob 1\nb\n" + first + b" blob 1\na\n"
+        with patch.object(
+            corpus_builder,
+            "_git_bytes",
+            side_effect=(tree, reversed_output),
+        ):
+            with self.assertRaisesRegex(CorpusBuildError, "batch output"):
+                corpus_builder._read_tree(Path("synthetic"), "3" * 40)
 
     def test_builder_ignores_inherited_git_repository_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

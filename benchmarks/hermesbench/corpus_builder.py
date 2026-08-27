@@ -462,7 +462,7 @@ def _verify_git_revisions(repository: Path, row: SelectedLedgerRow) -> tuple[dic
 
 def _read_tree(repository: Path, tree: str) -> dict[str, bytes]:
     raw = _git_bytes(repository, "ls-tree", "-r", "-z", tree)
-    blobs: dict[str, bytes] = {}
+    paths: list[tuple[str, str]] = []
     folded: set[str] = set()
     for entry in raw.split(b"\0"):
         if not entry:
@@ -479,10 +479,48 @@ def _read_tree(repository: Path, tree: str) -> dict[str, bytes]:
         folded.add(path.casefold())
         if object_type != "blob" or mode not in {"100644", "100755"}:
             raise CorpusBuildError("Git tree contains an unsupported entry")
-        blobs[path] = _git_bytes(repository, "cat-file", "blob", object_id)
-    if not blobs:
+        if _COMMIT_PATTERN.fullmatch(object_id) is None:
+            raise CorpusBuildError("Git tree entry has an invalid object ID")
+        paths.append((path, object_id))
+    if not paths:
         raise CorpusBuildError("Git tree must contain regular files")
-    return blobs
+    object_ids = tuple(dict.fromkeys(object_id for _, object_id in paths))
+    contents = _read_batch_blobs(repository, object_ids)
+    return {path: contents[object_id] for path, object_id in paths}
+
+
+def _read_batch_blobs(
+    repository: Path, object_ids: tuple[str, ...]
+) -> dict[str, bytes]:
+    request = b"".join(object_id.encode("ascii") + b"\n" for object_id in object_ids)
+    raw = _git_bytes(repository, "cat-file", "--batch", input_bytes=request)
+    cursor = 0
+    contents: dict[str, bytes] = {}
+    for object_id in object_ids:
+        header_end = raw.find(b"\n", cursor)
+        if header_end < 0:
+            raise CorpusBuildError("Git batch output is malformed")
+        header = raw[cursor:header_end].split(b" ")
+        cursor = header_end + 1
+        if (
+            len(header) != 3
+            or header[0] != object_id.encode("ascii")
+            or header[1] != b"blob"
+            or not header[2].isdigit()
+        ):
+            raise CorpusBuildError("Git batch output is malformed")
+        try:
+            size = int(header[2])
+        except ValueError as error:
+            raise CorpusBuildError("Git batch output is malformed") from error
+        payload_end = cursor + size
+        if payload_end >= len(raw) or raw[payload_end : payload_end + 1] != b"\n":
+            raise CorpusBuildError("Git batch output is malformed")
+        contents[object_id] = raw[cursor:payload_end]
+        cursor = payload_end + 1
+    if cursor != len(raw):
+        raise CorpusBuildError("Git batch output is malformed")
+    return contents
 
 
 def _verify_gold_locations(path: GoldPath, tree: Mapping[str, bytes], name: str) -> None:
@@ -698,8 +736,12 @@ def _git(repository: Path, *arguments: str) -> str:
     return _git_bytes(repository, *arguments).decode("utf-8", errors="strict").strip()
 
 
-def _git_bytes(repository: Path, *arguments: str) -> bytes:
-    completed = _git_completed(repository, *arguments, check=True)
+def _git_bytes(
+    repository: Path, *arguments: str, input_bytes: bytes | None = None
+) -> bytes:
+    completed = _git_completed(
+        repository, *arguments, check=True, input_bytes=input_bytes
+    )
     return completed.stdout
 
 
@@ -708,7 +750,7 @@ def _git_success(repository: Path, *arguments: str) -> bool:
 
 
 def _git_completed(
-    repository: Path, *arguments: str, check: bool
+    repository: Path, *arguments: str, check: bool, input_bytes: bytes | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     try:
         completed = subprocess.run(
@@ -717,6 +759,7 @@ def _git_completed(
             shell=False,
             capture_output=True,
             env=_git_environment(),
+            input=input_bytes,
         )
     except (OSError, subprocess.CalledProcessError) as error:
         raise CorpusBuildError("pinned local Git verification failed") from error
