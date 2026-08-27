@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
@@ -134,6 +135,15 @@ EVIDENCE = {
     "release_candidate": False,
     "public_performance_claim": False,
 }
+HUNT_READ_ONLY_COMMAND_PREFIXES = [
+    ["rg"],
+    ["python3", "/workspace/plugin/scripts/generate_in_scope_files.py"],
+    ["python3", "/workspace/plugin/scripts/generate_rank_input.py"],
+    ["python3", "/workspace/plugin/scripts/hunt_workflow.py"],
+    ["python3", "/workspace/plugin/scripts/normalize_candidates.py"],
+    ["python3", "/workspace/plugin/scripts/resolve_security_md.py"],
+    ["python3", "/workspace/plugin/scripts/finalize_scan_contract.py"],
+]
 
 
 class AuditCommandTests(unittest.TestCase):
@@ -273,6 +283,58 @@ class CompareCommandTests(unittest.TestCase):
 
 
 class RunCommandTests(unittest.TestCase):
+    def test_hunt_commands_reject_missing_read_only_prefixes_before_adapter_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            controls = root / "controls.json"
+            policy = root / "policy.json"
+            manifest = root / "manifest.json"
+            snapshots = root / "snapshots"
+            outputs = root / "outputs"
+            auth = root / "auth.json"
+            snapshots.mkdir()
+            outputs.mkdir()
+            write_json(controls, {
+                "schema_version": 1, "model": "fake", "reasoning_effort": "low",
+                "seed_supported": True, "seed": "1", "image_digest": "sha256:" + "a" * 64,
+                "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
+                "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
+                "invocations_per_task": 2,
+            })
+            write_json(policy, {"allowed_command_prefixes": [["rg"]]})
+            write_json(manifest, {"schema_version": 1, "suite": "canary", "manifest_id": "cli-test", "tasks": []})
+            auth.write_text("{}", encoding="utf-8")
+            commands = (
+                (
+                    "run", "--manifest", str(manifest), "--snapshots-root", str(snapshots),
+                    "--output-root", str(outputs), "--run-id", "single", "--workflow", "hunt",
+                    "--profile", "hunt-balanced", "--controls", str(controls), "--execution-policy", str(policy),
+                    "--auth", str(auth),
+                ),
+                (
+                    "run-paired", "--manifest", str(manifest), "--snapshots-root", str(snapshots),
+                    "--output-root", str(outputs), "--run-id", "paired", "--controls", str(controls),
+                    "--execution-policy", str(policy), "--auth", str(auth), "--hunt-profile", "hunt-balanced",
+                ),
+            )
+            for command in commands:
+                runner = "run_workflow" if command[0] == "run" else "run_paired"
+                runner_result = (
+                    SimpleNamespace(artifact_paths={}, receipt=SimpleNamespace(status="completed"))
+                    if command[0] == "run"
+                    else SimpleNamespace(schedule=(), comparisons=())
+                )
+                with (
+                    self.subTest(command=command[0]),
+                    patch.object(hermes_cli, "_codex_adapter") as adapter,
+                    patch.object(hermes_cli, "load_manifest", return_value=object()),
+                    patch.object(hermes_cli, runner, return_value=runner_result),
+                    patch.object(hermes_cli.sys, "stderr", new=io.StringIO()) as error_stream,
+                ):
+                    self.assertEqual(hermes_cli.main(list(command)), 2)
+                    self.assertIn("missing required read-only command prefixes", error_stream.getvalue())
+                    adapter.assert_not_called()
+
     def test_run_parses_one_frozen_workflow_without_host_scoring_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -291,7 +353,7 @@ class RunCommandTests(unittest.TestCase):
                 "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
                 "invocations_per_task": 2,
             })
-            write_json(policy, {"allowed_command_prefixes": [["python"]]})
+            write_json(policy, {"allowed_command_prefixes": HUNT_READ_ONLY_COMMAND_PREFIXES})
             write_json(manifest, {"schema_version": 1, "suite": "canary", "manifest_id": "cli-test", "tasks": []})
             auth.write_text("{}", encoding="utf-8")
             result_value = SimpleNamespace(
@@ -330,7 +392,7 @@ class RunCommandTests(unittest.TestCase):
                 "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1,
                 "invocations_per_task": 2,
             })
-            write_json(policy, {"allowed_command_prefixes": [["python"]]})
+            write_json(policy, {"allowed_command_prefixes": HUNT_READ_ONLY_COMMAND_PREFIXES})
             write_json(manifest, {"schema_version": 1, "suite": "canary", "manifest_id": "cli-test", "tasks": []})
             auth.write_text("{}", encoding="utf-8")
             paired = SimpleNamespace(

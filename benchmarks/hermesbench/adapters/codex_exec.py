@@ -66,10 +66,35 @@ _STANDARD_SKILL = "/workspace/plugin/skills/security-scan/SKILL.md"
 _HUNT_SKILL = "/workspace/plugin/skills/hunt-security-scan/SKILL.md"
 _SCHEMA_PATH = "/workspace/schema/prediction-response.schema.json"
 _WRAPPER_PATH = "/usr/local/bin/codex_auth_fifo.py"
+REQUIRED_HUNT_READ_ONLY_COMMAND_PREFIXES = (
+    ("rg",),
+    ("python3", "/workspace/plugin/scripts/generate_in_scope_files.py"),
+    ("python3", "/workspace/plugin/scripts/generate_rank_input.py"),
+    ("python3", "/workspace/plugin/scripts/hunt_workflow.py"),
+    ("python3", "/workspace/plugin/scripts/normalize_candidates.py"),
+    ("python3", "/workspace/plugin/scripts/resolve_security_md.py"),
+    ("python3", "/workspace/plugin/scripts/finalize_scan_contract.py"),
+)
 
 
 class CodexExecError(RuntimeError):
     """Signals a scrubbed Codex adapter protocol or authentication failure."""
+
+
+def validate_hunt_execution_policy(policy: object) -> None:
+    """Raises when a live Hunt policy lacks required read-only command prefixes."""
+    prefixes = getattr(policy, "allowed_command_prefixes", None)
+    if not isinstance(prefixes, tuple):
+        raise ValueError("Hunt execution policy is invalid")
+    missing = tuple(
+        prefix for prefix in REQUIRED_HUNT_READ_ONLY_COMMAND_PREFIXES if prefix not in prefixes
+    )
+    if missing:
+        rendered = ", ".join(" ".join(prefix) for prefix in missing)
+        raise ValueError(
+            "Hunt execution policy is missing required read-only command prefixes: "
+            f"{rendered}"
+        )
 
 
 @dataclass(frozen=True)

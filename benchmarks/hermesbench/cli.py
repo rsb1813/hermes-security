@@ -8,7 +8,11 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from .adapters.codex_exec import CodexExecAdapter, load_managed_chatgpt_auth
+from .adapters.codex_exec import (
+    CodexExecAdapter,
+    load_managed_chatgpt_auth,
+    validate_hunt_execution_policy,
+)
 from .container_runtime import ContainerRuntime
 from .contracts import ContractError, load_manifest, load_oracles, load_predictions
 from .corpus import load_vulngym_candidates
@@ -133,6 +137,8 @@ def _add_run_arguments(command: argparse.ArgumentParser) -> None:
 
 def _run_command(args: argparse.Namespace) -> int:
     manifest, controls, policy = _run_inputs(args)
+    if args.workflow == "hunt":
+        validate_hunt_execution_policy(policy)
     adapter = _codex_adapter(args, controls, args.workflow, args.profile)
     result = run_workflow(
         manifest=manifest,
@@ -153,6 +159,7 @@ def _run_command(args: argparse.Namespace) -> int:
 
 def _run_paired_command(args: argparse.Namespace) -> int:
     manifest, controls, policy = _run_inputs(args)
+    validate_hunt_execution_policy(policy)
     standard = _codex_adapter(args, controls, "standard", "baseline")
     hunt = _codex_adapter(args, controls, "hunt", args.hunt_profile)
     result = run_paired(
