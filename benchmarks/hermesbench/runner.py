@@ -21,6 +21,53 @@ from .sanitize import BundleAuditError, audit_bundle, tree_sha256
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _PUBLIC_COMMAND_TOKEN = re.compile(r"[-A-Za-z0-9_./:=@%+]+\Z")
+_PUBLIC_FAILURE_CODES = frozenset(
+    {
+        "executor_failure",
+        "executor_timeout",
+        "container_execution_failed",
+        "invalid_json_schema",
+        "event_stream_invalid",
+        "collaboration_event_not_allowed",
+        "event_order_invalid",
+        "event_stream_failed",
+        "item_event_invalid",
+        "command_event_invalid",
+        "final_response_invalid",
+        "terminal_usage_invalid",
+        "terminal_response_incomplete",
+        "terminal_response_invalid",
+        "child_auth_unauthorized",
+        "child_auth_token_unavailable",
+        "child_auth_refresh",
+        "child_auth_not_logged_in",
+        "child_auth_account",
+        "child_auth_other",
+        "child_network",
+        "child_sandbox",
+        "child_filesystem",
+        "child_configuration_cloud_auth_init",
+        "child_configuration_cloud_auth_resolve",
+        "child_configuration_bootstrap_load",
+        "child_configuration_load",
+        "child_configuration_schema",
+        "child_configuration_cli_args",
+        "child_configuration_other",
+        "child_resource",
+        "child_cli",
+        "child_internal",
+        "child_unknown",
+        "setup_invalid_args",
+        "setup_invalid_payload",
+        "setup_fifo",
+        "setup_child_start",
+        "setup_feeder",
+        "setup_child_zero_before_readers",
+        "setup_wrapper_os_error",
+    }
+)
+_SUCCESS_ARTIFACT_NAMES = frozenset({"adapter-response.json", "events.jsonl", "commands.jsonl"})
+_MAX_FAILURE_EVIDENCE_BYTES = 512
 _ZERO_USAGE = TokenUsage(0, 0, 0)
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
 
@@ -31,6 +78,16 @@ class RunnerError(ValueError):
 
 class ExecutorTimeoutError(TimeoutError):
     """Signals that the executor terminated its exact task for timeout."""
+
+
+class ExecutorFailureError(RuntimeError):
+    """Carries one bounded public failure code while keeping details private."""
+
+    def __init__(self, message: str, *, failure_code: str = "executor_failure") -> None:
+        if not _is_public_failure_code(failure_code):
+            raise ValueError("executor failure code is invalid")
+        super().__init__(message)
+        self.failure_code = failure_code
 
 
 @dataclass(frozen=True)
@@ -134,6 +191,7 @@ def run_suite(
         config=config,
         elapsed_seconds=sum(record.elapsed_seconds for record in records),
         status=_aggregate_status(record.status for record in records),
+        failure_evidence_sha256=failure_evidence_sha256(tasks_directory, records),
         token_usage=total_usage,
     )
     _write_json(run_directory / "receipt.json", receipt.to_json())
@@ -254,8 +312,13 @@ def _run_task(
                         prediction = _prediction_json(parsed.prediction)
             except ExecutorTimeoutError:
                 status = "timeout"
+                _write_task_failure(task_directory, "executor_timeout")
+            except ExecutorFailureError as error:
+                status = "failed"
+                _write_task_failure(task_directory, error.failure_code)
             except Exception:
                 status = "failed"
+                _write_task_failure(task_directory, "executor_failure")
     elapsed = time.monotonic() - started
     post_sha256 = _post_snapshot_sha256(prepared.snapshot_path, pre_sha256)
     return (
@@ -271,6 +334,124 @@ def _run_task(
         prediction,
         command_rows,
     )
+
+
+def _write_task_failure(task_directory: Path, code: object) -> None:
+    _remove_partial_success_artifacts(task_directory)
+    public_code = _bounded_failure_code(code)
+    _write_text_no_follow(task_directory / "failure.json", _failure_json_bytes(public_code).decode("utf-8"))
+    _assert_artifact_tree(task_directory, {"request.json", "failure.json"})
+
+
+def _bounded_failure_code(code: object) -> str:
+    if _is_public_failure_code(code):
+        return code
+    return "executor_failure"
+
+
+def _is_public_failure_code(code: object) -> bool:
+    return isinstance(code, str) and code in _PUBLIC_FAILURE_CODES
+
+
+def failure_evidence_sha256(tasks_directory: Path, records: Iterable[TaskRunReceipt]) -> str:
+    """Returns the digest of every task's failure-sidecar state."""
+    evidence: list[dict[str, str | None]] = []
+    for record in records:
+        task_directory = tasks_directory / _task_directory_name(record.task_id)
+        _assert_task_directory_safe(task_directory, "failure evidence task directory")
+        failure_path = task_directory / "failure.json"
+        if record.status in {"failed", "timeout"}:
+            _assert_artifact_tree(task_directory, {"request.json", "failure.json"})
+            digest = hashlib.sha256(_failure_evidence_bytes(failure_path)).hexdigest()
+        else:
+            if _path_exists(failure_path):
+                raise RunnerError("unexpected failure evidence")
+            digest = None
+        evidence.append({"task_id": record.task_id, "failure_sha256": digest})
+    return _canonical_sha256(evidence)
+
+
+def _remove_partial_success_artifacts(task_directory: Path) -> None:
+    _assert_task_directory_safe(task_directory, "task artifact directory")
+    partial_paths: list[Path] = []
+    names: set[str] = set()
+    try:
+        with os.scandir(task_directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.name not in {"request.json", *_SUCCESS_ARTIFACT_NAMES}:
+                    raise RunnerError("task artifact directory contains unexpected files")
+                _assert_single_regular_file(path, "task artifact")
+                names.add(entry.name)
+                if entry.name in _SUCCESS_ARTIFACT_NAMES:
+                    partial_paths.append(path)
+    except OSError as error:
+        raise RunnerError("task artifact directory cannot be inspected safely") from error
+    if "request.json" not in names:
+        raise RunnerError("task artifact directory is missing request.json")
+    for path in partial_paths:
+        try:
+            os.unlink(path)
+        except OSError as error:
+            raise RunnerError("partial task artifact cannot be removed safely") from error
+    _assert_artifact_tree(task_directory, {"request.json"})
+
+
+def _failure_evidence_bytes(path: Path) -> bytes:
+    before = _lstat_single_regular_file(path, "failure evidence")
+    before_identity = _file_identity(before, "failure evidence")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RunnerError("failure evidence is unavailable") from error
+    try:
+        opened = os.fstat(descriptor)
+        _assert_single_regular_metadata(opened, "failure evidence")
+        if _file_identity(opened, "failure evidence") != before_identity:
+            raise RunnerError("failure evidence identity changed before open")
+        value = _read_failure_evidence(descriptor)
+    except OSError as error:
+        raise RunnerError("failure evidence is unavailable") from error
+    finally:
+        os.close(descriptor)
+    after = _lstat_single_regular_file(path, "failure evidence")
+    if _file_identity(after, "failure evidence") != before_identity:
+        raise RunnerError("failure evidence identity changed after read")
+    try:
+        decoded = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RunnerError("failure evidence is invalid") from error
+    if not isinstance(decoded, dict) or set(decoded) != {"code"} or not _is_public_failure_code(decoded["code"]):
+        raise RunnerError("failure evidence is invalid")
+    if value != _failure_json_bytes(decoded["code"]):
+        raise RunnerError("failure evidence is not canonical")
+    return value
+
+
+def _read_failure_evidence(descriptor: int) -> bytes:
+    value = bytearray()
+    while True:
+        chunk = os.read(descriptor, min(256, _MAX_FAILURE_EVIDENCE_BYTES + 1 - len(value)))
+        if not chunk:
+            return bytes(value)
+        value.extend(chunk)
+        if len(value) > _MAX_FAILURE_EVIDENCE_BYTES:
+            raise RunnerError("failure evidence exceeds the maximum size")
+
+
+def _failure_json_bytes(code: str) -> bytes:
+    return (json.dumps({"code": code}, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise RunnerError("artifact path cannot be inspected safely") from error
+    return True
 
 
 def _prediction_json(prediction: object) -> dict[str, object]:
@@ -412,6 +593,57 @@ def _is_link_or_junction(path: Path) -> bool:
         raise RunnerError(f"path attributes cannot be inspected safely: {path}") from error
 
 
+def _assert_task_directory_safe(path: Path, name: str) -> None:
+    _assert_path_components_safe(path, name)
+    if _is_link_or_junction(path) or not path.is_dir():
+        raise RunnerError(f"{name} is unsafe: {path}")
+
+
+def _assert_single_regular_file(path: Path, name: str) -> None:
+    _lstat_single_regular_file(path, name)
+
+
+def _lstat_single_regular_file(path: Path, name: str) -> object:
+    try:
+        metadata = os.lstat(path)
+    except OSError as error:
+        raise RunnerError(f"{name} is unavailable") from error
+    _assert_single_regular_metadata(metadata, name)
+    return metadata
+
+
+def _assert_single_regular_metadata(metadata: object, name: str) -> None:
+    mode = getattr(metadata, "st_mode", None)
+    links = getattr(metadata, "st_nlink", None)
+    if isinstance(mode, bool) or not isinstance(mode, int) or not stat.S_ISREG(mode):
+        raise RunnerError(f"{name} must be a single regular file")
+    if isinstance(links, bool) or not isinstance(links, int) or links != 1:
+        raise RunnerError(f"{name} must be a single regular file")
+    attributes = getattr(metadata, "st_file_attributes", None)
+    if attributes is None:
+        if os.name == "nt":
+            raise RunnerError(f"{name} attributes are unavailable")
+        return
+    try:
+        if int(attributes) & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise RunnerError(f"{name} must be a single regular file")
+    except (TypeError, ValueError) as error:
+        raise RunnerError(f"{name} attributes are unavailable") from error
+
+
+def _file_identity(metadata: object, name: str) -> tuple[int, int]:
+    device = getattr(metadata, "st_dev", None)
+    inode = getattr(metadata, "st_ino", None)
+    if (
+        isinstance(device, bool)
+        or not isinstance(device, int)
+        or isinstance(inode, bool)
+        or not isinstance(inode, int)
+    ):
+        raise RunnerError(f"{name} identity is unavailable")
+    return device, inode
+
+
 def _assert_path_components_safe(path: Path, name: str) -> None:
     absolute = path.absolute()
     current = Path(absolute.anchor)
@@ -440,9 +672,7 @@ def _assert_tree_has_no_links(root: Path, name: str) -> None:
 
 
 def _assert_artifact_tree(directory: Path, expected_names: set[str]) -> None:
-    _assert_path_components_safe(directory, "task artifact directory")
-    if _is_link_or_junction(directory) or not directory.is_dir():
-        raise RunnerError(f"task artifact directory is unsafe: {directory}")
+    _assert_task_directory_safe(directory, "task artifact directory")
     names: set[str] = set()
     try:
         with os.scandir(directory) as entries:
@@ -492,7 +722,7 @@ def _write_text_no_follow(path: Path, text: str) -> None:
         raise RunnerError(f"artifact path cannot be inspected safely: {path}") from error
     else:
         raise RunnerError(f"artifact path already exists or is unsafe: {path}")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     descriptor = os.open(path, flags, 0o600)
     try:
         encoded = text.encode("utf-8")

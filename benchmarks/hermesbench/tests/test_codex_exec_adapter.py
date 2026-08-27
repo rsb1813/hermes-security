@@ -436,6 +436,35 @@ class CodexExecAdapterTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "container execution failed: invalid_json_schema")
         self.assertNotIn(raw_message, str(caught.exception))
 
+    def test_invalid_agent_message_exposes_only_a_bounded_failure_code(self) -> None:
+        raw_message = "private model text must not persist"
+        rows = (
+            {
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": raw_message},
+            },
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 30,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 10,
+                },
+            },
+        )
+        runtime = _Runtime(
+            b"".join(json.dumps(row).encode("utf-8") + b"\n" for row in rows)
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter("standard", "baseline", runtime)(
+                    _request(), Path(directory), 60
+                )
+
+        self.assertEqual(caught.exception.failure_code, "final_response_invalid")
+        self.assertNotIn(raw_message, str(caught.exception))
+
     def test_nonzero_result_hides_unknown_or_credential_like_error_values(self) -> None:
         raw_message = "test-sentinel-must-not-escape"
         stream = json.dumps(

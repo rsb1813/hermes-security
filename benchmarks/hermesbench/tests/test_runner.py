@@ -17,6 +17,7 @@ from benchmarks.hermesbench.contracts import BenchmarkManifest, parse_manifest
 from benchmarks.hermesbench.receipts import RECEIPT_SCHEMA_VERSION, RunConfig
 from benchmarks.hermesbench.runner import (
     ExecutionPolicy,
+    ExecutorFailureError,
     ExecutorResult,
     ExecutorTimeoutError,
     RunnerError,
@@ -277,6 +278,135 @@ class SnapshotPreflightTests(unittest.TestCase):
 
 
 class SuiteExecutionTests(unittest.TestCase):
+    def test_failed_task_persists_only_the_bounded_executor_failure_code(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("task-a", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("python",),))
+
+            def executor(*_: object) -> ExecutorResult:
+                raise ExecutorFailureError(
+                    "private failure text must not persist",
+                    failure_code="final_response_invalid",
+                )
+
+            receipt = run_suite(
+                manifest,
+                snapshots,
+                output,
+                "run-001",
+                "standard",
+                "baseline",
+                config_for(manifest, policy),
+                policy,
+                executor,
+            )
+            task_dir = next((output / "run-001" / "tasks").iterdir())
+
+            self.assertEqual(receipt.status, "failed")
+            self.assertEqual(
+                json.loads((task_dir / "failure.json").read_text(encoding="utf-8")),
+                {"code": "final_response_invalid"},
+            )
+            self.assertNotIn(
+                "private failure text",
+                "".join(path.read_text(encoding="utf-8") for path in task_dir.iterdir()),
+            )
+
+    def test_reassigned_executor_failure_code_falls_back_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("task-a", "task-b", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("python",),))
+
+            def executor(request: object, *_: object) -> ExecutorResult:
+                if request.task_id == "task-a":
+                    error = ExecutorFailureError(
+                        "private executor detail",
+                        failure_code="final_response_invalid",
+                    )
+                    error.failure_code = "unredacted_model_message"
+                    raise error
+                return ExecutorResult(raw_response(request.task_id), ({"event": "done"},), ())
+
+            receipt = run_suite(
+                manifest,
+                snapshots,
+                output,
+                "run-001",
+                "standard",
+                "baseline",
+                config_for(manifest, policy),
+                policy,
+                executor,
+            )
+            run_dir = output / "run-001"
+            records = [
+                json.loads(line)
+                for line in (run_dir / "task-receipts.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            failure_path = next((run_dir / "tasks").rglob("failure.json"))
+
+            self.assertEqual(receipt.status, "failed")
+            self.assertEqual([record["status"] for record in records], ["failed", "completed"])
+            self.assertEqual(json.loads(failure_path.read_text(encoding="utf-8")), {"code": "executor_failure"})
+            self.assertNotIn("unredacted_model_message", failure_path.read_text(encoding="utf-8"))
+
+    def test_partial_success_publication_is_replaced_with_failure_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("task-a", "task-b", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("python",),))
+            original_write_jsonl = runner._write_jsonl
+            failed_once = False
+
+            def failing_write_jsonl(path: Path, rows: object) -> None:
+                nonlocal failed_once
+                if path.name == "events.jsonl" and not failed_once:
+                    failed_once = True
+                    raise OSError("simulated event write failure")
+                original_write_jsonl(path, rows)
+
+            def executor(request: object, *_: object) -> ExecutorResult:
+                return ExecutorResult(raw_response(request.task_id), ({"event": "done"},), ())
+
+            with patch.object(runner, "_write_jsonl", side_effect=failing_write_jsonl):
+                receipt = run_suite(
+                    manifest,
+                    snapshots,
+                    output,
+                    "run-001",
+                    "standard",
+                    "baseline",
+                    config_for(manifest, policy),
+                    policy,
+                    executor,
+                )
+            run_dir = output / "run-001"
+            records = [
+                json.loads(line)
+                for line in (run_dir / "task-receipts.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            failed_task = next(path for path in (run_dir / "tasks").iterdir() if (path / "failure.json").exists())
+
+            self.assertEqual(receipt.status, "failed")
+            self.assertEqual([record["status"] for record in records], ["failed", "completed"])
+            self.assertEqual({path.name for path in failed_task.iterdir()}, {"request.json", "failure.json"})
+            self.assertEqual(json.loads((failed_task / "failure.json").read_text(encoding="utf-8")), {"code": "executor_failure"})
+
+
     def test_completed_task_writes_audited_artifacts_and_aggregates_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -371,9 +501,18 @@ class SuiteExecutionTests(unittest.TestCase):
             receipt = run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
                                 config_for(manifest, policy), policy, executor)
             records = [json.loads(line) for line in (output / "run-001" / "task-receipts.jsonl").read_text(encoding="utf-8").splitlines()]
+            task_dirs = sorted((output / "run-001" / "tasks").iterdir())
             self.assertEqual(receipt.status, "timeout")
             self.assertEqual([row["status"] for row in records], ["timeout", "failed", "completed"])
             self.assertEqual(len((output / "run-001" / "predictions.jsonl").read_text(encoding="utf-8").splitlines()), 1)
+            self.assertEqual(
+                sorted(
+                    json.loads((path / "failure.json").read_text(encoding="utf-8"))["code"]
+                    for path in task_dirs
+                    if (path / "failure.json").exists()
+                ),
+                ["executor_failure", "executor_timeout"],
+            )
 
     def test_post_run_mutation_or_command_violation_is_contaminated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -397,6 +536,100 @@ class SuiteExecutionTests(unittest.TestCase):
             self.assertEqual(receipt.status, "contaminated")
             self.assertEqual([row["status"] for row in records], ["contaminated", "contaminated"])
             self.assertEqual((output / "run-001" / "predictions.jsonl").read_text(encoding="utf-8"), "")
+
+
+class FailureEvidenceTests(unittest.TestCase):
+    def _failure_evidence(self) -> tuple[Path, Path, object]:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        tasks = Path(directory.name) / "tasks"
+        task_id = "task-a"
+        task_directory = tasks / runner._task_directory_name(task_id)
+        task_directory.mkdir(parents=True)
+        (task_directory / "request.json").write_text("{}\n", encoding="utf-8")
+        failure_path = task_directory / "failure.json"
+        failure_path.write_bytes(runner._failure_json_bytes("event_stream_failed"))
+        record = runner.TaskRunReceipt(
+            schema_version=RECEIPT_SCHEMA_VERSION,
+            task_id=task_id,
+            status="failed",
+            pre_snapshot_sha256="a" * 64,
+            post_snapshot_sha256="a" * 64,
+            elapsed_seconds=0.0,
+            token_usage=runner.TokenUsage(0, 0, 0),
+        )
+        return tasks, failure_path, record
+
+    def test_failure_evidence_rejects_reparse_task_parent(self) -> None:
+        tasks, _, record = self._failure_evidence()
+        original_lstat = runner.os.lstat
+
+        def reparse_task_parent(path: object) -> object:
+            if Path(path) == tasks:
+                return SimpleNamespace(
+                    st_mode=stat.S_IFDIR,
+                    st_file_attributes=runner._FILE_ATTRIBUTE_REPARSE_POINT,
+                )
+            return original_lstat(path)
+
+        with patch.object(runner.os, "lstat", side_effect=reparse_task_parent):
+            with self.assertRaisesRegex(RunnerError, "link or reparse"):
+                runner.failure_evidence_sha256(tasks, (record,))
+
+    def test_failure_evidence_rejects_multi_link_failure_file(self) -> None:
+        _, failure_path, record = self._failure_evidence()
+        tasks = failure_path.parents[1]
+        original_lstat = runner.os.lstat
+
+        def multi_link_failure(path: object) -> object:
+            if Path(path) == failure_path:
+                return SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0, st_nlink=2)
+            return original_lstat(path)
+
+        with patch.object(runner.os, "lstat", side_effect=multi_link_failure):
+            with self.assertRaisesRegex(RunnerError, "single regular file"):
+                runner.failure_evidence_sha256(tasks, (record,))
+
+    def test_failure_evidence_rejects_replacement_after_path_inspection(self) -> None:
+        tasks, failure_path, record = self._failure_evidence()
+        original_lstat = runner.os.lstat
+        original_assert_artifact_tree = runner._assert_artifact_tree
+        inspection_complete = False
+        replaced = False
+
+        def mark_inspection_complete(path: Path, names: set[str]) -> None:
+            nonlocal inspection_complete
+            original_assert_artifact_tree(path, names)
+            inspection_complete = True
+
+        def replace_after_path_inspection(path: object) -> object:
+            nonlocal replaced
+            metadata = original_lstat(path)
+            if inspection_complete and Path(path) == failure_path and not replaced:
+                replacement = failure_path.with_name("replacement.json")
+                replacement.write_bytes(runner._failure_json_bytes("event_stream_failed"))
+                os.replace(replacement, failure_path)
+                replaced = True
+            return metadata
+
+        with (
+            patch.object(runner, "_assert_artifact_tree", side_effect=mark_inspection_complete),
+            patch.object(runner.os, "lstat", side_effect=replace_after_path_inspection),
+        ):
+            with self.assertRaisesRegex(RunnerError, "identity"):
+                runner.failure_evidence_sha256(tasks, (record,))
+
+    def test_failure_evidence_rejects_noncanonical_and_invalid_json(self) -> None:
+        tasks, failure_path, record = self._failure_evidence()
+        for value in (
+            '{"code":"event_stream_failed"}\n',
+            '{\n  "code": "event_stream_failed",\n  "extra": true\n}\n',
+            '{\n  "code": "unredacted_model_message"\n}\n',
+        ):
+            with self.subTest(value=value):
+                failure_path.write_bytes(value.encode("utf-8"))
+                with self.assertRaisesRegex(RunnerError, "failure evidence"):
+                    runner.failure_evidence_sha256(tasks, (record,))
 
 
 if __name__ == "__main__":

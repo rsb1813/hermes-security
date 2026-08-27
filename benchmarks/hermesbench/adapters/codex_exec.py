@@ -18,7 +18,7 @@ from pathlib import Path
 from ..adapter_contract import AdapterTaskRequest, parse_adapter_response
 from ..container_runtime import MAX_CONFIDENTIAL_STDIN_BYTES, ContainerResult, ContainerRuntime, ContainerTimeoutError
 from ..phase_runner import CanonicalCandidate
-from ..runner import ExecutorResult, ExecutorTimeoutError
+from ..runner import ExecutorFailureError, ExecutorResult, ExecutorTimeoutError
 
 
 _EVENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -77,7 +77,7 @@ REQUIRED_HUNT_READ_ONLY_COMMAND_PREFIXES = (
 )
 
 
-class CodexExecError(RuntimeError):
+class CodexExecError(ExecutorFailureError):
     """Signals a scrubbed Codex adapter protocol or authentication failure."""
 
 
@@ -434,7 +434,9 @@ def _prompt(
 
 def _parse_result(result: object, task_id: str) -> ExecutorResult:
     if not isinstance(result, ContainerResult):
-        raise CodexExecError("container execution failed")
+        raise CodexExecError(
+            "container execution failed", failure_code="container_execution_failed"
+        )
     if result.exit_code != 0:
         raise _nonzero_container_error(result.stdout, result.stderr)
     rows = _parse_jsonl(result.stdout)
@@ -446,47 +448,78 @@ def _parse_result(result: object, task_id: str) -> ExecutorResult:
     for row in rows:
         event_type = row.get("type")
         if not isinstance(event_type, str) or _EVENT.fullmatch(event_type) is None:
-            raise CodexExecError("event stream is invalid")
+            raise CodexExecError(
+                "event stream is invalid", failure_code="event_stream_invalid"
+            )
         if event_type.startswith("collaboration."):
-            raise CodexExecError("collaboration event is not allowed")
+            raise CodexExecError(
+                "collaboration event is not allowed",
+                failure_code="collaboration_event_not_allowed",
+            )
         if terminal_seen:
-            raise CodexExecError("terminal event is not final")
+            raise CodexExecError(
+                "terminal event is not final", failure_code="event_order_invalid"
+            )
         if event_type in {"turn.failed", "error"}:
-            raise CodexExecError("event stream failed")
+            raise CodexExecError(
+                "event stream failed", failure_code="event_stream_failed"
+            )
         events.append({"event": event_type})
         if event_type == "item.completed":
             item = row.get("item")
             if not isinstance(item, dict):
-                raise CodexExecError("item event is invalid")
+                raise CodexExecError(
+                    "item event is invalid", failure_code="item_event_invalid"
+                )
             item_type = item.get("type")
             if item_type == "command_execution":
                 command = item.get("command")
                 if not isinstance(command, str):
-                    raise CodexExecError("command event is invalid")
+                    raise CodexExecError(
+                        "command event is invalid",
+                        failure_code="command_event_invalid",
+                    )
                 commands.append(_normalize_command(command))
             elif item_type == "agent_message":
                 text = item.get("text")
                 if prediction is not None or not isinstance(text, str):
-                    raise CodexExecError("final response is invalid")
+                    raise CodexExecError(
+                        "final response is invalid",
+                        failure_code="final_response_invalid",
+                    )
                 try:
                     prediction = json.loads(text)
                 except json.JSONDecodeError as error:
-                    raise CodexExecError("final response is invalid") from error
+                    raise CodexExecError(
+                        "final response is invalid",
+                        failure_code="final_response_invalid",
+                    ) from error
             elif item_type in {"reasoning", "file_change"}:
                 pass
             else:
-                raise CodexExecError("item event is invalid")
+                raise CodexExecError(
+                    "item event is invalid", failure_code="item_event_invalid"
+                )
         elif event_type == "turn.completed":
             if usage is not None or row.get("usage") is None:
-                raise CodexExecError("terminal usage is invalid")
+                raise CodexExecError(
+                    "terminal usage is invalid",
+                    failure_code="terminal_usage_invalid",
+                )
             usage = _normalize_terminal_usage(row["usage"])
             terminal_seen = True
     if prediction is None or usage is None or not terminal_seen:
-        raise CodexExecError("terminal response is incomplete")
+        raise CodexExecError(
+            "terminal response is incomplete",
+            failure_code="terminal_response_incomplete",
+        )
     try:
         response = parse_adapter_response({"prediction": prediction, "usage": usage}, task_id)
     except Exception as error:
-        raise CodexExecError("terminal response is invalid") from error
+        raise CodexExecError(
+            "terminal response is invalid",
+            failure_code="terminal_response_invalid",
+        ) from error
     return ExecutorResult(
         raw_response={"prediction": prediction, "usage": usage},
         event_rows=tuple(events),
@@ -552,14 +585,23 @@ def _nonzero_container_error(stdout: bytes, stderr: bytes) -> CodexExecError:
         if code is None:
             code = _allowlisted_error_message_code(row.get("message"))
         if code is not None:
-            return CodexExecError(f"container execution failed: {code}")
+            return CodexExecError(
+                f"container execution failed: {code}", failure_code=code
+            )
     category = _wrapper_failure_category(stderr)
     if category is not None:
-        return CodexExecError(f"container execution failed: child_{category}")
+        return CodexExecError(
+            f"container execution failed: child_{category}",
+            failure_code=f"child_{category}",
+        )
     stage = _wrapper_failure_stage(stderr)
     if stage is not None:
-        return CodexExecError(f"container execution failed: {stage}")
-    return CodexExecError("container execution failed")
+        return CodexExecError(
+            f"container execution failed: {stage}", failure_code=stage
+        )
+    return CodexExecError(
+        "container execution failed", failure_code="container_execution_failed"
+    )
 
 
 def _wrapper_failure_category(stderr: bytes) -> str | None:
@@ -627,30 +669,44 @@ def _parse_jsonl(stdout: bytes) -> tuple[dict[str, object], ...]:
     try:
         lines = stdout.decode("utf-8", errors="strict").splitlines()
     except UnicodeDecodeError as error:
-        raise CodexExecError("event stream is invalid") from error
+        raise CodexExecError(
+            "event stream is invalid", failure_code="event_stream_invalid"
+        ) from error
     if not lines:
-        raise CodexExecError("event stream is invalid")
+        raise CodexExecError(
+            "event stream is invalid", failure_code="event_stream_invalid"
+        )
     rows: list[dict[str, object]] = []
     for line in lines:
         try:
             row = json.loads(line)
         except json.JSONDecodeError as error:
-            raise CodexExecError("event stream is invalid") from error
+            raise CodexExecError(
+                "event stream is invalid", failure_code="event_stream_invalid"
+            ) from error
         if not isinstance(row, dict):
-            raise CodexExecError("event stream is invalid")
+            raise CodexExecError(
+                "event stream is invalid", failure_code="event_stream_invalid"
+            )
         rows.append(row)
     return tuple(rows)
 
 
 def _normalize_command(command: str) -> tuple[str, ...]:
     if not command or _UNSAFE_SHELL.search(command) is not None:
-        raise CodexExecError("command event is unsafe")
+        raise CodexExecError(
+            "command event is unsafe", failure_code="command_event_invalid"
+        )
     try:
         tokens = tuple(shlex.split(command, posix=True))
     except ValueError as error:
-        raise CodexExecError("command event is unsafe") from error
+        raise CodexExecError(
+            "command event is unsafe", failure_code="command_event_invalid"
+        ) from error
     if not tokens or any(not token for token in tokens):
-        raise CodexExecError("command event is unsafe")
+        raise CodexExecError(
+            "command event is unsafe", failure_code="command_event_invalid"
+        )
     if tokens[0] in {"bash", "sh", "/bin/bash", "/bin/sh"} and len(tokens) == 3 and tokens[1] in {"-c", "-lc"}:
         return _normalize_command(tokens[2])
     return tokens
@@ -658,14 +714,21 @@ def _normalize_command(command: str) -> tuple[str, ...]:
 
 def _normalize_terminal_usage(value: object) -> dict[str, int]:
     if not isinstance(value, dict):
-        raise CodexExecError("terminal usage is invalid")
+        raise CodexExecError(
+            "terminal usage is invalid", failure_code="terminal_usage_invalid"
+        )
     required = ("input_tokens", "cached_input_tokens", "output_tokens")
     normalized: dict[str, int] = {}
     for name in required:
         token_count = value.get(name)
         if isinstance(token_count, bool) or not isinstance(token_count, int) or token_count < 0:
-            raise CodexExecError("terminal usage is invalid")
+            raise CodexExecError(
+                "terminal usage is invalid",
+                failure_code="terminal_usage_invalid",
+            )
         normalized[name] = token_count
     if normalized["cached_input_tokens"] > normalized["input_tokens"]:
-        raise CodexExecError("terminal usage is invalid")
+        raise CodexExecError(
+            "terminal usage is invalid", failure_code="terminal_usage_invalid"
+        )
     return normalized

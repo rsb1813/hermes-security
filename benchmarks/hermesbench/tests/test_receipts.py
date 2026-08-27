@@ -44,6 +44,7 @@ RECEIPT = RunReceipt(
     config=CONFIG,
     elapsed_seconds=12.5,
     status="completed",
+    failure_evidence_sha256="d" * 64,
     token_usage=USAGE,
 )
 
@@ -108,7 +109,7 @@ class ReceiptSerializationTests(unittest.TestCase):
         self.assertEqual(
             receipt.to_json(),
             {
-                "schema_version": 2,
+                "schema_version": RECEIPT_SCHEMA_VERSION,
                 "task_id": "task-001",
                 "status": "contaminated",
                 "pre_snapshot_sha256": "e" * 64,

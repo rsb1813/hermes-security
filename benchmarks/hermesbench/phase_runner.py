@@ -25,7 +25,9 @@ from .receipts import (
 from .runner import (
     ExecutionPolicy,
     Executor,
+    RunnerError,
     execution_policy_sha256,
+    failure_evidence_sha256,
     manifest_sha256,
     run_suite,
     task_order_sha256,
@@ -545,21 +547,24 @@ def validate_workflow_receipt(
     if actual_candidate_bytes != expected_candidate_bytes:
         raise PhaseRunnerError("workflow receipt candidate transfer does not match discovery")
     _validate_phase_commands(manifest, discovery_commands_path, execution_policy)
-    if receipt.status == "completed":
+    if receipt.verification_receipt_sha256 is not None:
         verification_dir = output_root / f"{receipt.run_id}-verification"
         verification_path = verification_dir / "receipt.json"
-        if receipt.verification_receipt_sha256 is None or sha256_file(verification_path) != receipt.verification_receipt_sha256:
+        if sha256_file(verification_path) != receipt.verification_receipt_sha256:
             raise PhaseRunnerError("workflow receipt verification hash does not match")
         verification_commands_path = verification_dir / "commands.jsonl"
         if receipt.verification_commands_sha256 is None or sha256_file(verification_commands_path) != receipt.verification_commands_sha256:
             raise PhaseRunnerError("workflow receipt verification commands hash does not match")
         verification = load_receipt(verification_path)
         _validate_phase(manifest, verification_dir, verification, config)
-        verification_predictions = _load_phase_predictions(manifest, verification_dir / "predictions.jsonl")
-        _validate_verification_subset(candidates, verification_predictions)
         _validate_phase_commands(manifest, verification_commands_path, execution_policy)
-        if discovery.status != "completed" or verification.status != "completed":
-            raise PhaseRunnerError("completed workflow receipt has an incomplete phase")
+        if receipt.status == "completed":
+            verification_predictions = _load_phase_predictions(manifest, verification_dir / "predictions.jsonl")
+            _validate_verification_subset(candidates, verification_predictions)
+            if discovery.status != "completed" or verification.status != "completed":
+                raise PhaseRunnerError("completed workflow receipt has an incomplete phase")
+        elif discovery.status != "completed" or verification.status == "completed":
+            raise PhaseRunnerError("incomplete workflow receipt phase status is invalid")
     elif receipt.verification_receipt_sha256 is None and discovery.status == "completed":
         raise PhaseRunnerError("incomplete workflow receipt omitted a required phase")
     return receipt
@@ -616,6 +621,12 @@ def _validate_phase(manifest: BenchmarkManifest, directory: Path, receipt: RunRe
         or receipt.elapsed_seconds != sum(record.elapsed_seconds for record in records)
     ):
         raise PhaseRunnerError("phase receipt does not match committed task evidence")
+    try:
+        actual_failure_evidence_sha256 = failure_evidence_sha256(directory / "tasks", records)
+    except RunnerError as error:
+        raise PhaseRunnerError("phase failure evidence is invalid") from error
+    if receipt.failure_evidence_sha256 != actual_failure_evidence_sha256:
+        raise PhaseRunnerError("phase failure evidence hash does not match")
 
 
 def _load_phase_predictions(manifest: BenchmarkManifest, path: Path) -> dict[str, object]:

@@ -9,7 +9,7 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Literal
 
-RECEIPT_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 RunStatus = Literal["completed", "failed", "timeout", "contaminated"]
 _RUN_STATUSES = frozenset({"completed", "failed", "timeout", "contaminated"})
 
@@ -145,6 +145,7 @@ class RunReceipt:
     config: RunConfig
     elapsed_seconds: float
     status: RunStatus
+    failure_evidence_sha256: str
     token_usage: TokenUsage
 
     def __post_init__(self) -> None:
@@ -167,6 +168,8 @@ class RunReceipt:
         if not isinstance(self.status, str) or self.status not in _RUN_STATUSES:
             raise ValueError(f"unsupported run status: {self.status}")
 
+        _require_sha256(self.failure_evidence_sha256, "failure_evidence_sha256")
+
     def replace(self, **changes: object) -> "RunReceipt":
         return replace(self, **changes)
 
@@ -179,6 +182,7 @@ class RunReceipt:
             "config": self.config.to_json(),
             "elapsed_seconds": self.elapsed_seconds,
             "status": self.status,
+            "failure_evidence_sha256": self.failure_evidence_sha256,
             "token_usage": self.token_usage.to_json(),
         }
 
@@ -195,6 +199,7 @@ class RunReceipt:
             config=RunConfig.from_json(data["config"]),
             elapsed_seconds=data["elapsed_seconds"],  # type: ignore[arg-type]
             status=data["status"],  # type: ignore[arg-type]
+            failure_evidence_sha256=data["failure_evidence_sha256"],  # type: ignore[arg-type]
             token_usage=TokenUsage.from_json(data["token_usage"]),
         )
 

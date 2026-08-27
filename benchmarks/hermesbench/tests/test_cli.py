@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import benchmarks.hermesbench.cli as hermes_cli
 from benchmarks.hermesbench.receipts import (
+    RECEIPT_SCHEMA_VERSION,
     RunConfig,
     RunReceipt,
     TokenUsage,
@@ -113,13 +114,14 @@ def config() -> RunConfig:
 
 def receipt(workflow: str, run_config: RunConfig) -> RunReceipt:
     return RunReceipt(
-        schema_version=2,
+        schema_version=RECEIPT_SCHEMA_VERSION,
         run_id=f"run-{workflow}",
         workflow=workflow,
         profile="baseline" if workflow == "standard" else "hunt-max",
         config=run_config,
         elapsed_seconds=10.0,
         status="completed",
+        failure_evidence_sha256="d" * 64,
         token_usage=TokenUsage(10, 20, 5),
     )
 

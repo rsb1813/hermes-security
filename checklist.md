@@ -57,6 +57,8 @@
   - [x] Deny tool access to the private authentication runtime with a named permission profile.
   - [x] Extend and verify the bounded two-reader authentication handshake.
   - [x] Rebuild the pinned image and pass the exact no-model filesystem and network boundary smoke.
+  - [x] Persist only a bounded public failure code, safely replace partial runner artifacts, and bind descriptor-verified failure sidecars to phase receipts.
+  - [ ] Diagnose the paid smoke failure without retaining model text or private identities.
   - [ ] Complete a fresh paid Canary smoke without retaining confidential output.
 - [x] Implement paired discovery and verification runner.
   - [x] Record focused RED evidence.

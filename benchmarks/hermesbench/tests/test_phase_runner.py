@@ -19,6 +19,7 @@ from benchmarks.hermesbench.phase_runner import (
 )
 from benchmarks.hermesbench.runner import (
     ExecutionPolicy,
+    ExecutorFailureError,
     ExecutorResult,
     execution_policy_sha256,
     manifest_sha256,
@@ -257,6 +258,56 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([ids for _, _, ids in calls[2:]], [(), ()])
         self.assertEqual(artifact["final_predictions"], "single-verification/predictions.jsonl")
         self.assertEqual(result.receipt.top_level_invocation_count, 4)
+
+    def test_incomplete_verification_rejects_tampered_failure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            policy = ExecutionPolicy((("python",),))
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return ExecutorResult(_prediction(request.task_id), ({"event": "done"},), ())
+
+            def verification_factory(candidate_sets: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    if request.task_id == "task-a":
+                        raise ExecutorFailureError(
+                            "private verification detail",
+                            failure_code="event_stream_failed",
+                        )
+                    candidate = candidate_sets[request.task_id][0]
+                    response = _prediction(request.task_id, finding_id=candidate.candidate_id)
+                    return ExecutorResult(response, ({"event": "done"},), ())
+                return verification
+
+            result = run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "incomplete",
+                "standard",
+                "baseline",
+                _controls(),
+                policy,
+                discovery,
+                verification_factory,
+            )
+            receipt_path = outputs / "incomplete-workflow-receipt.json"
+            self.assertEqual(
+                validate_workflow_receipt(
+                    manifest, root / "snapshots", outputs, receipt_path, _controls(), policy
+                ).status,
+                "incomplete",
+            )
+            failure_path = next((outputs / "incomplete-verification" / "tasks").rglob("failure.json"))
+            failure_path.write_text('{"code":"event_stream_invalid"}\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(PhaseRunnerError, "failure evidence"):
+                validate_workflow_receipt(
+                    manifest, root / "snapshots", outputs, receipt_path, _controls(), policy
+                )
 
     def test_rejects_verification_mutation_and_comparison_control_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
