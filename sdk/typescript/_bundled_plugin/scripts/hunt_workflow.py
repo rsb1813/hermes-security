@@ -65,6 +65,7 @@ SAFE_VALIDATION_METHODS = (
 PROOF_STATUSES = ("proven", "disproven", "unknown")
 DISPOSITIONS = ("accepted", "rejected", "inconclusive")
 CONFIDENCE_LEVELS = ("high", "medium", "low")
+LOCATION_ROLE_ORDER = {role: index for index, role in enumerate(LOCATION_ROLES)}
 
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
@@ -105,6 +106,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     validation.add_argument("--validations", required=True)
     validation.add_argument("--discovery-actor", required=True)
     validation.add_argument("--out", required=True)
+    finalization = commands.add_parser(
+        "finalize", help="Deduplicate accepted roots and write a defensive draft."
+    )
+    finalization.add_argument("--validated", required=True)
+    finalization.add_argument("--findings-out", required=True)
+    finalization.add_argument("--report-out", required=True)
+    finalization.add_argument("--receipt", required=True)
     return parser.parse_args(argv)
 
 
@@ -122,6 +130,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "validate-decisions":
             validate_decisions(args)
+            return 0
+        if args.command == "finalize":
+            finalize(args)
             return 0
         raise AssertionError(f"unhandled command: {args.command}")
     except (HuntWorkflowError, OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -367,6 +378,58 @@ def validate_decisions(args: argparse.Namespace) -> None:
     print(f"Validated {len(validated)} independent decisions in {output_path}")
 
 
+def finalize(args: argparse.Namespace) -> None:
+    validated_path = Path(args.validated).expanduser().resolve(strict=True)
+    findings_path = Path(args.findings_out).expanduser().resolve(strict=False)
+    report_path = Path(args.report_out).expanduser().resolve(strict=False)
+    receipt_path = Path(args.receipt).expanduser().resolve(strict=False)
+    _reject_output_collisions(
+        inputs=(validated_path,),
+        outputs=(findings_path, report_path, receipt_path),
+    )
+    validated = _load_jsonl(
+        validated_path, "validated candidate", _validate_validated_candidate
+    )
+    _require_unique_field(validated, "candidate_id", "validated candidates")
+    accepted = [
+        row for row in validated if row["validation"]["disposition"] == "accepted"  # type: ignore[index]
+    ]
+    groups: dict[str, list[JsonRow]] = {}
+    for candidate in accepted:
+        groups.setdefault(_root_identity(candidate), []).append(candidate)
+    findings = [
+        _finalize_group(group)
+        for _, group in sorted(groups.items(), key=lambda item: item[0])
+    ]
+    findings_document = {
+        "schema_version": SCHEMA_VERSION,
+        "document_type": "hermes-security.hunt-findings",
+        "findings": findings,
+    }
+    _write_json(findings_path, findings_document)
+    _write_text_atomic(report_path, _render_report(findings))
+    receipt = {
+        "schema_version": SCHEMA_VERSION,
+        "validated_sha256": _sha256_file(validated_path),
+        "accepted_findings_sha256": _sha256_file(findings_path),
+        "draft_report_sha256": _sha256_file(report_path),
+        "total_candidates": len(validated),
+        "accepted_candidates": len(accepted),
+        "rejected_candidates": sum(
+            row["validation"]["disposition"] == "rejected"  # type: ignore[index]
+            for row in validated
+        ),
+        "inconclusive_candidates": sum(
+            row["validation"]["disposition"] == "inconclusive"  # type: ignore[index]
+            for row in validated
+        ),
+        "finalized_findings": len(findings),
+        "exact_root_duplicates_removed": len(accepted) - len(findings),
+    }
+    _write_json(receipt_path, receipt)
+    print(f"Finalized {len(findings)} accepted Hunt findings in {findings_path}")
+
+
 def _validate_rank_input(row: JsonRow, path: Path, line_number: int) -> None:
     _require_exact_fields(row, {"path", "area", "preview"}, path, line_number)
     _require_relative_path(row["path"], path, line_number)
@@ -604,6 +667,44 @@ def _validate_validation(row: JsonRow, path: Path, line_number: int) -> None:
         raise HuntWorkflowError(f"{path}:{line_number}: unsupported confidence")
 
 
+def _validate_validated_candidate(
+    row: JsonRow, path: Path, line_number: int
+) -> None:
+    if "validation" not in row or "state_history" not in row:
+        raise HuntWorkflowError(
+            f"{path}:{line_number}: validated candidate is missing terminal evidence"
+        )
+    base = {
+        key: value
+        for key, value in row.items()
+        if key not in {"validation", "state_history"}
+    }
+    _validate_candidate(base, path, line_number)
+    validation = row["validation"]
+    if not isinstance(validation, dict) or not all(
+        isinstance(key, str) for key in validation
+    ):
+        raise HuntWorkflowError(f"{path}:{line_number}: validation must be an object")
+    if "candidate_id" in validation:
+        raise HuntWorkflowError(
+            f"{path}:{line_number}: nested validation cannot replace candidate_id"
+        )
+    complete_validation = {"candidate_id": row["candidate_id"], **validation}
+    _validate_validation(complete_validation, path, line_number)
+    _require_disposition_evidence(base, complete_validation)
+    disposition = str(validation["disposition"])
+    expected_history = [
+        "discovered",
+        "evidence_built",
+        "challenged",
+        disposition,
+    ]
+    if row["state_history"] != expected_history:
+        raise HuntWorkflowError(
+            f"{path}:{line_number}: state_history does not match disposition"
+        )
+
+
 def _require_disposition_evidence(
     candidate: JsonRow, validation: JsonRow
 ) -> None:
@@ -641,6 +742,171 @@ def _require_disposition_evidence(
         raise HuntWorkflowError(
             f"{candidate_id}: inconclusive decision requires an unknown claim and proof gaps"
         )
+
+
+def _root_identity(candidate: JsonRow) -> str:
+    locations = candidate["locations"]
+    roots = sorted(
+        _location_identity(location)
+        for location in locations  # type: ignore[union-attr]
+        if location["role"] == "root_control"
+    )
+    sinks = sorted(
+        _location_identity(location)
+        for location in locations  # type: ignore[union-attr]
+        if location["role"] == "sink"
+    )
+    return json.dumps(
+        {
+            "cwe_ids": sorted(candidate["cwe_ids"]),  # type: ignore[arg-type]
+            "root_controls": roots,
+            "sinks": sinks,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _location_identity(location: JsonRow) -> tuple[str, int, int]:
+    return (
+        str(location["path"]),
+        int(location["start_line"]),
+        int(location["end_line"]),
+    )
+
+
+def _finalize_group(group: list[JsonRow]) -> JsonRow:
+    ordered = sorted(group, key=lambda row: str(row["candidate_id"]))
+    primary = ordered[0]
+    identity = _root_identity(primary)
+    locations_by_identity: dict[tuple[str, int, int, str], JsonRow] = {}
+    for candidate in ordered:
+        for location in candidate["locations"]:  # type: ignore[union-attr]
+            key = (
+                str(location["path"]),
+                int(location["start_line"]),
+                int(location["end_line"]),
+                str(location["role"]),
+            )
+            locations_by_identity[key] = location
+    locations = sorted(
+        locations_by_identity.values(),
+        key=lambda location: (
+            LOCATION_ROLE_ORDER[str(location["role"])],
+            str(location["path"]),
+            int(location["start_line"]),
+            int(location["end_line"]),
+        ),
+    )
+    validations = [candidate["validation"] for candidate in ordered]
+    confidences = [str(validation["confidence"]) for validation in validations]  # type: ignore[index]
+    confidence_rank = {"low": 0, "medium": 1, "high": 2}
+    confidence = min(confidences, key=lambda value: confidence_rank[value])
+    return {
+        "finding_id": f"huntf-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}",
+        "candidate_ids": [str(candidate["candidate_id"]) for candidate in ordered],
+        "instances": sorted(
+            {
+                str(candidate["instance"])
+                for candidate in ordered
+                if "instance" in candidate
+            }
+        ),
+        "cwe_ids": sorted({str(cwe) for candidate in ordered for cwe in candidate["cwe_ids"]}),  # type: ignore[union-attr]
+        "title": str(primary["summary"]),
+        "summary": "\n".join(
+            sorted({str(candidate["summary"]) for candidate in ordered})
+        ),
+        "locations": locations,
+        "preconditions": _validation_strings(validations, "preconditions"),
+        "source_to_operation_trace": locations,
+        "impact": "\n".join(_validation_strings(validations, "impact_statement")),
+        "validation": {
+            "methods": _validation_strings(validations, "method"),
+            "evidence": _validation_strings(validations, "evidence"),
+            "confidence": confidence,
+            "uncertainty": _validation_strings(validations, "uncertainty"),
+        },
+        "remediation": "\n".join(_validation_strings(validations, "remediation")),
+    }
+
+
+def _validation_strings(validations: list[object], field: str) -> list[str]:
+    values: set[str] = set()
+    for validation in validations:
+        value = validation[field]  # type: ignore[index]
+        if isinstance(value, list):
+            values.update(str(item) for item in value if str(item).strip())
+        elif str(value).strip():
+            values.add(str(value))
+    return sorted(values)
+
+
+def _render_report(findings: list[JsonRow]) -> str:
+    lines = [
+        "# Hunt Security Draft Report",
+        "",
+        "This draft contains only independently validated, accepted findings.",
+        "",
+    ]
+    if not findings:
+        lines.extend(("No accepted findings were produced.", ""))
+        return "\n".join(lines)
+    for index, finding in enumerate(findings, 1):
+        lines.extend(
+            (
+                f"## Finding {index}: {_markdown_text(finding['title'])}",
+                "",
+                f"- Finding ID: `{finding['finding_id']}`",
+                f"- Confidence: `{finding['validation']['confidence']}`",  # type: ignore[index]
+                f"- CWE: {', '.join(finding['cwe_ids']) or 'Unclassified'}",  # type: ignore[arg-type]
+                "",
+                "### Affected locations",
+                "",
+            )
+        )
+        for location in finding["locations"]:  # type: ignore[union-attr]
+            lines.append(
+                f"- `{location['path']}:{location['start_line']}-{location['end_line']}` ({location['role']})"
+            )
+        _append_report_list(lines, "Preconditions", finding["preconditions"])
+        _append_report_locations(
+            lines, "Source-to-operation trace", finding["source_to_operation_trace"]
+        )
+        _append_report_text(lines, "Security impact", finding["impact"])
+        _append_report_list(
+            lines, "Validation evidence", finding["validation"]["evidence"]  # type: ignore[index]
+        )
+        _append_report_text(lines, "Remediation", finding["remediation"])
+        _append_report_list(
+            lines, "Uncertainty", finding["validation"]["uncertainty"]  # type: ignore[index]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _append_report_list(lines: list[str], heading: str, values: object) -> None:
+    lines.extend(("", f"### {heading}", ""))
+    items = values if isinstance(values, list) else [values]
+    if not items:
+        lines.append("- None recorded.")
+        return
+    lines.extend(f"- {_markdown_text(item)}" for item in items)
+
+
+def _append_report_locations(lines: list[str], heading: str, values: object) -> None:
+    lines.extend(("", f"### {heading}", ""))
+    for location in values:  # type: ignore[union-attr]
+        lines.append(
+            f"- `{location['path']}:{location['start_line']}-{location['end_line']}` ({location['role']})"
+        )
+
+
+def _append_report_text(lines: list[str], heading: str, value: object) -> None:
+    lines.extend(("", f"### {heading}", "", _markdown_text(value)))
+
+
+def _markdown_text(value: object) -> str:
+    return " ".join(str(value).splitlines()).strip()
 
 
 def _signals(path: str, preview: str) -> tuple[str, ...]:

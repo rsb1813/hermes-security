@@ -46,8 +46,8 @@
 - [ ] Implement forward and backward discovery passes.
 - [ ] Implement path joining and candidate evidence slices.
 - [x] Implement independent validation.
-- [ ] Implement root-cause deduplication.
-- [ ] Implement validated draft reporting.
+- [x] Implement root-cause deduplication.
+- [x] Implement validated draft reporting.
 - [ ] Verify Standard CLI and SDK compatibility.
 
 ## Performance work

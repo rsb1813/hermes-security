@@ -387,6 +387,34 @@ function acceptedValidation(candidateId = "candidate-a"): ValidationRow {
   };
 }
 
+function rejectedValidation(candidateId: string): ValidationRow {
+  const validation = acceptedValidation(candidateId);
+  validation.disposition = "rejected";
+  validation.attacker_control = "disproven";
+  validation.reachability = "unknown";
+  validation.impact = "unknown";
+  validation.guard_failure = "unknown";
+  validation.counterevidence = [
+    "The object identifier is replaced with the authenticated tenant ID.",
+  ];
+  validation.confidence = "high";
+  validation.remediation = "";
+  return validation;
+}
+
+function inconclusiveValidation(candidateId: string): ValidationRow {
+  const validation = acceptedValidation(candidateId);
+  validation.disposition = "inconclusive";
+  validation.attacker_control = "unknown";
+  validation.reachability = "unknown";
+  validation.impact = "unknown";
+  validation.guard_failure = "unknown";
+  validation.proof_gaps = ["The generated route binding is unavailable."];
+  validation.confidence = "low";
+  validation.remediation = "";
+  return validation;
+}
+
 function prepareValidation(candidates: CandidateRow[]) {
   const root = temporaryRoot();
   const candidatesPath = join(root, "candidates.jsonl");
@@ -483,29 +511,10 @@ test("records accepted rejected and inconclusive state histories", () => {
   ];
   const prepared = prepareValidation(candidates);
   expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
-  const rejected = acceptedValidation("candidate-b");
-  rejected.disposition = "rejected";
-  rejected.attacker_control = "disproven";
-  rejected.reachability = "unknown";
-  rejected.impact = "unknown";
-  rejected.guard_failure = "unknown";
-  rejected.counterevidence = ["The object identifier is replaced with the authenticated tenant ID."];
-  rejected.confidence = "high";
-  rejected.remediation = "";
-  const inconclusive = acceptedValidation("candidate-c");
-  inconclusive.disposition = "inconclusive";
-  inconclusive.attacker_control = "unknown";
-  inconclusive.reachability = "unknown";
-  inconclusive.impact = "unknown";
-  inconclusive.guard_failure = "unknown";
-  inconclusive.proof_gaps = ["The generated route binding is unavailable."];
-  inconclusive.confidence = "low";
-  inconclusive.remediation = "";
-
   const validated = validateDecisions(prepared.candidatesPath, [
     acceptedValidation(),
-    rejected,
-    inconclusive,
+    rejectedValidation("candidate-b"),
+    inconclusiveValidation("candidate-c"),
   ]);
   expect(validated.result.exitCode, validated.result.stderr.toString()).toBe(0);
   const rows = readJsonl<{
@@ -517,4 +526,122 @@ test("records accepted rejected and inconclusive state histories", () => {
     "rejected",
     "inconclusive",
   ]);
+});
+
+function finalize(validated: string) {
+  const root = temporaryRoot();
+  const findings = join(root, "accepted-findings.json");
+  const report = join(root, "draft-report.md");
+  const receipt = join(root, "finalization-receipt.json");
+  const result = runHunt(
+    "finalize",
+    "--validated",
+    validated,
+    "--findings-out",
+    findings,
+    "--report-out",
+    report,
+    "--receipt",
+    receipt,
+  );
+  return { result, findings, report, receipt };
+}
+
+test("deduplicates exact roots while retaining every accepted instance", () => {
+  const first = candidate();
+  const second = candidate("candidate-b");
+  second.locations[0] = {
+    path: "src/api/admin-route.py",
+    start_line: 40,
+    end_line: 40,
+    role: "entrypoint",
+  };
+  const rejected = candidate("candidate-c");
+  rejected.summary = "Rejected neighboring hypothesis";
+  const inconclusive = candidate("candidate-d");
+  inconclusive.summary = "Inconclusive neighboring hypothesis";
+  const prepared = prepareValidation([first, second, rejected, inconclusive]);
+  expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
+  const validated = validateDecisions(prepared.candidatesPath, [
+    acceptedValidation(),
+    acceptedValidation("candidate-b"),
+    rejectedValidation("candidate-c"),
+    inconclusiveValidation("candidate-d"),
+  ]);
+  expect(validated.result.exitCode, validated.result.stderr.toString()).toBe(0);
+  const finalized = finalize(validated.output);
+  expect(finalized.result.exitCode, finalized.result.stderr.toString()).toBe(0);
+  const output = JSON.parse(readFileSync(finalized.findings, "utf8")) as {
+    findings: {
+      candidate_ids: string[];
+      instances: string[];
+      locations: { path: string }[];
+    }[];
+  };
+  expect(output.findings).toHaveLength(1);
+  expect(output.findings[0]!.candidate_ids).toEqual([
+    "candidate-a",
+    "candidate-b",
+  ]);
+  expect(output.findings[0]!.instances).toHaveLength(2);
+  expect(output.findings[0]!.locations.map((item) => item.path)).toContain(
+    "src/api/admin-route.py",
+  );
+  const report = readFileSync(finalized.report, "utf8");
+  expect(report).toContain("Source-to-operation trace");
+  expect(report).toContain("Validation evidence");
+  expect(report).toContain("Remediation");
+  expect(report).not.toContain("Rejected neighboring hypothesis");
+  expect(report).not.toContain("Inconclusive neighboring hypothesis");
+  expect(report).not.toMatch(/^## .*PoC|^## .*Exploit/im);
+  const receipt = JSON.parse(readFileSync(finalized.receipt, "utf8")) as {
+    accepted_candidates: number;
+    rejected_candidates: number;
+    inconclusive_candidates: number;
+    finalized_findings: number;
+  };
+  expect(receipt).toMatchObject({
+    accepted_candidates: 2,
+    rejected_candidates: 1,
+    inconclusive_candidates: 1,
+    finalized_findings: 1,
+  });
+});
+
+test("does not merge findings with different root controls", () => {
+  const first = candidate();
+  const second = candidate("candidate-b");
+  second.locations[1] = {
+    ...second.locations[1]!,
+    start_line: 21,
+    end_line: 21,
+  };
+  const prepared = prepareValidation([first, second]);
+  expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
+  const validated = validateDecisions(prepared.candidatesPath, [
+    acceptedValidation(),
+    acceptedValidation("candidate-b"),
+  ]);
+  expect(validated.result.exitCode, validated.result.stderr.toString()).toBe(0);
+  const finalized = finalize(validated.output);
+  expect(finalized.result.exitCode, finalized.result.stderr.toString()).toBe(0);
+  const output = JSON.parse(readFileSync(finalized.findings, "utf8")) as {
+    findings: object[];
+  };
+  expect(output.findings).toHaveLength(2);
+});
+
+test("writes byte-stable finalized findings and drafts", () => {
+  const prepared = prepareValidation([candidate()]);
+  expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
+  const validated = validateDecisions(prepared.candidatesPath, [
+    acceptedValidation(),
+  ]);
+  expect(validated.result.exitCode, validated.result.stderr.toString()).toBe(0);
+  const first = finalize(validated.output);
+  const second = finalize(validated.output);
+  expect(first.result.exitCode, first.result.stderr.toString()).toBe(0);
+  expect(second.result.exitCode, second.result.stderr.toString()).toBe(0);
+  expect(readFileSync(first.findings)).toEqual(readFileSync(second.findings));
+  expect(readFileSync(first.report)).toEqual(readFileSync(second.report));
 });
