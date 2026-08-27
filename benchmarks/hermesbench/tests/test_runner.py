@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import benchmarks.hermesbench.runner as runner
 from benchmarks.hermesbench.contracts import BenchmarkManifest, parse_manifest
 from benchmarks.hermesbench.receipts import RECEIPT_SCHEMA_VERSION, RunConfig
 from benchmarks.hermesbench.runner import (
@@ -75,6 +76,78 @@ def raw_response(task_id: str) -> dict[str, object]:
 
 
 class SnapshotPreflightTests(unittest.TestCase):
+    def test_linked_snapshots_root_stops_before_adapter_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("task-a", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("python",),))
+
+            with patch.object(
+                runner,
+                "_is_link_or_junction",
+                side_effect=lambda path: path == snapshots,
+            ):
+                with self.assertRaisesRegex(RunnerError, "link or junction"):
+                    run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
+                              config_for(manifest, policy), policy, lambda *_: self.fail("adapter must not run"))
+
+    def test_junction_detection_uses_pathlib_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            with (
+                patch.object(Path, "is_symlink", return_value=False),
+                patch.object(Path, "is_junction", return_value=True, create=True),
+            ):
+                with self.assertRaisesRegex(RunnerError, "link or junction"):
+                    runner._assert_path_components_safe(target, "test root")
+
+    def test_linked_task_snapshot_stops_before_adapter_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("task-a", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("python",),))
+            linked_snapshot = snapshots / "task-a"
+
+            with patch.object(
+                runner,
+                "_is_link_or_junction",
+                side_effect=lambda path: path == linked_snapshot,
+            ):
+                with self.assertRaisesRegex(RunnerError, "link or junction"):
+                    run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
+                              config_for(manifest, policy), policy, lambda *_: self.fail("adapter must not run"))
+
+    def test_dot_segment_task_id_cannot_select_snapshots_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            (snapshots / "nested").mkdir()
+            (snapshots / "nested" / "source.py").write_text("value = 1\n", encoding="utf-8")
+            manifest = parse_manifest(
+                {
+                    "schema_version": 1, "suite": "canary", "manifest_id": "runner-test",
+                    "tasks": [{"task_id": "nested/.", "snapshot_sha256": tree_sha256(snapshots / "nested"),
+                               "language": "python", "allowed_commands": [["python"]],
+                               "time_limit_seconds": 17}],
+                }
+            )
+            policy = ExecutionPolicy((("python",),))
+
+            with self.assertRaisesRegex(RunnerError, "task_id"):
+                run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
+                          config_for(manifest, policy), policy, lambda *_: self.fail("adapter must not run"))
+
     def test_hash_mismatch_stops_before_adapter_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -179,6 +252,7 @@ class SuiteExecutionTests(unittest.TestCase):
 
             def executor(request: object, task_work_dir: Path, timeout: int) -> ExecutorResult:
                 received.append((request, task_work_dir, timeout))
+                (task_work_dir / "worker-only.txt").write_text("private\n", encoding="utf-8")
                 return ExecutorResult(raw_response("nested/task-a"), ({"event": "done"},), (("python", "-m", "unittest"),))
 
             receipt = run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
@@ -192,6 +266,7 @@ class SuiteExecutionTests(unittest.TestCase):
             self.assertEqual(len(received), 1)
             self.assertEqual(received[0][2], 17)
             self.assertEqual(len(task_dirs), 1)
+            self.assertNotEqual(received[0][1], task_dirs[0])
             self.assertNotIn("..", task_dirs[0].name)
             self.assertEqual(json.loads((task_dirs[0] / "request.json").read_text(encoding="utf-8"))["task_id"], "nested/task-a")
             self.assertTrue((task_dirs[0] / "adapter-response.json").is_file())
@@ -199,6 +274,35 @@ class SuiteExecutionTests(unittest.TestCase):
             self.assertEqual(len((run_dir / "predictions.jsonl").read_text(encoding="utf-8").splitlines()), 1)
             self.assertEqual(len((run_dir / "task-receipts.jsonl").read_text(encoding="utf-8").splitlines()), 1)
             self.assertTrue((run_dir / "receipt.json").is_file())
+            self.assertEqual(
+                {path.name for path in task_dirs[0].iterdir()},
+                {"request.json", "adapter-response.json", "events.jsonl"},
+            )
+
+    def test_malformed_response_and_sensitive_event_are_not_written(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("task-a", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("python",),))
+
+            def executor(*_: object) -> ExecutorResult:
+                return ExecutorResult(
+                    raw_response("task-a") | {"oracle_path": "C:/private/oracle.json"},
+                    ({"event": "done", "reasoning": "secret source text"},),
+                    (),
+                )
+
+            receipt = run_suite(manifest, snapshots, output, "run-001", "standard", "baseline",
+                                config_for(manifest, policy), policy, executor)
+            task_dir = next((output / "run-001" / "tasks").iterdir())
+            self.assertEqual(receipt.status, "failed")
+            self.assertFalse((task_dir / "adapter-response.json").exists())
+            self.assertFalse((task_dir / "events.jsonl").exists())
+            self.assertNotIn("oracle.json", "".join(path.read_text(encoding="utf-8") for path in task_dir.iterdir()))
 
     def test_timeout_and_protocol_failure_are_terminal_and_later_tasks_continue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

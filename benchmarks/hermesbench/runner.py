@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterable
 
 from .adapter_contract import AdapterTaskRequest, parse_adapter_response
 from .contracts import BenchmarkManifest, TaskDescriptor
-from .receipts import RECEIPT_SCHEMA_VERSION, RunConfig, RunReceipt, TaskRunReceipt, TokenUsage, write_receipt
+from .receipts import RECEIPT_SCHEMA_VERSION, RunConfig, RunReceipt, TaskRunReceipt, TokenUsage
 from .sanitize import BundleAuditError, audit_bundle, tree_sha256
 
 
@@ -87,9 +89,9 @@ def run_suite(
         raise RunnerError("task order hash does not match RunConfig")
 
     resolved_output = _resolve_existing_directory(output_root, "output root")
-    if _is_link_or_junction(output_root):
-        raise RunnerError(f"output root must not be a link or junction: {output_root}")
+    _assert_path_components_safe(output_root, "output root")
     resolved_snapshots = _resolve_existing_directory(snapshots_root, "snapshots root")
+    _assert_path_components_safe(snapshots_root, "snapshots root")
     if _paths_overlap(resolved_output, resolved_snapshots):
         raise RunnerError("output root and snapshots root must not overlap")
 
@@ -128,7 +130,7 @@ def run_suite(
         status=_aggregate_status(record.status for record in records),
         token_usage=total_usage,
     )
-    write_receipt(run_directory / "receipt.json", receipt)
+    _write_json(run_directory / "receipt.json", receipt.to_json())
     return receipt
 
 
@@ -201,6 +203,7 @@ def _run_task(
         time_limit_seconds=descriptor.time_limit_seconds,
     )
     _write_json(task_directory / "request.json", request.to_json())
+    _assert_artifact_tree(task_directory, {"request.json"})
     started = time.monotonic()
     pre_sha256 = prepared.snapshot_sha256
     usage = _ZERO_USAGE
@@ -215,11 +218,18 @@ def _run_task(
             status = "contaminated"
         else:
             try:
-                result = executor(request, task_directory, descriptor.time_limit_seconds)
-                _write_json(task_directory / "adapter-response.json", result.raw_response)
-                _write_jsonl(task_directory / "events.jsonl", result.event_rows)
+                with tempfile.TemporaryDirectory(prefix="hermesbench-executor-") as scratch:
+                    result = executor(request, Path(scratch), descriptor.time_limit_seconds)
+                _assert_artifact_tree(task_directory, {"request.json"})
                 parsed = parse_adapter_response(result.raw_response, descriptor.task_id)
+                event_rows = _normalize_event_rows(result.event_rows)
                 usage = parsed.token_usage
+                _write_json(task_directory / "adapter-response.json", _adapter_response_json(parsed))
+                _write_jsonl(task_directory / "events.jsonl", event_rows)
+                _assert_artifact_tree(
+                    task_directory,
+                    {"request.json", "adapter-response.json", "events.jsonl"},
+                )
                 try:
                     post_sha256 = _audit_and_hash(prepared.snapshot_path, descriptor.task_id)
                 except RunnerError:
@@ -267,6 +277,31 @@ def _prediction_json(prediction: object) -> dict[str, object]:
     }
 
 
+def _adapter_response_json(response: object) -> dict[str, object]:
+    return {
+        "prediction": _prediction_json(response.prediction),
+        "usage": {
+            "input_tokens": response.token_usage.cached_input_tokens + response.token_usage.uncached_input_tokens,
+            "cached_input_tokens": response.token_usage.cached_input_tokens,
+            "output_tokens": response.token_usage.output_tokens,
+        },
+    }
+
+
+def _normalize_event_rows(rows: object) -> tuple[dict[str, object], ...]:
+    if not isinstance(rows, tuple):
+        raise RunnerError("executor event rows must be a tuple")
+    normalized: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"event"}:
+            raise RunnerError("executor event rows must contain only event")
+        event = row["event"]
+        if not isinstance(event, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", event) is None:
+            raise RunnerError("executor event must be a short public token")
+        normalized.append({"event": event})
+    return tuple(normalized)
+
+
 def _location_json(location: object) -> dict[str, object]:
     line: object = location.start_line
     if location.start_line != location.end_line:
@@ -297,6 +332,7 @@ def _post_snapshot_sha256(snapshot: Path, fallback: str) -> str:
 
 def _audit_and_hash(snapshot: Path, task_id: str) -> str:
     try:
+        _assert_tree_has_no_links(snapshot, f"snapshot for task {task_id}")
         violations = audit_bundle(snapshot)
         if violations:
             raise RunnerError(f"snapshot is contaminated for task {task_id}")
@@ -306,12 +342,14 @@ def _audit_and_hash(snapshot: Path, task_id: str) -> str:
 
 
 def _resolve_snapshot(snapshots_root: Path, task_id: str) -> Path:
+    _require_safe_task_id(task_id)
     candidate = snapshots_root / task_id
+    _assert_path_components_safe(candidate, f"snapshot for task {task_id}")
     try:
         resolved = candidate.resolve(strict=True)
     except (OSError, RuntimeError) as error:
         raise RunnerError(f"snapshot is missing for task {task_id}") from error
-    if not resolved.is_dir() or not _is_within(resolved, snapshots_root):
+    if not resolved.is_dir() or resolved == snapshots_root or not _is_within(resolved, snapshots_root):
         raise RunnerError(f"snapshot is missing or outside snapshots root for task {task_id}")
     return resolved
 
@@ -333,6 +371,51 @@ def _is_link_or_junction(path: Path) -> bool:
     return bool(is_junction()) if callable(is_junction) else False
 
 
+def _assert_path_components_safe(path: Path, name: str) -> None:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if _is_link_or_junction(current):
+            raise RunnerError(f"{name} must not contain a link or junction: {current}")
+
+
+def _assert_tree_has_no_links(root: Path, name: str) -> None:
+    if _is_link_or_junction(root):
+        raise RunnerError(f"{name} must not be a link or junction: {root}")
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    child = Path(entry.path)
+                    if _is_link_or_junction(child):
+                        raise RunnerError(f"{name} must not contain a link or junction: {child}")
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(child)
+        except OSError as error:
+            raise RunnerError(f"{name} cannot be inspected safely") from error
+
+
+def _assert_artifact_tree(directory: Path, expected_names: set[str]) -> None:
+    _assert_path_components_safe(directory, "task artifact directory")
+    if _is_link_or_junction(directory) or not directory.is_dir():
+        raise RunnerError(f"task artifact directory is unsafe: {directory}")
+    names: set[str] = set()
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if _is_link_or_junction(path) or not entry.is_file(follow_symlinks=False):
+                    raise RunnerError(f"task artifact directory contains an unsafe entry: {path}")
+                names.add(entry.name)
+    except OSError as error:
+        raise RunnerError("task artifact directory cannot be inspected safely") from error
+    if names != expected_names:
+        raise RunnerError("task artifact directory contains unexpected files")
+
+
 def _is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
@@ -351,15 +434,28 @@ def _canonical_sha256(value: object) -> str:
 
 
 def _write_json(path: Path, value: object) -> None:
-    path.write_text(json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    _write_text_no_follow(path, json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n")
 
 
 def _write_jsonl(path: Path, rows: Iterable[object]) -> None:
-    path.write_text(
-        "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows),
-        encoding="utf-8",
-        newline="\n",
-    )
+    _write_text_no_follow(path, "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows))
+
+
+def _write_text_no_follow(path: Path, text: str) -> None:
+    _assert_path_components_safe(path.parent, "artifact parent")
+    if path.exists() or _is_link_or_junction(path):
+        raise RunnerError(f"artifact path already exists or is unsafe: {path}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        encoded = text.encode("utf-8")
+        offset = 0
+        while offset < len(encoded):
+            offset += os.write(descriptor, encoded[offset:])
+    finally:
+        os.close(descriptor)
+    if _is_link_or_junction(path) or not path.is_file():
+        raise RunnerError(f"artifact path became unsafe: {path}")
 
 
 def _aggregate_status(statuses: Iterable[str]) -> str:
@@ -381,6 +477,22 @@ def _add_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage:
 def _require_safe_run_id(run_id: str) -> None:
     if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
         raise RunnerError("run_id must be a path-safe identifier")
+
+
+def _require_safe_task_id(task_id: str) -> None:
+    if not isinstance(task_id, str) or not task_id or "\x00" in task_id or "\\" in task_id:
+        raise RunnerError("task_id must be a safe relative snapshot path")
+    raw_parts = task_id.split("/")
+    posix = PurePosixPath(task_id)
+    windows = PureWindowsPath(task_id)
+    if (
+        posix.is_absolute()
+        or windows.is_absolute()
+        or windows.drive
+        or not posix.parts
+        or any(part in {"", ".", ".."} for part in raw_parts)
+    ):
+        raise RunnerError("task_id must be a safe relative snapshot path")
 
 
 def _require_non_empty_text(value: object, name: str) -> None:
