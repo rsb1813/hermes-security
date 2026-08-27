@@ -120,6 +120,13 @@ type FrontierRow = {
   rank_include: boolean;
 };
 
+type ClosureRow = {
+  work_id: string;
+  status: "reviewed" | "no_candidate" | "deferred";
+  candidate_ids: string[];
+  notes: string;
+};
+
 function makeFrontier(profile: "hunt-balanced" | "hunt-max") {
   const root = temporaryRoot();
   const input = join(root, "rank-input.jsonl");
@@ -191,4 +198,104 @@ test("writes stable frontier bytes and cache identity", () => {
     cache_key: string;
   };
   expect(firstReceipt.cache_key).toBe(secondReceipt.cache_key);
+});
+
+function completeClosures(rows: FrontierRow[]): ClosureRow[] {
+  return rows.map((row, index) => ({
+    work_id: row.work_id,
+    status: index === 0 ? "reviewed" : "no_candidate",
+    candidate_ids: index === 0 ? ["candidate-a"] : [],
+    notes: index === 0 ? "candidate recorded" : "reviewed without candidates",
+  }));
+}
+
+function closeFrontier(
+  frontier: string,
+  closures: ClosureRow[],
+): { result: ReturnType<typeof Bun.spawnSync>; receipt: string } {
+  const root = temporaryRoot();
+  const closurePath = join(root, "closures.jsonl");
+  const receipt = join(root, "coverage-receipt.json");
+  writeJsonl(closurePath, closures);
+  const result = runHunt(
+    "close-frontier",
+    "--frontier",
+    frontier,
+    "--closures",
+    closurePath,
+    "--out",
+    receipt,
+  );
+  return { result, receipt };
+}
+
+test("requires and records one terminal closure for every frontier row", () => {
+  const made = makeFrontier("hunt-balanced");
+  expect(made.result.exitCode, made.result.stderr.toString()).toBe(0);
+  const frontier = readJsonl<FrontierRow>(made.frontier);
+  const closed = closeFrontier(made.frontier, completeClosures(frontier));
+  expect(closed.result.exitCode, closed.result.stderr.toString()).toBe(0);
+  const receipt = JSON.parse(readFileSync(closed.receipt, "utf8")) as {
+    total_items: number;
+    reviewed: number;
+    no_candidate: number;
+    coverage_debt: object[];
+  };
+  expect(receipt).toMatchObject({
+    total_items: 4,
+    reviewed: 1,
+    no_candidate: 3,
+    coverage_debt: [],
+  });
+});
+
+test("rejects a frontier with any missing closure", () => {
+  const made = makeFrontier("hunt-balanced");
+  expect(made.result.exitCode, made.result.stderr.toString()).toBe(0);
+  const frontier = readJsonl<FrontierRow>(made.frontier);
+  const closures = completeClosures(frontier).slice(0, -1);
+  const closed = closeFrontier(made.frontier, closures);
+  expect(closed.result.exitCode).toBe(2);
+  expect(closed.result.stderr.toString()).toContain(frontier.at(-1)!.work_id);
+});
+
+test("keeps deferred review visible as coverage debt", () => {
+  const made = makeFrontier("hunt-balanced");
+  expect(made.result.exitCode, made.result.stderr.toString()).toBe(0);
+  const frontier = readJsonl<FrontierRow>(made.frontier);
+  const closures = completeClosures(frontier);
+  closures[1] = {
+    work_id: frontier[1]!.work_id,
+    status: "deferred",
+    candidate_ids: [],
+    notes: "budget ended before the backward pass",
+  };
+  const closed = closeFrontier(made.frontier, closures);
+  expect(closed.result.exitCode, closed.result.stderr.toString()).toBe(0);
+  const receipt = JSON.parse(readFileSync(closed.receipt, "utf8")) as {
+    deferred: number;
+    coverage_debt: { work_id: string; notes: string }[];
+  };
+  expect(receipt.deferred).toBe(1);
+  expect(receipt.coverage_debt).toEqual([
+    {
+      work_id: frontier[1]!.work_id,
+      path: frontier[1]!.path,
+      component: frontier[1]!.component,
+      passes: frontier[1]!.passes,
+      notes: "budget ended before the backward pass",
+    },
+  ]);
+});
+
+test("rejects duplicate and unknown closure work ids", () => {
+  const made = makeFrontier("hunt-balanced");
+  expect(made.result.exitCode, made.result.stderr.toString()).toBe(0);
+  const frontier = readJsonl<FrontierRow>(made.frontier);
+  const closures = completeClosures(frontier);
+  closures[1] = { ...closures[0]!, notes: "duplicate" };
+  closures[2] = { ...closures[2]!, work_id: "hunt-unknown" };
+  const closed = closeFrontier(made.frontier, closures);
+  expect(closed.result.exitCode).toBe(2);
+  expect(closed.result.stderr.toString()).toMatch(/duplicate|unknown/);
 });

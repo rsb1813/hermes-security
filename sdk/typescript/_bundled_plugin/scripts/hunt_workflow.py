@@ -44,6 +44,8 @@ PASS_BY_SIGNAL = {
     "parser": "parser",
     "state": "state",
 }
+CLOSURE_STATUSES = ("reviewed", "no_candidate", "deferred")
+FRONTIER_PASSES = ("forward", "backward", "guard", "parser", "state", "general")
 
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
@@ -66,6 +68,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     frontier.add_argument("--profile", choices=PROFILES, required=True)
     frontier.add_argument("--out", required=True)
     frontier.add_argument("--receipt", required=True)
+    closure = commands.add_parser(
+        "close-frontier", help="Require a terminal closure for every review item."
+    )
+    closure.add_argument("--frontier", required=True)
+    closure.add_argument("--closures", required=True)
+    closure.add_argument("--out", required=True)
     return parser.parse_args(argv)
 
 
@@ -74,6 +82,9 @@ def main(argv: list[str] | None = None) -> int:
         args = parse_args(argv)
         if args.command == "make-frontier":
             make_frontier(args)
+            return 0
+        if args.command == "close-frontier":
+            close_frontier(args)
             return 0
         raise AssertionError(f"unhandled command: {args.command}")
     except (HuntWorkflowError, OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -183,6 +194,64 @@ def make_frontier(args: argparse.Namespace) -> None:
     print(f"Wrote {len(frontier)} full-coverage Hunt rows to {output_path}")
 
 
+def close_frontier(args: argparse.Namespace) -> None:
+    frontier_path = Path(args.frontier).expanduser().resolve(strict=True)
+    closures_path = Path(args.closures).expanduser().resolve(strict=True)
+    output_path = Path(args.out).expanduser().resolve(strict=False)
+    _reject_output_collisions(
+        inputs=(frontier_path, closures_path), outputs=(output_path,)
+    )
+    frontier = _load_jsonl(frontier_path, "frontier", _validate_frontier)
+    closures = _load_jsonl(closures_path, "closure", _validate_closure)
+    _require_unique_field(frontier, "work_id", "frontier")
+    _require_unique_field(frontier, "path", "frontier")
+    _require_unique_field(closures, "work_id", "closures")
+    priorities = sorted(int(row["priority"]) for row in frontier)
+    if priorities != list(range(1, len(frontier) + 1)):
+        raise HuntWorkflowError("frontier priorities must be unique and contiguous from 1")
+
+    frontier_by_id = {str(row["work_id"]): row for row in frontier}
+    closure_by_id = {str(row["work_id"]): row for row in closures}
+    unknown = sorted(set(closure_by_id) - set(frontier_by_id))
+    if unknown:
+        raise HuntWorkflowError(f"closures contain unknown work ids: {unknown}")
+    missing = sorted(set(frontier_by_id) - set(closure_by_id))
+    if missing:
+        raise HuntWorkflowError(f"frontier items are missing closures: {missing}")
+
+    coverage_debt = []
+    for work_id, closure in closure_by_id.items():
+        if closure["status"] != "deferred":
+            continue
+        item = frontier_by_id[work_id]
+        coverage_debt.append(
+            {
+                "work_id": work_id,
+                "path": item["path"],
+                "component": item["component"],
+                "passes": item["passes"],
+                "notes": closure["notes"],
+            }
+        )
+    coverage_debt.sort(key=lambda item: str(item["work_id"]))
+    receipt = {
+        "schema_version": SCHEMA_VERSION,
+        "frontier_sha256": _sha256_file(frontier_path),
+        "closures_sha256": _sha256_file(closures_path),
+        "total_items": len(frontier),
+        "reviewed": sum(row["status"] == "reviewed" for row in closures),
+        "no_candidate": sum(row["status"] == "no_candidate" for row in closures),
+        "deferred": sum(row["status"] == "deferred" for row in closures),
+        "candidate_links": sum(len(row["candidate_ids"]) for row in closures),
+        "component_counts": _coverage_counts(frontier, closure_by_id, "component"),
+        "signal_counts": _multi_coverage_counts(frontier, closure_by_id, "signals"),
+        "pass_counts": _multi_coverage_counts(frontier, closure_by_id, "passes"),
+        "coverage_debt": coverage_debt,
+    }
+    _write_json(output_path, receipt)
+    print(f"Closed all {len(frontier)} Hunt frontier rows in {output_path}")
+
+
 def _validate_rank_input(row: JsonRow, path: Path, line_number: int) -> None:
     _require_exact_fields(row, {"path", "area", "preview"}, path, line_number)
     _require_relative_path(row["path"], path, line_number)
@@ -202,6 +271,82 @@ def _validate_rank_output(row: JsonRow, path: Path, line_number: int) -> None:
     if not isinstance(row["include"], bool):
         raise HuntWorkflowError(f"{path}:{line_number}: include must be a boolean")
     _require_string(row["reason"], "reason", path, line_number, allow_empty=False)
+
+
+def _validate_frontier(row: JsonRow, path: Path, line_number: int) -> None:
+    _require_exact_fields(
+        row,
+        {
+            "work_id",
+            "path",
+            "area",
+            "component",
+            "risk_score",
+            "rank_include",
+            "rank_reason",
+            "signals",
+            "passes",
+            "priority",
+        },
+        path,
+        line_number,
+    )
+    work_id = _require_string(
+        row["work_id"], "work_id", path, line_number, allow_empty=False
+    )
+    if re.fullmatch(r"hunt-[0-9a-f]{16}", work_id) is None:
+        raise HuntWorkflowError(f"{path}:{line_number}: invalid Hunt work_id")
+    _require_relative_path(row["path"], path, line_number)
+    _require_string(row["area"], "area", path, line_number, allow_empty=True)
+    _require_string(
+        row["component"], "component", path, line_number, allow_empty=False
+    )
+    score = row["risk_score"]
+    if isinstance(score, bool) or not isinstance(score, int) or not 1 <= score <= 10:
+        raise HuntWorkflowError(f"{path}:{line_number}: invalid risk_score")
+    if not isinstance(row["rank_include"], bool):
+        raise HuntWorkflowError(f"{path}:{line_number}: rank_include must be a boolean")
+    _require_string(
+        row["rank_reason"], "rank_reason", path, line_number, allow_empty=False
+    )
+    _require_string_array(
+        row["signals"], "signals", SIGNAL_ORDER, path, line_number, allow_empty=True
+    )
+    _require_string_array(
+        row["passes"], "passes", FRONTIER_PASSES, path, line_number, allow_empty=False
+    )
+    priority = row["priority"]
+    if isinstance(priority, bool) or not isinstance(priority, int) or priority < 1:
+        raise HuntWorkflowError(f"{path}:{line_number}: priority must be positive")
+
+
+def _validate_closure(row: JsonRow, path: Path, line_number: int) -> None:
+    _require_exact_fields(
+        row, {"work_id", "status", "candidate_ids", "notes"}, path, line_number
+    )
+    _require_string(row["work_id"], "work_id", path, line_number, allow_empty=False)
+    status = _require_string(
+        row["status"], "status", path, line_number, allow_empty=False
+    )
+    if status not in CLOSURE_STATUSES:
+        raise HuntWorkflowError(f"{path}:{line_number}: unsupported closure status")
+    candidate_ids = _require_string_array(
+        row["candidate_ids"],
+        "candidate_ids",
+        None,
+        path,
+        line_number,
+        allow_empty=True,
+    )
+    _require_string(row["notes"], "notes", path, line_number, allow_empty=False)
+    if status == "reviewed" and not candidate_ids:
+        raise HuntWorkflowError(
+            f"{path}:{line_number}: reviewed closure requires candidate_ids"
+        )
+    if status == "no_candidate" and candidate_ids:
+        raise HuntWorkflowError(
+            f"{path}:{line_number}: no_candidate closure cannot reference candidates"
+        )
 
 
 def _signals(path: str, preview: str) -> tuple[str, ...]:
@@ -309,6 +454,20 @@ def _require_unique_paths(rows: list[JsonRow], label: str) -> None:
         )
 
 
+def _require_unique_field(rows: list[JsonRow], field: str, label: str) -> None:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for row in rows:
+        value = str(row[field])
+        if value in seen:
+            duplicates.add(value)
+        seen.add(value)
+    if duplicates:
+        raise HuntWorkflowError(
+            f"{label} contains duplicate {field} values: {sorted(duplicates)}"
+        )
+
+
 def _require_exact_fields(
     row: JsonRow, expected: set[str], path: Path, line_number: int
 ) -> None:
@@ -352,6 +511,68 @@ def _require_string(
             f"{path}:{line_number}: {field} must be {requirement}"
         )
     return value
+
+
+def _require_string_array(
+    value: object,
+    field: str,
+    allowed: tuple[str, ...] | None,
+    path: Path,
+    line_number: int,
+    *,
+    allow_empty: bool,
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or (not allow_empty and not value):
+        requirement = "an array" if allow_empty else "a non-empty array"
+        raise HuntWorkflowError(f"{path}:{line_number}: {field} must be {requirement}")
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise HuntWorkflowError(
+                f"{path}:{line_number}: {field} items must be non-empty strings"
+            )
+        if allowed is not None and item not in allowed:
+            raise HuntWorkflowError(
+                f"{path}:{line_number}: unsupported {field} item {item}"
+            )
+        items.append(item)
+    if len(items) != len(set(items)):
+        raise HuntWorkflowError(f"{path}:{line_number}: {field} items must be unique")
+    return tuple(items)
+
+
+def _coverage_counts(
+    frontier: list[JsonRow], closures: dict[str, JsonRow], field: str
+) -> dict[str, object]:
+    keys = sorted({str(row[field]) for row in frontier})
+    return {
+        key: {
+            "total": sum(str(row[field]) == key for row in frontier),
+            "deferred": sum(
+                str(row[field]) == key
+                and closures[str(row["work_id"])]["status"] == "deferred"
+                for row in frontier
+            ),
+        }
+        for key in keys
+    }
+
+
+def _multi_coverage_counts(
+    frontier: list[JsonRow], closures: dict[str, JsonRow], field: str
+) -> dict[str, object]:
+    keys = sorted({str(item) for row in frontier for item in row[field]})  # type: ignore[union-attr]
+    return {
+        key: {
+            "total": sum(key in row[field] for row in frontier),  # type: ignore[operator]
+            "deferred": sum(
+                key in row[field]  # type: ignore[operator]
+                and closures[str(row["work_id"])]["status"] == "deferred"
+                for row in frontier
+            ),
+        }
+        for key in keys
+    }
 
 
 def _reject_output_collisions(
