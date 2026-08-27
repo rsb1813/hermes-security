@@ -251,7 +251,10 @@ remain independent until a private materializer can add that optimization with
 equivalent audit and publication guarantees. Git reads clear inherited `GIT_*`
 repository-routing state, disable replace-object behavior, and read each tree's
 regular blobs through one checked `cat-file --batch` response. The builder uses
-only the provided local repository object store.
+only the provided local repository object store. It forces Git lazy fetching
+off, so a partial clone with missing objects fails closed instead of contacting
+a promisor remote. Operators must prepare a fully hydrated object store or full
+clone before corpus preparation.
 
 HermesBench Mini is optimization evidence, not final proof. A final, release,
 or public performance claim always requires the full HermesBench. The first

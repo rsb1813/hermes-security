@@ -733,8 +733,13 @@ class CorpusBuilderTests(unittest.TestCase):
                 "GIT_NAMESPACE": "synthetic-namespace",
                 "GIT_REPLACE_REF_BASE": "refs/replace/",
                 "GIT_NO_REPLACE_OBJECTS": "0",
+                "GIT_NO_LAZY_FETCH": "0",
             }
-            with patch.dict(os.environ, poisoned, clear=False):
+            with patch.dict(os.environ, poisoned, clear=False), patch.object(
+                corpus_builder.subprocess,
+                "run",
+                wraps=subprocess.run,
+            ) as git_run:
                 result = build_reviewed_corpus(
                     ledger,
                     {"source-candidate-1": _candidate(vulnerable)},
@@ -744,6 +749,10 @@ class CorpusBuilderTests(unittest.TestCase):
                     suite="canary",
                 )
             self.assertTrue(result.manifest_path.exists())
+            for call in git_run.call_args_list:
+                environment = call.kwargs["env"]
+                self.assertEqual(environment["GIT_NO_LAZY_FETCH"], "1")
+                self.assertNotIn("GIT_DIR", environment)
 
     def test_builder_binds_selected_license_path_in_both_trees(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
