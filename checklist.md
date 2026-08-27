@@ -29,7 +29,7 @@
 - [x] Implement Canary, Mini, and Full manifest loaders.
 - [x] Implement Mini-to-Full escalation decisions.
 - [x] Implement the strict reviewed VulnGym importer and keyed anonymous IDs.
-- [ ] Add synthetic end-to-end fixtures.
+- [x] Add synthetic end-to-end fixtures.
 
 ## Standard baseline
 

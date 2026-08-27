@@ -89,6 +89,8 @@
 - Agent-visible bundle auditing is read-only. It rejects or records VCS metadata, advisory identifiers in paths or bytes, symbolic links, and non-regular hash inputs without redacting or rewriting source files.
 - The strict importer was exercised against all 408 rows at VulnGym revision `cd69f7e163e08485ab5496115ae03439cda6e27e`: 393 reviewed candidates across 178 advisories were accepted and 15 unverified entries were excluded. This was an in-memory local check; no generated IDs or private labels were written into Git.
 - Canary, Mini, and Full now share one strict manifest parser with snapshot hashes, ordered task descriptors, explicit command allowlists, time limits, and duplicate task rejection.
+- The standalone CLI now exposes scoring, controlled receipt comparison, bundle auditing, and private VulnGym import without changing the existing Codex Security CLI or SDK surface.
+- Foundation verification on 2026-08-27 passed 70 Python tests, the focused Bun bridge test, TypeScript type checking, repository formatting, and Python bytecode compilation. The unchanged full TypeScript baseline remains separately known to fail 79 environment-dependent Windows tests.
 - The current deterministic repository inventory, rank shards, bounded worker plan, validation, and merge commands can be reused without modifying `generate_rank_input.py`.
 - `select-deep-review-input` is not suitable for Hunt coverage because its top-percent behavior can discard low-ranked files. Hunt must preserve the whole inventory and use ranking only for processing order.
 - The locally inspected VulnGym revision is `cd69f7e163e08485ab5496115ae03439cda6e27e`.
