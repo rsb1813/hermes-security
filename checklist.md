@@ -27,7 +27,7 @@
 - [x] Implement fixed-negative and adjudication handling.
 - [x] Implement reproducible run receipts and separated token accounting.
 - [ ] Implement Canary, Mini, and Full manifest loaders.
-- [ ] Implement Mini-to-Full escalation decisions.
+- [x] Implement Mini-to-Full escalation decisions.
 - [ ] Add synthetic end-to-end fixtures.
 
 ## Standard baseline

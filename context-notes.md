@@ -85,6 +85,7 @@
 - HermesBench contracts use schema version `1`, exact top-level field sets, repository-relative normalized locations, immutable parsed objects, a five-finding cap, and task-kind-specific oracle invariants.
 - Scoring uses bounded one-to-one endpoint matching, ordered trace LCS credit, advisory-level recall, and per-fixed-snapshot specificity. Findings unrelated to the retired path remain provisional instead of becoming automatic false positives.
 - Run receipts compare every frozen control field while leaving workflow and profile identities outside that equivalence check. Cached input, uncached input, and output token counts remain separate serialized values.
+- Mini-to-Full escalation is mandatory for final, release, and public-performance decisions, and also triggers on inconclusive confidence, hidden gain below two, repeat instability, category regression beyond five points, or comparison-semantic changes. Full readiness requires at least 144 vulnerable tasks and three new diversity axes.
 - The current deterministic repository inventory, rank shards, bounded worker plan, validation, and merge commands can be reused without modifying `generate_rank_input.py`.
 - `select-deep-review-input` is not suitable for Hunt coverage because its top-percent behavior can discard low-ranked files. Hunt must preserve the whole inventory and use ranking only for processing order.
 - The locally inspected VulnGym revision is `cd69f7e163e08485ab5496115ae03439cda6e27e`.
