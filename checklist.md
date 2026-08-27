@@ -40,12 +40,12 @@
 
 ## Hunt workflow
 
-- [ ] Write failing tests for Hunt state transitions and coverage safeguards.
+- [x] Write failing tests for Hunt state transitions and coverage safeguards.
 - [ ] Reuse deterministic rank and shard infrastructure.
 - [ ] Implement repository mapping and risk frontier planning.
 - [ ] Implement forward and backward discovery passes.
 - [ ] Implement path joining and candidate evidence slices.
-- [ ] Implement independent validation.
+- [x] Implement independent validation.
 - [ ] Implement root-cause deduplication.
 - [ ] Implement validated draft reporting.
 - [ ] Verify Standard CLI and SDK compatibility.

@@ -299,3 +299,222 @@ test("rejects duplicate and unknown closure work ids", () => {
   expect(closed.result.exitCode).toBe(2);
   expect(closed.result.stderr.toString()).toMatch(/duplicate|unknown/);
 });
+
+type CandidateRow = {
+  candidate_id: string;
+  cwe_ids: string[];
+  locations: {
+    path: string;
+    start_line: number;
+    end_line: number;
+    role: string;
+  }[];
+  summary: string;
+  evidence: string;
+  context: string;
+  instance: string;
+};
+
+function candidate(candidateId = "candidate-a"): CandidateRow {
+  return {
+    candidate_id: candidateId,
+    cwe_ids: ["CWE-862"],
+    locations: [
+      {
+        path: "src/api/route.py",
+        start_line: 10,
+        end_line: 10,
+        role: "entrypoint",
+      },
+      {
+        path: "src/policy.py",
+        start_line: 20,
+        end_line: 20,
+        role: "root_control",
+      },
+      {
+        path: "src/storage/db.py",
+        start_line: 30,
+        end_line: 30,
+        role: "sink",
+      },
+    ],
+    summary: "Missing object authorization reaches a protected update",
+    evidence: "The route passes the requested object directly to save().",
+    context: "The policy check covers the caller but not the requested object.",
+    instance: `authorization:${candidateId}`,
+  };
+}
+
+type ProofStatus = "proven" | "disproven" | "unknown";
+type ValidationRow = {
+  candidate_id: string;
+  verifier_actor: string;
+  disposition: "accepted" | "rejected" | "inconclusive";
+  method: string;
+  attacker_control: ProofStatus;
+  reachability: ProofStatus;
+  impact: ProofStatus;
+  guard_failure: ProofStatus;
+  evidence: string[];
+  counterevidence: string[];
+  proof_gaps: string[];
+  preconditions: string[];
+  impact_statement: string;
+  remediation: string;
+  uncertainty: string;
+  confidence: "high" | "medium" | "low";
+};
+
+function acceptedValidation(candidateId = "candidate-a"): ValidationRow {
+  return {
+    candidate_id: candidateId,
+    verifier_actor: "verifier-b",
+    disposition: "accepted",
+    method: "static_trace",
+    attacker_control: "proven",
+    reachability: "proven",
+    impact: "proven",
+    guard_failure: "proven",
+    evidence: ["route.py:10 reaches db.py:30 without an object policy check"],
+    counterevidence: [],
+    proof_gaps: [],
+    preconditions: ["The caller can select another object identifier."],
+    impact_statement: "A caller can update another tenant's protected object.",
+    remediation: "Authorize the selected object before the update.",
+    uncertainty: "No runtime service was available; the complete static path was checked.",
+    confidence: "high",
+  };
+}
+
+function prepareValidation(candidates: CandidateRow[]) {
+  const root = temporaryRoot();
+  const candidatesPath = join(root, "candidates.jsonl");
+  const output = join(root, "validation-input.jsonl");
+  writeJsonl(candidatesPath, candidates);
+  const result = runHunt(
+    "prepare-validation",
+    "--candidates",
+    candidatesPath,
+    "--out",
+    output,
+  );
+  return { result, output, candidatesPath };
+}
+
+function validateDecisions(
+  candidatesPath: string,
+  validations: ValidationRow[],
+  discoveryActor = "discoverer-a",
+) {
+  const root = temporaryRoot();
+  const validationsPath = join(root, "validations.jsonl");
+  const output = join(root, "validated.jsonl");
+  writeJsonl(validationsPath, validations);
+  const result = runHunt(
+    "validate-decisions",
+    "--candidates",
+    candidatesPath,
+    "--validations",
+    validationsPath,
+    "--discovery-actor",
+    discoveryActor,
+    "--out",
+    output,
+  );
+  return { result, output };
+}
+
+test("prepares validation as an unverified hypothesis without conclusions", () => {
+  const prepared = prepareValidation([candidate()]);
+  expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
+  const row = readJsonl<Record<string, unknown>>(prepared.output)[0]!;
+  expect(row).toMatchObject({
+    candidate_id: "candidate-a",
+    hypothesis_status: "unverified",
+    hypothesis: candidate().summary,
+  });
+  expect(row).not.toHaveProperty("confidence");
+  expect(row).not.toHaveProperty("state");
+  expect(row).not.toHaveProperty("discovery_actor");
+});
+
+test("rejects a validation performed by the discovery actor", () => {
+  const prepared = prepareValidation([candidate()]);
+  expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
+  const validation = acceptedValidation();
+  validation.verifier_actor = "discoverer-a";
+  const validated = validateDecisions(prepared.candidatesPath, [validation]);
+  expect(validated.result.exitCode).toBe(2);
+  expect(validated.result.stderr.toString()).toContain("independent verifier");
+});
+
+test("rejects accepted decisions with incomplete proof or unsafe methods", () => {
+  const prepared = prepareValidation([candidate()]);
+  expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
+  const incomplete = acceptedValidation();
+  incomplete.guard_failure = "unknown";
+  let validated = validateDecisions(prepared.candidatesPath, [incomplete]);
+  expect(validated.result.exitCode).toBe(2);
+  expect(validated.result.stderr.toString()).toContain("all four claims proven");
+
+  const unsafe = acceptedValidation();
+  unsafe.method = "poc";
+  validated = validateDecisions(prepared.candidatesPath, [unsafe]);
+  expect(validated.result.exitCode).toBe(2);
+  expect(validated.result.stderr.toString()).toContain("validation method");
+});
+
+test("requires one validation decision for every candidate", () => {
+  const prepared = prepareValidation([candidate(), candidate("candidate-b")]);
+  expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
+  const validated = validateDecisions(prepared.candidatesPath, [
+    acceptedValidation(),
+  ]);
+  expect(validated.result.exitCode).toBe(2);
+  expect(validated.result.stderr.toString()).toContain("candidate-b");
+});
+
+test("records accepted rejected and inconclusive state histories", () => {
+  const candidates = [
+    candidate(),
+    candidate("candidate-b"),
+    candidate("candidate-c"),
+  ];
+  const prepared = prepareValidation(candidates);
+  expect(prepared.result.exitCode, prepared.result.stderr.toString()).toBe(0);
+  const rejected = acceptedValidation("candidate-b");
+  rejected.disposition = "rejected";
+  rejected.attacker_control = "disproven";
+  rejected.reachability = "unknown";
+  rejected.impact = "unknown";
+  rejected.guard_failure = "unknown";
+  rejected.counterevidence = ["The object identifier is replaced with the authenticated tenant ID."];
+  rejected.confidence = "high";
+  rejected.remediation = "";
+  const inconclusive = acceptedValidation("candidate-c");
+  inconclusive.disposition = "inconclusive";
+  inconclusive.attacker_control = "unknown";
+  inconclusive.reachability = "unknown";
+  inconclusive.impact = "unknown";
+  inconclusive.guard_failure = "unknown";
+  inconclusive.proof_gaps = ["The generated route binding is unavailable."];
+  inconclusive.confidence = "low";
+  inconclusive.remediation = "";
+
+  const validated = validateDecisions(prepared.candidatesPath, [
+    acceptedValidation(),
+    rejected,
+    inconclusive,
+  ]);
+  expect(validated.result.exitCode, validated.result.stderr.toString()).toBe(0);
+  const rows = readJsonl<{
+    candidate_id: string;
+    state_history: string[];
+  }>(validated.output);
+  expect(rows.map((row) => row.state_history.at(-1))).toEqual([
+    "accepted",
+    "rejected",
+    "inconclusive",
+  ]);
+});

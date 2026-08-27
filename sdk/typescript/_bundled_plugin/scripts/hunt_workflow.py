@@ -46,6 +46,25 @@ PASS_BY_SIGNAL = {
 }
 CLOSURE_STATUSES = ("reviewed", "no_candidate", "deferred")
 FRONTIER_PASSES = ("forward", "backward", "guard", "parser", "state", "general")
+LOCATION_ROLES = (
+    "entrypoint",
+    "entrypoint/wrapper",
+    "source",
+    "root_control",
+    "sink",
+    "concrete_implementation",
+    "evidence",
+)
+SAFE_VALIDATION_METHODS = (
+    "static_trace",
+    "existing_test",
+    "build",
+    "type_check",
+    "safe_invariant",
+)
+PROOF_STATUSES = ("proven", "disproven", "unknown")
+DISPOSITIONS = ("accepted", "rejected", "inconclusive")
+CONFIDENCE_LEVELS = ("high", "medium", "low")
 
 JsonRow = dict[str, object]
 RowValidator = Callable[[JsonRow, Path, int], None]
@@ -74,6 +93,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     closure.add_argument("--frontier", required=True)
     closure.add_argument("--closures", required=True)
     closure.add_argument("--out", required=True)
+    preparation = commands.add_parser(
+        "prepare-validation", help="Convert discoveries into unverified hypotheses."
+    )
+    preparation.add_argument("--candidates", required=True)
+    preparation.add_argument("--out", required=True)
+    validation = commands.add_parser(
+        "validate-decisions", help="Validate independent terminal candidate decisions."
+    )
+    validation.add_argument("--candidates", required=True)
+    validation.add_argument("--validations", required=True)
+    validation.add_argument("--discovery-actor", required=True)
+    validation.add_argument("--out", required=True)
     return parser.parse_args(argv)
 
 
@@ -85,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "close-frontier":
             close_frontier(args)
+            return 0
+        if args.command == "prepare-validation":
+            prepare_validation(args)
+            return 0
+        if args.command == "validate-decisions":
+            validate_decisions(args)
             return 0
         raise AssertionError(f"unhandled command: {args.command}")
     except (HuntWorkflowError, OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -252,6 +289,84 @@ def close_frontier(args: argparse.Namespace) -> None:
     print(f"Closed all {len(frontier)} Hunt frontier rows in {output_path}")
 
 
+def prepare_validation(args: argparse.Namespace) -> None:
+    candidates_path = Path(args.candidates).expanduser().resolve(strict=True)
+    output_path = Path(args.out).expanduser().resolve(strict=False)
+    _reject_output_collisions(inputs=(candidates_path,), outputs=(output_path,))
+    candidates = _load_jsonl(candidates_path, "candidate", _validate_candidate)
+    _require_unique_field(candidates, "candidate_id", "candidates")
+    hypotheses = []
+    for candidate in candidates:
+        hypothesis = {
+            "candidate_id": candidate["candidate_id"],
+            "cwe_ids": candidate["cwe_ids"],
+            "claimed_locations": candidate["locations"],
+            "hypothesis": candidate["summary"],
+            "hypothesis_status": "unverified",
+            "claimed_evidence": candidate["evidence"],
+        }
+        if "context" in candidate:
+            hypothesis["context"] = candidate["context"]
+        if "instance" in candidate:
+            hypothesis["instance"] = candidate["instance"]
+        hypotheses.append(hypothesis)
+    _write_jsonl(output_path, hypotheses)
+    print(f"Prepared {len(hypotheses)} unverified hypotheses in {output_path}")
+
+
+def validate_decisions(args: argparse.Namespace) -> None:
+    candidates_path = Path(args.candidates).expanduser().resolve(strict=True)
+    validations_path = Path(args.validations).expanduser().resolve(strict=True)
+    output_path = Path(args.out).expanduser().resolve(strict=False)
+    discovery_actor = _standalone_identifier(args.discovery_actor, "discovery actor")
+    _reject_output_collisions(
+        inputs=(candidates_path, validations_path), outputs=(output_path,)
+    )
+    candidates = _load_jsonl(candidates_path, "candidate", _validate_candidate)
+    validations = _load_jsonl(
+        validations_path, "validation", _validate_validation
+    )
+    _require_unique_field(candidates, "candidate_id", "candidates")
+    _require_unique_field(validations, "candidate_id", "validations")
+    candidates_by_id = {str(row["candidate_id"]): row for row in candidates}
+    validations_by_id = {str(row["candidate_id"]): row for row in validations}
+    unknown = sorted(set(validations_by_id) - set(candidates_by_id))
+    if unknown:
+        raise HuntWorkflowError(f"validations reference unknown candidates: {unknown}")
+    missing = sorted(set(candidates_by_id) - set(validations_by_id))
+    if missing:
+        raise HuntWorkflowError(f"candidates are missing validation decisions: {missing}")
+
+    validated: list[JsonRow] = []
+    for candidate in candidates:
+        candidate_id = str(candidate["candidate_id"])
+        validation = validations_by_id[candidate_id]
+        if str(validation["verifier_actor"]).casefold() == discovery_actor.casefold():
+            raise HuntWorkflowError(
+                f"{candidate_id}: validation requires an independent verifier"
+            )
+        _require_disposition_evidence(candidate, validation)
+        disposition = str(validation["disposition"])
+        validated.append(
+            candidate
+            | {
+                "validation": {
+                    key: value
+                    for key, value in validation.items()
+                    if key != "candidate_id"
+                },
+                "state_history": [
+                    "discovered",
+                    "evidence_built",
+                    "challenged",
+                    disposition,
+                ],
+            }
+        )
+    _write_jsonl(output_path, validated)
+    print(f"Validated {len(validated)} independent decisions in {output_path}")
+
+
 def _validate_rank_input(row: JsonRow, path: Path, line_number: int) -> None:
     _require_exact_fields(row, {"path", "area", "preview"}, path, line_number)
     _require_relative_path(row["path"], path, line_number)
@@ -346,6 +461,185 @@ def _validate_closure(row: JsonRow, path: Path, line_number: int) -> None:
     if status == "no_candidate" and candidate_ids:
         raise HuntWorkflowError(
             f"{path}:{line_number}: no_candidate closure cannot reference candidates"
+        )
+
+
+def _validate_candidate(row: JsonRow, path: Path, line_number: int) -> None:
+    required = {"candidate_id", "cwe_ids", "locations", "summary", "evidence"}
+    allowed = required | {"context", "instance"}
+    actual = set(row)
+    if not required <= actual or not actual <= allowed:
+        raise HuntWorkflowError(
+            f"{path}:{line_number}: invalid normalized candidate fields"
+        )
+    _require_identifier(
+        row["candidate_id"], "candidate_id", path, line_number
+    )
+    cwe_ids = _require_string_array(
+        row["cwe_ids"], "cwe_ids", None, path, line_number, allow_empty=True
+    )
+    if any(re.fullmatch(r"CWE-[1-9][0-9]*", cwe_id) is None for cwe_id in cwe_ids):
+        raise HuntWorkflowError(f"{path}:{line_number}: invalid CWE identifier")
+    locations = row["locations"]
+    if not isinstance(locations, list) or not locations:
+        raise HuntWorkflowError(
+            f"{path}:{line_number}: candidate locations must be non-empty"
+        )
+    normalized_locations = [
+        _validate_location(item, path, line_number) for item in locations
+    ]
+    identities = {
+        (
+            location["path"],
+            location["start_line"],
+            location["end_line"],
+            location["role"],
+        )
+        for location in normalized_locations
+    }
+    if len(identities) != len(normalized_locations):
+        raise HuntWorkflowError(f"{path}:{line_number}: duplicate candidate locations")
+    _require_string(row["summary"], "summary", path, line_number, allow_empty=False)
+    _require_string(row["evidence"], "evidence", path, line_number, allow_empty=False)
+    for optional in ("context", "instance"):
+        if optional in row:
+            _require_string(
+                row[optional], optional, path, line_number, allow_empty=False
+            )
+
+
+def _validate_location(
+    value: object, path: Path, line_number: int
+) -> dict[str, object]:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise HuntWorkflowError(f"{path}:{line_number}: location must be an object")
+    _require_exact_fields(
+        value, {"path", "start_line", "end_line", "role"}, path, line_number
+    )
+    _require_relative_path(value["path"], path, line_number)
+    start_line = value["start_line"]
+    end_line = value["end_line"]
+    if (
+        isinstance(start_line, bool)
+        or not isinstance(start_line, int)
+        or start_line < 1
+        or isinstance(end_line, bool)
+        or not isinstance(end_line, int)
+        or end_line < start_line
+    ):
+        raise HuntWorkflowError(f"{path}:{line_number}: invalid location line range")
+    role = _require_string(
+        value["role"], "role", path, line_number, allow_empty=False
+    )
+    if role not in LOCATION_ROLES:
+        raise HuntWorkflowError(f"{path}:{line_number}: unsupported location role")
+    return value
+
+
+def _validate_validation(row: JsonRow, path: Path, line_number: int) -> None:
+    _require_exact_fields(
+        row,
+        {
+            "candidate_id",
+            "verifier_actor",
+            "disposition",
+            "method",
+            "attacker_control",
+            "reachability",
+            "impact",
+            "guard_failure",
+            "evidence",
+            "counterevidence",
+            "proof_gaps",
+            "preconditions",
+            "impact_statement",
+            "remediation",
+            "uncertainty",
+            "confidence",
+        },
+        path,
+        line_number,
+    )
+    _require_identifier(row["candidate_id"], "candidate_id", path, line_number)
+    _require_identifier(row["verifier_actor"], "verifier_actor", path, line_number)
+    disposition = _require_string(
+        row["disposition"], "disposition", path, line_number, allow_empty=False
+    )
+    if disposition not in DISPOSITIONS:
+        raise HuntWorkflowError(f"{path}:{line_number}: unsupported disposition")
+    method = _require_string(
+        row["method"], "method", path, line_number, allow_empty=False
+    )
+    if method not in SAFE_VALIDATION_METHODS:
+        raise HuntWorkflowError(
+            f"{path}:{line_number}: unsupported safe validation method {method}"
+        )
+    for field in ("attacker_control", "reachability", "impact", "guard_failure"):
+        status = _require_string(
+            row[field], field, path, line_number, allow_empty=False
+        )
+        if status not in PROOF_STATUSES:
+            raise HuntWorkflowError(f"{path}:{line_number}: unsupported {field} status")
+    for field in ("evidence", "counterevidence", "proof_gaps", "preconditions"):
+        _require_string_array(
+            row[field], field, None, path, line_number, allow_empty=True
+        )
+    _require_string(
+        row["impact_statement"],
+        "impact_statement",
+        path,
+        line_number,
+        allow_empty=False,
+    )
+    _require_string(
+        row["remediation"], "remediation", path, line_number, allow_empty=True
+    )
+    _require_string(
+        row["uncertainty"], "uncertainty", path, line_number, allow_empty=False
+    )
+    confidence = _require_string(
+        row["confidence"], "confidence", path, line_number, allow_empty=False
+    )
+    if confidence not in CONFIDENCE_LEVELS:
+        raise HuntWorkflowError(f"{path}:{line_number}: unsupported confidence")
+
+
+def _require_disposition_evidence(
+    candidate: JsonRow, validation: JsonRow
+) -> None:
+    candidate_id = str(candidate["candidate_id"])
+    disposition = str(validation["disposition"])
+    proof = tuple(
+        str(validation[field])
+        for field in ("attacker_control", "reachability", "impact", "guard_failure")
+    )
+    if disposition == "accepted":
+        if any(status != "proven" for status in proof):
+            raise HuntWorkflowError(
+                f"{candidate_id}: accepted decision requires all four claims proven"
+            )
+        roles = {str(location["role"]) for location in candidate["locations"]}  # type: ignore[union-attr]
+        source_roles = {"entrypoint", "entrypoint/wrapper", "source"}
+        if not roles.intersection(source_roles) or not {"root_control", "sink"} <= roles:
+            raise HuntWorkflowError(
+                f"{candidate_id}: accepted decision requires source, root_control, and sink locations"
+            )
+        if not validation["evidence"]:
+            raise HuntWorkflowError(
+                f"{candidate_id}: accepted decision requires concrete evidence"
+            )
+        if not str(validation["remediation"]).strip():
+            raise HuntWorkflowError(
+                f"{candidate_id}: accepted decision requires remediation"
+            )
+    elif disposition == "rejected":
+        if "disproven" not in proof or not validation["counterevidence"]:
+            raise HuntWorkflowError(
+                f"{candidate_id}: rejected decision requires a disproven claim and counterevidence"
+            )
+    elif "unknown" not in proof or not validation["proof_gaps"]:
+        raise HuntWorkflowError(
+            f"{candidate_id}: inconclusive decision requires an unknown claim and proof gaps"
         )
 
 
@@ -510,6 +804,25 @@ def _require_string(
         raise HuntWorkflowError(
             f"{path}:{line_number}: {field} must be {requirement}"
         )
+    return value
+
+
+def _require_identifier(
+    value: object, field: str, path: Path, line_number: int
+) -> str:
+    identifier = _require_string(
+        value, field, path, line_number, allow_empty=False
+    )
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@/-]*", identifier) is None:
+        raise HuntWorkflowError(f"{path}:{line_number}: invalid {field}")
+    return identifier
+
+
+def _standalone_identifier(value: object, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._@/-]*", value
+    ) is None:
+        raise HuntWorkflowError(f"invalid {field}")
     return value
 
 
