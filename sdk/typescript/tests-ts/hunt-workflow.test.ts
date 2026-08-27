@@ -1,11 +1,6 @@
 // Verifies the experimental Hunt workflow helper.
 
-import {
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
@@ -31,10 +26,7 @@ function temporaryRoot(): string {
 }
 
 function writeJsonl(path: string, rows: object[]): void {
-  writeFileSync(
-    path,
-    rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
-  );
+  writeFileSync(path, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
 }
 
 function readJsonl<T>(path: string): T[] {
@@ -382,7 +374,8 @@ function acceptedValidation(candidateId = "candidate-a"): ValidationRow {
     preconditions: ["The caller can select another object identifier."],
     impact_statement: "A caller can update another tenant's protected object.",
     remediation: "Authorize the selected object before the update.",
-    uncertainty: "No runtime service was available; the complete static path was checked.",
+    uncertainty:
+      "No runtime service was available; the complete static path was checked.",
     confidence: "high",
   };
 }
@@ -484,7 +477,9 @@ test("rejects accepted decisions with incomplete proof or unsafe methods", () =>
   incomplete.guard_failure = "unknown";
   let validated = validateDecisions(prepared.candidatesPath, [incomplete]);
   expect(validated.result.exitCode).toBe(2);
-  expect(validated.result.stderr.toString()).toContain("all four claims proven");
+  expect(validated.result.stderr.toString()).toContain(
+    "all four claims proven",
+  );
 
   const unsafe = acceptedValidation();
   unsafe.method = "poc";
@@ -644,4 +639,65 @@ test("writes byte-stable finalized findings and drafts", () => {
   expect(second.result.exitCode, second.result.stderr.toString()).toBe(0);
   expect(readFileSync(first.findings)).toEqual(readFileSync(second.findings));
   expect(readFileSync(first.report)).toEqual(readFileSync(second.report));
+});
+
+test("ships the explicit Hunt skill and its complete workflow contract", () => {
+  const skillPath = join(
+    pluginRoot,
+    "skills",
+    "hunt-security-scan",
+    "SKILL.md",
+  );
+  const agentPath = join(
+    pluginRoot,
+    "skills",
+    "hunt-security-scan",
+    "agents",
+    "openai.yaml",
+  );
+  const contractPath = join(
+    pluginRoot,
+    "skills",
+    "hunt-security-scan",
+    "references",
+    "hunt-contract.md",
+  );
+  const skill = readFileSync(skillPath, "utf8");
+  const agent = readFileSync(agentPath, "utf8");
+  const contract = readFileSync(contractPath, "utf8");
+  const pluginFiles = JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "plugin-files.json"), "utf8"),
+  ) as { shippedExact: string[] };
+
+  for (const profile of ["hunt-balanced", "hunt-max"]) {
+    expect(skill).toContain(profile);
+  }
+  for (const command of [
+    "make-repo-rank-input",
+    "make-rank-shards",
+    "merge-rank-outputs",
+    "make-frontier",
+    "close-frontier",
+    "prepare-validation",
+    "validate-decisions",
+    "finalize",
+  ]) {
+    expect(skill).toContain(command);
+  }
+  expect(skill).toContain("Ranking controls order, not eligibility");
+  expect(skill).toContain("Do not generate exploits");
+  expect(skill).toContain("Standard remains unchanged");
+  expect(skill).toContain("Do not run `select-deep-review-input`");
+  expect(contract).toContain("discovered -> evidence_built -> challenged");
+  expect(contract).toContain("static_trace");
+  expect(agent).toContain('display_name: "Hunt Security Scan"');
+
+  for (const path of [
+    "scripts/hunt_workflow.py",
+    "skills/hunt-security-scan/SKILL.md",
+    "skills/hunt-security-scan/agents/openai.yaml",
+    "skills/hunt-security-scan/references/hunt-contract.md",
+  ]) {
+    expect(pluginFiles.shippedExact).toContain(path);
+  }
 });

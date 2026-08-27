@@ -41,13 +41,16 @@
 ## Hunt workflow
 
 - [x] Write failing tests for Hunt state transitions and coverage safeguards.
-- [ ] Reuse deterministic rank and shard infrastructure.
-- [ ] Implement repository mapping and risk frontier planning.
-- [ ] Implement forward and backward discovery passes.
-- [ ] Implement path joining and candidate evidence slices.
+- [x] Run a fresh-context RED behavior test without the Hunt skill.
+- [x] Reuse deterministic rank and shard infrastructure.
+- [x] Implement repository mapping and risk frontier planning.
+- [x] Implement forward and backward discovery passes.
+- [x] Implement path joining and candidate evidence-slice guidance.
 - [x] Implement independent validation.
 - [x] Implement root-cause deduplication.
 - [x] Implement validated draft reporting.
+- [x] Bundle the explicit experimental Hunt skill and workflow contract.
+- [x] Run fresh-context GREEN behavior tests with the bundled skill.
 - [ ] Verify Standard CLI and SDK compatibility.
 
 ## Performance work
