@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +35,7 @@ class FakeAdapter:
             )
         )
         findings = self._findings(snapshot)
+        usage = self._usage(snapshot)
         return ExecutorResult(
             raw_response={
                 "prediction": {
@@ -41,9 +44,10 @@ class FakeAdapter:
                     "findings": findings,
                 },
                 "usage": {
-                    "input_tokens": 12,
-                    "cached_input_tokens": 7,
-                    "output_tokens": 3,
+                    "input_tokens": usage["cached_input_tokens"]
+                    + usage["uncached_input_tokens"],
+                    "cached_input_tokens": usage["cached_input_tokens"],
+                    "output_tokens": usage["output_tokens"],
                 },
             },
             event_rows=({"event": "fake.completed"},),
@@ -52,17 +56,23 @@ class FakeAdapter:
 
     @staticmethod
     def _findings(snapshot: Path) -> list[dict[str, object]]:
-        for path in sorted(snapshot.rglob("*")):
-            if not path.is_file():
+        entry_pattern = re.compile(
+            rb"(?m)^[ \t]*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+            rb"request\[\"value\"\]\s*$"
+        )
+        for path, source in _source_files(snapshot):
+            entry = entry_pattern.search(source)
+            if entry is None:
                 continue
-            source = path.read_bytes()
-            entry = b'value = request["value"]'
-            operation = b"execute(value)"
-            if entry not in source or operation not in source:
+            variable = re.escape(entry.group("name"))
+            operation = re.compile(
+                rb"(?m)^[ \t]*execute\(\s*" + variable + rb"\s*\)\s*$"
+            ).search(source, entry.end())
+            if operation is None:
                 continue
             relative_path = path.relative_to(snapshot).as_posix()
-            entry_line = _line_number(source, entry)
-            operation_line = _line_number(source, operation)
+            entry_line = _line_number(source, entry.start())
+            operation_line = _line_number(source, operation.start())
             return [
                 {
                     "finding_id": "synthetic-source-flow",
@@ -74,6 +84,24 @@ class FakeAdapter:
             ]
         return []
 
+    @staticmethod
+    def _usage(snapshot: Path) -> dict[str, int]:
+        source = b"".join(contents for _, contents in _source_files(snapshot))
+        digest = hashlib.sha256(source).digest()
+        return {
+            "cached_input_tokens": 1 + digest[0] % 17,
+            "uncached_input_tokens": 1 + digest[1] % 17,
+            "output_tokens": 1 + digest[2] % 17,
+        }
 
-def _line_number(source: bytes, marker: bytes) -> int:
-    return source[: source.index(marker)].count(b"\n") + 1
+
+def _source_files(snapshot: Path) -> tuple[tuple[Path, bytes], ...]:
+    return tuple(
+        (path, path.read_bytes())
+        for path in sorted(snapshot.rglob("*"))
+        if path.is_file()
+    )
+
+
+def _line_number(source: bytes, offset: int) -> int:
+    return source[:offset].count(b"\n") + 1
