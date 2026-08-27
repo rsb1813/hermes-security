@@ -947,7 +947,7 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                         "from pathlib import Path",
                         "scratch = Path('/workspace/scratch')",
                         "Path('/workspace/snapshot/source.py').read_text(encoding='utf-8')",
-                        "Path('/workspace/plugin/launch-sandbox.sh').read_text(encoding='utf-8')",
+                        "Path('/workspace/plugin/app_server_client.py').read_text(encoding='utf-8')",
                         "(scratch / 'named-profile-scratch-write').write_text('ok', encoding='utf-8')",
                         "def denied(marker, operation):",
                         "    try:",
@@ -966,18 +966,63 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                 ) + "\n",
                 encoding="utf-8",
             )
-            launcher = plugin / "launch-sandbox.sh"
-            launcher.write_bytes(
+            client = plugin / "app_server_client.py"
+            client.write_bytes(
                 "\n".join(
                     (
-                        "#!/bin/sh",
-                        "set -eu",
-                        "mkdir -p /tmp/hb-runtime-sentinel",
-                        "printf sentinel > /tmp/hb-runtime-sentinel/auth.json",
-                        "exec codex sandbox -c 'permissions.hermesbench={filesystem={\":minimal\"=\"read\",\"/workspace/snapshot\"=\"read\",\"/workspace/plugin\"=\"read\",\"/workspace/scratch\"=\"write\",\"/tmp/hb-runtime-*\"=\"deny\"},network={enabled=false}}' -c 'default_permissions=\"hermesbench\"' -P hermesbench -C /workspace/scratch -- python3 /workspace/plugin/assert_named_permissions.py",
+                        "# Drives the no-model app-server permission boundary smoke.",
+                        "from __future__ import annotations",
+                        "import json",
+                        "import select",
+                        "import subprocess",
+                        "import sys",
+                        "import time",
+                        "from pathlib import Path",
+                        "requests = [json.loads(sys.stdin.buffer.readline()) for _ in range(3)]",
+                        "Path('/tmp/hb-runtime-sentinel').mkdir(parents=True, exist_ok=True)",
+                        "Path('/tmp/hb-runtime-sentinel/auth.json').write_text('sentinel', encoding='utf-8')",
+                        "argv = ['codex', 'app-server', '-c', 'permissions.hermesbench={filesystem={\":minimal\"=\"read\",\"/workspace/snapshot\"=\"read\",\"/workspace/plugin\"=\"read\",\"/workspace/scratch\"=\"write\",\"/tmp/hb-runtime-*\"=\"deny\"},network={enabled=false}}', '-c', 'default_permissions=\"hermesbench\"', '--strict-config', '--stdio']",
+                        "process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False)",
+                        "def response(expected_id):",
+                        "    deadline = time.monotonic() + 10",
+                        "    for _ in range(64):",
+                        "        remaining = deadline - time.monotonic()",
+                        "        if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:",
+                        "            raise RuntimeError('response timeout')",
+                        "        line = process.stdout.readline()",
+                        "        if not line:",
+                        "            raise RuntimeError('response stream closed')",
+                        "        row = json.loads(line)",
+                        "        if row.get('id') == expected_id:",
+                        "            return row",
+                        "    raise RuntimeError('response limit exceeded')",
+                        "try:",
+                        "    process.stdin.write(json.dumps(requests[0], separators=(',', ':')).encode('utf-8') + b'\\n')",
+                        "    process.stdin.flush()",
+                        "    initialized = response(1)",
+                        "    for request in requests[1:]:",
+                        "        process.stdin.write(json.dumps(request, separators=(',', ':')).encode('utf-8') + b'\\n')",
+                        "    process.stdin.flush()",
+                        "    command = response(2)",
+                        "    for row in (initialized, command):",
+                        "        sys.stdout.buffer.write(json.dumps(row, separators=(',', ':')).encode('utf-8') + b'\\n')",
+                        "    sys.stdout.buffer.flush()",
+                        "except Exception:",
+                        "    raise SystemExit(2)",
+                        "finally:",
+                        "    if process.stdin is not None:",
+                        "        process.stdin.close()",
+                        "    if process.poll() is None:",
+                        "        process.terminate()",
+                        "        try:",
+                        "            process.wait(timeout=2)",
+                        "        except subprocess.TimeoutExpired:",
+                        "            process.kill()",
+                        "            process.wait(timeout=2)",
                     )
                 ).encode("utf-8") + b"\n",
             )
+            self.assertNotIn(b" -P ", client.read_bytes())
             runtime = ContainerRuntime(image_ref)
             self.assertEqual(
                 runtime.execute(snapshot, scratch, plugin, ("unshare", "--user", "--map-root-user", "/bin/true"), 20).exit_code,
@@ -995,10 +1040,52 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                 runtime.execute(snapshot, scratch, plugin, ("mount", "-t", "tmpfs", "tmpfs", "/workspace/scratch/mount-target"), 20).exit_code,
                 0,
             )
-            result = runtime.execute(
-                snapshot, scratch, plugin, ("sh", "/workspace/plugin/launch-sandbox.sh"), 30
+            requests = (
+                {
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {"name": "hermesbench-boundary-test", "version": "1"},
+                        "capabilities": {"experimentalApi": True},
+                    },
+                },
+                {"method": "initialized", "params": {}},
+                {
+                    "id": 2,
+                    "method": "command/exec",
+                    "params": {
+                        "command": ["python3", "/workspace/plugin/assert_named_permissions.py"],
+                        "cwd": "/workspace/scratch",
+                        "timeoutMs": 10000,
+                        "outputBytesCap": 4096,
+                    },
+                },
             )
-            self.assertEqual(result.exit_code, 0, result.stderr.decode("utf-8", errors="replace"))
+            command_params = requests[2]["params"]
+            self.assertEqual(set(command_params), {"command", "cwd", "timeoutMs", "outputBytesCap"})
+            self.assertNotIn("permissionProfile", command_params)
+            self.assertNotIn("sandboxPolicy", command_params)
+            protocol_input = b"".join(
+                json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+                for request in requests
+            )
+            result = runtime.execute(
+                snapshot,
+                scratch,
+                plugin,
+                ("python3", "/workspace/plugin/app_server_client.py"),
+                30,
+                confidential_stdin=protocol_input,
+            )
+            self.assertEqual(result.exit_code, 0)
+            self.assertGreater(len(result.stdout), 0, {"stdout_bytes": len(result.stdout), "stderr_bytes": len(result.stderr)})
+            rows = tuple(json.loads(line) for line in result.stdout.splitlines())
+            initialize_rows = tuple(row for row in rows if row.get("id") == 1)
+            command_rows = tuple(row for row in rows if row.get("id") == 2)
+            self.assertEqual(len(initialize_rows), 1, [row.get("id") for row in rows])
+            self.assertIsInstance(initialize_rows[0].get("result"), dict)
+            self.assertEqual(len(command_rows), 1)
+            self.assertEqual(command_rows[0], {"id": 2, "result": {"exitCode": 0, "stdout": "", "stderr": ""}})
             for marker in (
                 "named-profile-scratch-write",
                 "named-profile-snapshot-write-denied",
