@@ -91,6 +91,7 @@
 - Canary, Mini, and Full now share one strict manifest parser with snapshot hashes, ordered task descriptors, explicit command allowlists, time limits, and duplicate task rejection.
 - The standalone CLI now exposes scoring, controlled receipt comparison, bundle auditing, and private VulnGym import without changing the existing Codex Security CLI or SDK surface.
 - Foundation verification on 2026-08-27 passed 70 Python tests, the focused Bun bridge test, TypeScript type checking, repository formatting, and Python bytecode compilation. The unchanged full TypeScript baseline remains separately known to fail 79 environment-dependent Windows tests.
+- Hunt will use a new bundled skill and standalone deterministic helper, not a new `ScanMode`. Its frontier retains every ranked input file, `hunt-max` applies both directions everywhere, independent validation accepts only safe evidence methods, and finalization deduplicates only exact root-control and sink tuples.
 - The current deterministic repository inventory, rank shards, bounded worker plan, validation, and merge commands can be reused without modifying `generate_rank_input.py`.
 - `select-deep-review-input` is not suitable for Hunt coverage because its top-percent behavior can discard low-ranked files. Hunt must preserve the whole inventory and use ranking only for processing order.
 - The locally inspected VulnGym revision is `cd69f7e163e08485ab5496115ae03439cda6e27e`.

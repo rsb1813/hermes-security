@@ -16,7 +16,7 @@
 - [x] Write and self-review the detailed design specification.
 - [x] Receive approval for the written design specification.
 - [x] Write the file-by-file HermesBench foundation implementation plan.
-- [ ] Write the file-by-file Hunt workflow implementation plan after the foundation is verified.
+- [x] Write the file-by-file Hunt workflow implementation plan after the foundation is verified.
 
 ## Benchmark foundation
 
