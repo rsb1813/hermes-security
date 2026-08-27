@@ -197,6 +197,32 @@ class CandidateCanonicalizationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_incomplete_hunt_receipt_has_no_public_predictions_and_revalidates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return ExecutorResult(_hunt_discovery(request.task_id), ({"event": "done"},), ())
+
+            def verification_factory(_: object):
+                def verification(*_: object) -> ExecutorResult:
+                    raise ExecutorFailureError("public failure", failure_code="final_response_invalid")
+                return verification
+
+            result = run_workflow(manifest, root / "snapshots", outputs, "incomplete-hunt", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory)
+            receipt_path = outputs / "incomplete-hunt-workflow-receipt.json"
+
+            self.assertEqual(result.receipt.status, "incomplete")
+            self.assertIsNone(result.receipt.public_predictions_sha256)
+            self.assertFalse((outputs / "incomplete-hunt-public-predictions.jsonl").exists())
+            self.assertEqual(validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),))).status, "incomplete")
+            (outputs / "incomplete-hunt-public-predictions.jsonl").write_text("unexpected\n", encoding="utf-8")
+            with self.assertRaisesRegex(PhaseRunnerError, "unexpected public predictions"):
+                validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),)))
+
     def test_hunt_workflow_preserves_six_candidates_and_rejects_missing_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

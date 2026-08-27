@@ -267,6 +267,11 @@ class WorkflowReceipt:
             or (self.verification_receipt_sha256 is not None and (self.verification_commands_sha256 is None or self.verification_predictions_sha256 is None))
         ):
             raise PhaseRunnerError("incomplete workflow receipt has an invalid phase count")
+        if self.workflow == "hunt" and self.status == "completed":
+            if self.public_predictions_sha256 is None:
+                raise PhaseRunnerError("completed Hunt workflow receipt must bind public predictions")
+        elif self.public_predictions_sha256 is not None:
+            raise PhaseRunnerError("only completed Hunt workflow receipts may bind public predictions")
         if not isinstance(self.elapsed_seconds, (int, float)) or isinstance(self.elapsed_seconds, bool) or not math.isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0:
             raise PhaseRunnerError("elapsed_seconds must be finite and non-negative")
         if not isinstance(self.token_usage, TokenUsage):
@@ -627,10 +632,12 @@ def validate_workflow_receipt(
         verification_predictions_path = verification_dir / "predictions.jsonl"
         if receipt.verification_predictions_sha256 is None or sha256_file(verification_predictions_path) != receipt.verification_predictions_sha256:
             raise PhaseRunnerError("workflow receipt verification predictions hash does not match")
-        if receipt.workflow == "hunt":
-            public_predictions_path = output_root / f"{receipt.run_id}-public-predictions.jsonl"
+        public_predictions_path = output_root / f"{receipt.run_id}-public-predictions.jsonl"
+        if receipt.workflow == "hunt" and receipt.status == "completed":
             if receipt.public_predictions_sha256 is None or sha256_file(public_predictions_path) != receipt.public_predictions_sha256:
                 raise PhaseRunnerError("workflow receipt public predictions hash does not match")
+        elif receipt.public_predictions_sha256 is not None or public_predictions_path.exists():
+            raise PhaseRunnerError("workflow receipt has unexpected public predictions")
         verification = load_receipt(verification_path)
         _validate_phase(manifest, verification_dir, verification, config)
         _validate_phase_commands(manifest, verification_commands_path, execution_policy)
@@ -638,7 +645,7 @@ def validate_workflow_receipt(
             verification_kind = "hunt-verification" if receipt.workflow == "hunt" else "standard"
             verification_predictions = _load_phase_predictions(manifest, verification_predictions_path, verification_kind)
             _validate_verification_subset(candidates, verification_predictions, receipt.workflow)
-            if receipt.workflow == "hunt":
+            if receipt.workflow == "hunt" and receipt.status == "completed":
                 expected_public = _jsonl_bytes(_public_hunt_prediction(row, task.task_id) for task, row in zip(manifest.tasks, verification_predictions.values(), strict=True))
                 if public_predictions_path.read_bytes() != expected_public:
                     raise PhaseRunnerError("workflow receipt public predictions do not match verification")
