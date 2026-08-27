@@ -426,13 +426,14 @@ def _prompt(
 ) -> str:
     allowed = "; ".join(" ".join(command) for command in allowed_commands)
     profile_line = "" if profile == "baseline" else f" Hunt profile: {profile}."
+    finding_limit = "Use at most five findings and return exactly the requested JSON schema. " if profile == "baseline" else ""
     prompt = (
         "Perform a defensive local-source audit only. "
         f"Read the selected skill at {skill} unchanged. "
         "Audit only /workspace/snapshot and use /workspace/scratch for temporary work. "
         f"Task ID: {request.task_id}. Language: {request.language}. "
         f"Allowed commands: {allowed}. "
-        "Use at most five findings and return exactly the requested JSON schema. "
+        f"{finding_limit}"
         "Do not create exploits, proof-of-concept payloads, crash inputs, remote traffic, or credential access. "
         "Do not read outside the snapshot, plugin, and scratch directories. "
         "Each tool call must run one simple command with no pipeline, redirection, command substitution, shell control operator, or compound command."
@@ -632,7 +633,11 @@ def _parse_result(
         )
     prediction = _load_final_response(final_response_path)
     try:
-        if workflow != "hunt":
+        if workflow == "hunt" and phase == "discovery":
+            parse_hunt_discovery_prediction(prediction, task_id)
+        elif workflow == "hunt" and phase == "verification":
+            parse_hunt_verification_prediction(prediction, task_id)
+        else:
             parse_adapter_response({"prediction": prediction, "usage": usage}, task_id)
     except Exception as error:
         raise CodexExecError(

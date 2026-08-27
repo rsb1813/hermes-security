@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from benchmarks.hermesbench.contracts import BenchmarkManifest, parse_manifest
+from benchmarks.hermesbench.contracts import BenchmarkManifest, load_predictions, parse_manifest
 from benchmarks.hermesbench.phase_runner import (
     FrozenControls,
     PhaseRunnerError,
@@ -58,7 +58,7 @@ def _manifest(root: Path) -> BenchmarkManifest:
 def _controls() -> FrozenControls:
     return FrozenControls.from_json(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "model": "fake-model",
             "reasoning_effort": "low",
             "seed_supported": False,
@@ -92,6 +92,27 @@ def _prediction(task_id: str, *, finding_id: str = "model-id") -> dict[str, obje
         },
         "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3},
     }
+
+
+def _hunt_candidate(number: int) -> dict[str, object]:
+    return {
+        "finding_id": f"model-{number}", "entry_point": {"file": "source.py", "line": 1},
+        "critical_operation": {"file": "source.py", "line": 3}, "trace": [{"file": "source.py", "line": 2}],
+        "confidence": 0.1 * number, "vulnerability_family": "injection", "search_pass": "forward",
+        "hypothesis": f"Input reaches operation {number}.", "evidence": "Trace exists.",
+        "counterevidence": "No guard found.", "expected_control": "Validate input.",
+    }
+
+
+def _hunt_discovery(task_id: str, count: int = 1) -> dict[str, object]:
+    return {"prediction": {"schema_version": 1, "task_id": task_id, "candidates": [_hunt_candidate(number) for number in range(1, count + 1)]}, "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}}
+
+
+def _hunt_verification(task_id: str, candidate: object) -> dict[str, object]:
+    finding = _prediction(task_id, finding_id=candidate.candidate_id)["prediction"]["findings"][0]
+    finding["confidence"] = candidate.confidence
+    decision = {"candidate_id": candidate.candidate_id, "disposition": "accepted", "attacker_control": "proven", "reachability": "proven", "impact": "proven", "guard_failure": "proven", "evidence": "Confirmed.", "counterevidence": "", "proof_gaps": "", "confidence": candidate.confidence}
+    return {"prediction": {"schema_version": 1, "task_id": task_id, "findings": [finding], "decisions": [decision]}, "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}}
 
 
 class FrozenControlsTests(unittest.TestCase):
@@ -176,6 +197,73 @@ class CandidateCanonicalizationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_hunt_workflow_preserves_six_candidates_and_rejects_missing_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return ExecutorResult(_hunt_discovery(request.task_id, 6), ({"event": "done"},), ())
+
+            def valid_factory(candidate_sets: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    candidates = candidate_sets[request.task_id]
+                    findings = []
+                    decisions = []
+                    for number, candidate in enumerate(candidates, start=1):
+                        disposition = "accepted" if number <= 5 else "rejected"
+                        if disposition == "accepted":
+                            finding = _prediction(request.task_id, finding_id=candidate.candidate_id)["prediction"]["findings"][0]
+                            finding["confidence"] = candidate.confidence
+                            findings.append(finding)
+                        decisions.append({"candidate_id": candidate.candidate_id, "disposition": disposition, "attacker_control": "proven" if disposition == "accepted" else "disproven", "reachability": "proven", "impact": "proven", "guard_failure": "proven", "evidence": "Confirmed." if disposition == "accepted" else "", "counterevidence": "Blocked." if disposition == "rejected" else "", "proof_gaps": "", "confidence": candidate.confidence})
+                    return ExecutorResult({"prediction": {"schema_version": 1, "task_id": request.task_id, "findings": findings, "decisions": decisions}, "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}}, ({"event": "done"},), ())
+                return verification
+
+            result = run_workflow(manifest, root / "snapshots", outputs, "six", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, valid_factory)
+            rows = [json.loads(line) for line in (outputs / "six-candidates.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows[0]["candidates"]), 6)
+            self.assertIn("expected_control", rows[0]["candidates"][5])
+            self.assertEqual(validate_workflow_receipt(manifest, root / "snapshots", outputs, outputs / "six-workflow-receipt.json", _controls(), ExecutionPolicy((("python",),))).status, "completed")
+            self.assertEqual(result.receipt.status, "completed")
+            receipt_path = outputs / "six-workflow-receipt.json"
+            legacy_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            legacy_receipt["schema_version"] = 1
+            receipt_path.write_text(json.dumps(legacy_receipt), encoding="utf-8")
+            with self.assertRaisesRegex(PhaseRunnerError, "schema_version"):
+                validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),)))
+
+            def missing_factory(candidate_sets: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    candidate = candidate_sets[request.task_id][0]
+                    return ExecutorResult(_hunt_verification(request.task_id, candidate), ({"event": "done"},), ())
+                return verification
+
+            with self.assertRaisesRegex(PhaseRunnerError, "terminal decision"):
+                run_workflow(manifest, root / "snapshots", outputs, "missing", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, missing_factory)
+    def test_hunt_score_callback_receives_public_predictions_without_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return ExecutorResult(_hunt_discovery(request.task_id), ({"event": "done"},), ())
+
+            def verification_factory(candidates: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    return ExecutorResult(_hunt_verification(request.task_id, candidates[request.task_id][0]), ({"event": "done"},), ())
+                return verification
+
+            def score(predictions_path: Path) -> dict[str, object]:
+                return {"findings": sum(len(row.findings) for row in load_predictions(predictions_path).values())}
+
+            result = run_workflow(manifest, root / "snapshots", outputs, "hunt-score", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory, score)
+
+        self.assertEqual(result.artifact_paths["final_predictions"], "hunt-score-public-predictions.jsonl")
     def test_host_scoring_input_never_enters_executor_or_public_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -466,7 +554,7 @@ class WorkflowTests(unittest.TestCase):
             def hunt_executor(request: object, *_: object) -> ExecutorResult:
                 candidate = _prediction(request.task_id)["prediction"]["findings"][0]
                 candidate |= {
-                    "vulnerability_family": "injection", "search_pass": "forward_trace",
+                    "vulnerability_family": "injection", "search_pass": "forward",
                     "hypothesis": "Input reaches the operation.", "evidence": "Trace exists.",
                     "counterevidence": "No guard found.", "expected_control": "Validate input.",
                 }
@@ -480,7 +568,8 @@ class WorkflowTests(unittest.TestCase):
                     candidate = candidate_sets[request.task_id][0]
                     finding = _prediction(request.task_id)["prediction"]["findings"][0]
                     finding["finding_id"] = candidate.candidate_id
-                    decision = {"candidate_id": candidate.candidate_id, "disposition": "accepted", "attacker_control": "proven", "reachability": "proven", "impact": "proven", "guard_failure": "proven", "evidence": "Confirmed.", "counterevidence": "", "proof_gaps": "", "confidence": 0.9}
+                    finding["confidence"] = candidate.confidence
+                    decision = {"candidate_id": candidate.candidate_id, "disposition": "accepted", "attacker_control": "proven", "reachability": "proven", "impact": "proven", "guard_failure": "proven", "evidence": "Confirmed.", "counterevidence": "", "proof_gaps": "", "confidence": candidate.confidence}
                     return ExecutorResult({"prediction": {"schema_version": 1, "task_id": request.task_id, "findings": [finding], "decisions": [decision]}, "usage": _prediction(request.task_id)["usage"]}, ({"event": "done"},), ())
                 return verification
 

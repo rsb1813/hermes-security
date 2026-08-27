@@ -126,7 +126,7 @@ immutable lowercase digest, and its invocation budget is exactly two per task.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "model": "gpt-5.6-terra",
   "reasoning_effort": "high",
   "seed_supported": false,

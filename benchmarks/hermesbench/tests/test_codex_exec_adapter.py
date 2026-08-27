@@ -94,6 +94,10 @@ class CodexExecAdapterTests(unittest.TestCase):
         auth: dict[str, object] | None = None,
         allowed_command_prefixes: tuple[tuple[str, ...], ...] = (),
     ) -> CodexExecAdapter:
+        if workflow == "hunt" and runtime.final_message == _FINAL_PREDICTION:
+            runtime.final_message = json.dumps(
+                {"schema_version": 1, "task_id": "task-001", "candidates": []}
+            )
         managed_auth = auth or {
             "auth_mode": "chatgpt",
             "installation_id": "123e4567-e89b-12d3-a456-426614174000",
@@ -290,6 +294,16 @@ class CodexExecAdapterTests(unittest.TestCase):
                 )
                 self.assertIn("/workspace/plugin/skills/hunt-security-scan/SKILL.md", command[-1])
                 self.assertIn(profile, command[-1])
+
+    def test_hunt_discovery_prompt_uses_only_the_twelve_candidate_limit(self) -> None:
+        runtime = _Runtime(_stream())
+        with tempfile.TemporaryDirectory() as directory:
+            self._adapter("hunt", "hunt-balanced", runtime)(
+                _request(), Path(directory), 60
+            )
+        prompt = runtime.calls[0]["command_argv"][-1]
+        self.assertIn("at most 12 distinct bounded hypotheses", prompt)
+        self.assertNotIn("Use at most five findings", prompt)
 
     def test_verification_uses_only_canonical_candidates_in_a_fresh_prompt(self) -> None:
         runtime = _Runtime(_stream())

@@ -12,7 +12,7 @@ HUNT_CANDIDATE_PROTOCOL_VERSION = 1
 HUNT_DISCOVERY_MAX_CANDIDATES = 12
 HUNT_FINAL_MAX_FINDINGS = 5
 HUNT_SEARCH_PASSES = frozenset(
-    {"forward_trace", "backward_trace", "boundary_review", "validation"}
+    {"forward", "backward", "guard", "parser", "state", "general"}
 )
 _PROOF_STATES = frozenset({"proven", "disproven", "unknown"})
 _DISPOSITIONS = frozenset({"accepted", "rejected", "inconclusive"})

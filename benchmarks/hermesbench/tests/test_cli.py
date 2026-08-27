@@ -297,7 +297,7 @@ class RunCommandTests(unittest.TestCase):
             snapshots.mkdir()
             outputs.mkdir()
             write_json(controls, {
-                "schema_version": 1, "model": "fake", "reasoning_effort": "low",
+                "schema_version": 2, "model": "fake", "reasoning_effort": "low",
                 "seed_supported": True, "seed": "1", "image_digest": "sha256:" + "a" * 64,
                 "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
                 "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1, "hunt_candidate_protocol_version": 1,
@@ -349,7 +349,7 @@ class RunCommandTests(unittest.TestCase):
             snapshots.mkdir()
             outputs.mkdir()
             write_json(controls, {
-                "schema_version": 1, "model": "fake", "reasoning_effort": "low",
+                "schema_version": 2, "model": "fake", "reasoning_effort": "low",
                 "seed_supported": True, "seed": "1", "image_digest": "sha256:" + "a" * 64,
                 "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
                 "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1, "hunt_candidate_protocol_version": 1,
@@ -394,7 +394,7 @@ class RunCommandTests(unittest.TestCase):
             snapshots.mkdir()
             outputs.mkdir()
             write_json(controls, {
-                "schema_version": 1, "model": "fake", "reasoning_effort": "low",
+                "schema_version": 2, "model": "fake", "reasoning_effort": "low",
                 "seed_supported": False, "seed": None, "image_digest": "sha256:" + "a" * 64,
                 "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
                 "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1, "hunt_candidate_protocol_version": 1,

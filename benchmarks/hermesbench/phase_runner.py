@@ -44,7 +44,7 @@ from .runner import (
 
 
 PHASE_PROTOCOL_VERSION = 1
-WORKFLOW_RECEIPT_SCHEMA_VERSION = 1
+WORKFLOW_RECEIPT_SCHEMA_VERSION = 2
 _MAX_CANDIDATE_PATH_BYTES = 240
 _MAX_CANDIDATE_TRACE = 16
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -73,8 +73,8 @@ class FrozenControls:
     invocations_per_task: int
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or isinstance(self.schema_version, bool):
-            raise PhaseRunnerError("controls schema_version must be 1")
+        if self.schema_version != 2 or isinstance(self.schema_version, bool):
+            raise PhaseRunnerError("controls schema_version must be 2")
         _required_text(self.model, "model")
         _required_text(self.reasoning_effort, "reasoning_effort")
         if not isinstance(self.seed_supported, bool):
@@ -218,6 +218,7 @@ class WorkflowReceipt:
     verification_receipt_sha256: str | None
     verification_commands_sha256: str | None
     verification_predictions_sha256: str | None
+    public_predictions_sha256: str | None
     phase_protocol_version: int
     top_level_invocation_count: int
     status: str
@@ -247,6 +248,8 @@ class WorkflowReceipt:
             _sha256(self.verification_commands_sha256, "verification_commands_sha256")
         if self.verification_predictions_sha256 is not None:
             _sha256(self.verification_predictions_sha256, "verification_predictions_sha256")
+        if self.public_predictions_sha256 is not None:
+            _sha256(self.public_predictions_sha256, "public_predictions_sha256")
         if self.phase_protocol_version != PHASE_PROTOCOL_VERSION:
             raise PhaseRunnerError("workflow receipt phase protocol is unsupported")
         if self.status not in {"completed", "incomplete"}:
@@ -287,6 +290,7 @@ class WorkflowReceipt:
             "verification_receipt_sha256": self.verification_receipt_sha256,
             "verification_commands_sha256": self.verification_commands_sha256,
             "verification_predictions_sha256": self.verification_predictions_sha256,
+            "public_predictions_sha256": self.public_predictions_sha256,
             "phase_protocol_version": self.phase_protocol_version,
             "top_level_invocation_count": self.top_level_invocation_count,
             "status": self.status,
@@ -304,7 +308,7 @@ class WorkflowReceipt:
             task_order_sha256=data["task_order_sha256"], execution_policy_sha256=data["execution_policy_sha256"],
             snapshot_set_sha256=data["snapshot_set_sha256"], discovery_receipt_sha256=data["discovery_receipt_sha256"],
             discovery_commands_sha256=data["discovery_commands_sha256"], candidate_transfer_sha256=data["candidate_transfer_sha256"],
-            discovery_predictions_sha256=data["discovery_predictions_sha256"], verification_receipt_sha256=data["verification_receipt_sha256"], verification_commands_sha256=data["verification_commands_sha256"], verification_predictions_sha256=data["verification_predictions_sha256"],
+            discovery_predictions_sha256=data["discovery_predictions_sha256"], verification_receipt_sha256=data["verification_receipt_sha256"], verification_commands_sha256=data["verification_commands_sha256"], verification_predictions_sha256=data["verification_predictions_sha256"], public_predictions_sha256=data["public_predictions_sha256"],
             phase_protocol_version=data["phase_protocol_version"], top_level_invocation_count=data["top_level_invocation_count"],
             status=data["status"], elapsed_seconds=data["elapsed_seconds"], token_usage=TokenUsage.from_json(data["token_usage"]),
         )
@@ -420,7 +424,7 @@ def run_workflow(
         _write_jsonl(candidate_path, ())
         receipt = _workflow_receipt(
             run_id, workflow, profile, controls, config, snapshot_hash, len(manifest.tasks), discovery_dir / "receipt.json",
-            discovery_dir / "commands.jsonl", candidate_path, None, None, discovery.elapsed_seconds, discovery.token_usage,
+            discovery_dir / "commands.jsonl", candidate_path, None, None, None, discovery.elapsed_seconds, discovery.token_usage,
         )
         aggregate_path = output_root / f"{run_id}-workflow-receipt.json"
         _write_json(aggregate_path, receipt.to_json())
@@ -442,7 +446,7 @@ def run_workflow(
     if verification.status != "completed":
         receipt = _workflow_receipt(
             run_id, workflow, profile, controls, config, snapshot_hash, len(manifest.tasks), discovery_dir / "receipt.json",
-            discovery_dir / "commands.jsonl", candidate_path, verification_dir / "receipt.json", verification_dir / "commands.jsonl",
+            discovery_dir / "commands.jsonl", candidate_path, verification_dir / "receipt.json", verification_dir / "commands.jsonl", None,
             discovery.elapsed_seconds + verification.elapsed_seconds,
             _add_usage(discovery.token_usage, verification.token_usage),
             status="incomplete",
@@ -453,9 +457,13 @@ def run_workflow(
         return WorkflowResult(receipt, paths)
     verification_predictions = _load_phase_predictions(manifest, verification_dir / "predictions.jsonl", verification_kind)
     _validate_verification_subset(candidates, verification_predictions, workflow)
+    public_predictions_path: Path | None = None
+    if workflow == "hunt":
+        public_predictions_path = output_root / f"{run_id}-public-predictions.jsonl"
+        _write_jsonl(public_predictions_path, (_public_hunt_prediction(row, task.task_id) for task, row in zip(manifest.tasks, verification_predictions.values(), strict=True)))
     receipt = _workflow_receipt(
         run_id, workflow, profile, controls, config, snapshot_hash, len(manifest.tasks), discovery_dir / "receipt.json",
-        discovery_dir / "commands.jsonl", candidate_path, verification_dir / "receipt.json", verification_dir / "commands.jsonl",
+        discovery_dir / "commands.jsonl", candidate_path, verification_dir / "receipt.json", verification_dir / "commands.jsonl", public_predictions_path,
         discovery.elapsed_seconds + verification.elapsed_seconds,
         _add_usage(discovery.token_usage, verification.token_usage),
     )
@@ -463,13 +471,13 @@ def run_workflow(
     _write_json(aggregate_path, receipt.to_json())
     score_path: str | None = None
     if score_callback is not None:
-        score = score_callback(verification_dir / "predictions.jsonl")
+        score = score_callback(public_predictions_path or verification_dir / "predictions.jsonl")
         if not isinstance(score, Mapping):
             raise PhaseRunnerError("host score callback returned an invalid result")
         score_file = output_root / f"{run_id}-score.json"
         _write_json(score_file, dict(score))
         score_path = score_file.name
-    paths = _artifact_paths(run_id, verification_started=True, completed=True, score_path=score_path)
+    paths = _artifact_paths(run_id, verification_started=True, completed=True, score_path=score_path, public_predictions_path=public_predictions_path.name if public_predictions_path else None)
     _write_json(output_root / f"{run_id}-result.json", paths)
     return WorkflowResult(receipt, paths)
 
@@ -619,6 +627,10 @@ def validate_workflow_receipt(
         verification_predictions_path = verification_dir / "predictions.jsonl"
         if receipt.verification_predictions_sha256 is None or sha256_file(verification_predictions_path) != receipt.verification_predictions_sha256:
             raise PhaseRunnerError("workflow receipt verification predictions hash does not match")
+        if receipt.workflow == "hunt":
+            public_predictions_path = output_root / f"{receipt.run_id}-public-predictions.jsonl"
+            if receipt.public_predictions_sha256 is None or sha256_file(public_predictions_path) != receipt.public_predictions_sha256:
+                raise PhaseRunnerError("workflow receipt public predictions hash does not match")
         verification = load_receipt(verification_path)
         _validate_phase(manifest, verification_dir, verification, config)
         _validate_phase_commands(manifest, verification_commands_path, execution_policy)
@@ -626,6 +638,10 @@ def validate_workflow_receipt(
             verification_kind = "hunt-verification" if receipt.workflow == "hunt" else "standard"
             verification_predictions = _load_phase_predictions(manifest, verification_predictions_path, verification_kind)
             _validate_verification_subset(candidates, verification_predictions, receipt.workflow)
+            if receipt.workflow == "hunt":
+                expected_public = _jsonl_bytes(_public_hunt_prediction(row, task.task_id) for task, row in zip(manifest.tasks, verification_predictions.values(), strict=True))
+                if public_predictions_path.read_bytes() != expected_public:
+                    raise PhaseRunnerError("workflow receipt public predictions do not match verification")
             if discovery.status != "completed" or verification.status != "completed":
                 raise PhaseRunnerError("completed workflow receipt has an incomplete phase")
         elif discovery.status != "completed" or verification.status == "completed":
@@ -638,7 +654,7 @@ def validate_workflow_receipt(
 def _workflow_receipt(
     run_id: str, workflow: str, profile: str, controls: FrozenControls, config: RunConfig, snapshot_hash: str,
     task_count: int, discovery_path: Path, discovery_commands_path: Path, candidate_path: Path,
-    verification_path: Path | None, verification_commands_path: Path | None, elapsed: float, usage: TokenUsage,
+    verification_path: Path | None, verification_commands_path: Path | None, public_predictions_path: Path | None, elapsed: float, usage: TokenUsage,
     status: str | None = None,
 ) -> WorkflowReceipt:
     return WorkflowReceipt(
@@ -652,6 +668,7 @@ def _workflow_receipt(
         verification_receipt_sha256=sha256_file(verification_path) if verification_path else None,
         verification_commands_sha256=sha256_file(verification_commands_path) if verification_commands_path else None,
         verification_predictions_sha256=sha256_file(verification_path.parent / "predictions.jsonl") if verification_path else None,
+        public_predictions_sha256=sha256_file(public_predictions_path) if public_predictions_path else None,
         phase_protocol_version=controls.phase_protocol_version,
         top_level_invocation_count=task_count * (2 if verification_path else 1),
         status=status or ("completed" if verification_path else "incomplete"), elapsed_seconds=elapsed, token_usage=usage,
@@ -757,6 +774,8 @@ def _validate_hunt_decisions(
         candidate = allowed.get(finding.finding_id)
         if candidate is None or (finding.entry_point, finding.critical_operation, finding.trace) != (candidate.entry_point, candidate.critical_operation, candidate.trace):
             raise PhaseRunnerError("verification finding changed a transferred candidate")
+        if finding.confidence != next(decision.confidence for decision in decisions if decision.candidate_id == finding.finding_id):
+            raise PhaseRunnerError("verification finding confidence changed a terminal decision")
 
 
 def _canonical_candidate(finding: Finding, number: int, snapshot: Path) -> CanonicalCandidate:
@@ -900,7 +919,8 @@ def _candidate_row(task_id: str, candidates: Sequence[CanonicalCandidate]) -> di
 
 
 def _artifact_paths(
-    run_id: str, verification_started: bool, completed: bool, score_path: str | None = None
+    run_id: str, verification_started: bool, completed: bool, score_path: str | None = None,
+    public_predictions_path: str | None = None,
 ) -> dict[str, object]:
     paths: dict[str, object] = {
         "discovery_predictions": f"{run_id}-discovery/predictions.jsonl",
@@ -918,10 +938,25 @@ def _artifact_paths(
             "verification_receipt": f"{run_id}-verification/receipt.json",
         }
     if completed:
-        paths["final_predictions"] = f"{run_id}-verification/predictions.jsonl"
+        paths["final_predictions"] = public_predictions_path or f"{run_id}-verification/predictions.jsonl"
     if score_path is not None:
         paths["score"] = score_path
     return paths
+
+
+def _public_hunt_prediction(value: object, task_id: str) -> dict[str, object]:
+    try:
+        prediction = parse_hunt_verification_prediction(value, task_id)
+    except HuntProtocolError as error:
+        raise PhaseRunnerError("Hunt verification prediction is invalid") from error
+    return {
+        "schema_version": 1,
+        "task_id": prediction.task_id,
+        "findings": [
+            {"finding_id": finding.finding_id, "entry_point": _location_json(finding.entry_point), "critical_operation": _location_json(finding.critical_operation), "trace": [_location_json(location) for location in finding.trace], "confidence": finding.confidence}
+            for finding in prediction.findings
+        ],
+    }
 
 
 def _snapshot_set_sha256(manifest: BenchmarkManifest) -> str:

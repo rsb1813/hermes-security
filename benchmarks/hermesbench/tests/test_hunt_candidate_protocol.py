@@ -20,7 +20,7 @@ def _candidate(number: int = 1) -> dict[str, object]:
         "trace": [{"file": "source.py", "line": 2}],
         "confidence": 0.8,
         "vulnerability_family": "injection",
-        "search_pass": "forward_trace",
+        "search_pass": "forward",
         "hypothesis": "Input reaches the critical operation without validation.",
         "evidence": "The trace connects the entry point to the operation.",
         "counterevidence": "No validation was found on this path.",
