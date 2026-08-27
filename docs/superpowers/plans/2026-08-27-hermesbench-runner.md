@@ -128,7 +128,7 @@
 - [ ] Reject malformed, expired, or insufficient-lifetime access tokens before container launch and fail closed on authentication errors without logging credentials.
 - [ ] Write failing tests for Standard and Hunt skill selection, identical non-workflow flags, explicit model and effort, `--ephemeral`, `--json`, `--output-schema`, isolated config, workspace-write sandbox, and disabled command network access.
 - [ ] Disable web search, connectors, ambient project configuration, persistent sessions, and inherited secret-like shell variables.
-- [ ] Keep one identical, bounded multi-agent capacity in both arms so Standard may use its independent audit worker and Hunt may use a genuinely fresh verifier context. Freeze the subagent model, effort, concurrency, and depth as paired controls.
+- [ ] Disable native multi-agent execution inside each audited `codex exec` call and fail closed if collaboration events appear. The pinned root JSONL stream omits child-thread command executions, so enabling it would make command-policy enforcement incomplete.
 - [ ] Give both arms the same defensive task prompt and exact prediction schema. Change only the selected skill and Hunt profile.
 - [ ] Parse the final structured response into `TaskPrediction`; parse `turn.completed.usage.input_tokens`, `cached_input_tokens`, and `output_tokens` from JSONL; fail closed on missing or inconsistent usage.
 - [ ] Preserve scrubbed event types and command counts, but never copy raw reasoning, credentials, source snippets, or session logs into public results.
@@ -140,9 +140,13 @@
 **Files:**
 - Modify: `benchmarks/hermesbench/cli.py`
 - Modify: `benchmarks/hermesbench/tests/test_cli.py`
+- Create: `benchmarks/hermesbench/phase_runner.py`
+- Create: `benchmarks/hermesbench/tests/test_phase_runner.py`
 - Modify: `benchmarks/hermesbench/README.md`
 
 - [ ] Write failing CLI tests for a single workflow run and a paired run.
+- [ ] Run discovery and independent verification as separate top-level adapter invocations, each with its own complete command and usage stream. Give Standard and Hunt the same frozen invocation budget, model, effort, tools, and timeout; vary only the selected skill and Hunt profile.
+- [ ] Pass only a bounded, schema-validated candidate set from discovery to verification as untrusted data. Aggregate every phase's separated usage and observed command vectors, and fail the task when any phase is unauditable or incomplete.
 - [ ] Require one frozen control document containing model, effort, seed support, image, tool versions, time limit, finding cap, and grader version.
 - [ ] Resolve the task order once. When seed support is false, schedule `standard,hunt`, `hunt,standard`, and `standard,hunt` across three repeats.
 - [ ] Reject a paired comparison when any frozen control, snapshot hash, task order, or adapter version differs.
