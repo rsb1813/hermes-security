@@ -128,6 +128,7 @@
 - [ ] Reject malformed, expired, or insufficient-lifetime access tokens before container launch and fail closed on authentication errors without logging credentials.
 - [ ] Write failing tests for Standard and Hunt skill selection, identical non-workflow flags, explicit model and effort, `--ephemeral`, `--json`, `--output-schema`, isolated config, workspace-write sandbox, and disabled command network access.
 - [ ] Disable web search, connectors, ambient project configuration, persistent sessions, and inherited secret-like shell variables.
+- [ ] Keep one identical, bounded multi-agent capacity in both arms so Standard may use its independent audit worker and Hunt may use a genuinely fresh verifier context. Freeze the subagent model, effort, concurrency, and depth as paired controls.
 - [ ] Give both arms the same defensive task prompt and exact prediction schema. Change only the selected skill and Hunt profile.
 - [ ] Parse the final structured response into `TaskPrediction`; parse `turn.completed.usage.input_tokens`, `cached_input_tokens`, and `output_tokens` from JSONL; fail closed on missing or inconsistent usage.
 - [ ] Preserve scrubbed event types and command counts, but never copy raw reasoning, credentials, source snippets, or session logs into public results.
