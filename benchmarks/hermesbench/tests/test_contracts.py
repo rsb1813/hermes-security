@@ -10,8 +10,10 @@ from pathlib import Path
 from benchmarks.hermesbench.contracts import (
     ContractError,
     Location,
+    load_manifest,
     load_oracles,
     load_predictions,
+    parse_manifest,
     parse_oracle,
     parse_prediction,
 )
@@ -163,6 +165,50 @@ class JsonlContractTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ContractError, "line 2"):
                 load_predictions(path)
+
+
+class ManifestContractTests(unittest.TestCase):
+    def manifest(self, suite: str = "mini") -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "suite": suite,
+            "manifest_id": f"hb-{suite}-v1",
+            "tasks": [
+                {
+                    "task_id": "hb-task-1",
+                    "snapshot_sha256": "a" * 64,
+                    "language": "python",
+                    "allowed_commands": [["python", "-m", "unittest"]],
+                    "time_limit_seconds": 300,
+                }
+            ],
+        }
+
+    def test_canary_mini_and_full_use_one_manifest_contract(self) -> None:
+        for suite in ("canary", "mini", "full"):
+            with self.subTest(suite=suite):
+                parsed = parse_manifest(self.manifest(suite))
+                self.assertEqual(parsed.suite, suite)
+                self.assertEqual(parsed.tasks[0].allowed_commands[0][0], "python")
+
+    def test_manifest_rejects_duplicate_task_ids(self) -> None:
+        value = self.manifest()
+        value["tasks"] = [value["tasks"][0], value["tasks"][0]]
+        with self.assertRaisesRegex(ContractError, "duplicate task_id"):
+            parse_manifest(value)
+
+    def test_manifest_rejects_empty_allowed_commands(self) -> None:
+        value = self.manifest()
+        task = value["tasks"][0]
+        value["tasks"] = [task | {"allowed_commands": [[]]}]
+        with self.assertRaisesRegex(ContractError, "command"):
+            parse_manifest(value)
+
+    def test_load_manifest_reads_stable_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(self.manifest()), encoding="utf-8")
+            self.assertEqual(load_manifest(path).manifest_id, "hb-mini-v1")
 
 
 if __name__ == "__main__":

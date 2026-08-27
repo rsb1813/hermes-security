@@ -17,6 +17,7 @@ Suite = Literal["canary", "mini", "full"]
 
 _SPLITS = frozenset({"public_dev", "hidden_test", "rotating_audit", "full_holdout"})
 _TASK_KINDS = frozenset({"vulnerable", "fixed", "clean"})
+_SUITES = frozenset({"canary", "mini", "full"})
 
 
 class ContractError(ValueError):
@@ -101,6 +102,45 @@ class BenchmarkManifest:
     suite: Suite
     manifest_id: str
     tasks: tuple[TaskDescriptor, ...]
+
+
+def parse_manifest(value: object) -> BenchmarkManifest:
+    data = _require_object(value, "manifest")
+    _require_exact_fields(
+        data,
+        {"schema_version", "suite", "manifest_id", "tasks"},
+        "manifest",
+    )
+    _require_schema_version(data["schema_version"])
+    raw_suite = _require_non_empty_string(data["suite"], "suite")
+    if raw_suite not in _SUITES:
+        raise ContractError(f"unsupported benchmark suite: {raw_suite}")
+    suite: Suite = raw_suite  # type: ignore[assignment]
+    manifest_id = _require_non_empty_string(data["manifest_id"], "manifest_id")
+    raw_tasks = _require_list(data["tasks"], "tasks")
+    if not raw_tasks:
+        raise ContractError("manifest tasks must not be empty")
+    tasks = tuple(_parse_task_descriptor(task) for task in raw_tasks)
+    task_ids = [task.task_id for task in tasks]
+    if len(task_ids) != len(set(task_ids)):
+        raise ContractError("manifest contains duplicate task_id values")
+    return BenchmarkManifest(
+        schema_version=SCHEMA_VERSION,
+        suite=suite,
+        manifest_id=manifest_id,
+        tasks=tasks,
+    )
+
+
+def load_manifest(path: Path) -> BenchmarkManifest:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ContractError(f"{path}: invalid manifest JSON") from error
+    try:
+        return parse_manifest(value)
+    except ContractError as error:
+        raise ContractError(f"{path}: {error}") from error
 
 
 def parse_oracle(value: object) -> OracleTask:
@@ -190,6 +230,50 @@ def _parse_gold_paths(value: object, field_name: str) -> tuple[GoldPath, ...]:
     return tuple(_parse_gold_path(item) for item in _require_list(value, field_name))
 
 
+def _parse_task_descriptor(value: object) -> TaskDescriptor:
+    data = _require_object(value, "task descriptor")
+    _require_exact_fields(
+        data,
+        {
+            "task_id",
+            "snapshot_sha256",
+            "language",
+            "allowed_commands",
+            "time_limit_seconds",
+        },
+        "task descriptor",
+    )
+    task_id = _require_non_empty_string(data["task_id"], "task_id")
+    snapshot_sha256 = _require_sha256(data["snapshot_sha256"], "snapshot_sha256")
+    language = _require_non_empty_string(data["language"], "language")
+    raw_commands = _require_list(data["allowed_commands"], "allowed_commands")
+    commands: list[tuple[str, ...]] = []
+    for raw_command in raw_commands:
+        command = _require_list(raw_command, "allowed command")
+        if not command:
+            raise ContractError("allowed command must not be empty")
+        commands.append(
+            tuple(
+                _require_non_empty_string(token, "allowed command token")
+                for token in command
+            )
+        )
+    time_limit_seconds = data["time_limit_seconds"]
+    if (
+        isinstance(time_limit_seconds, bool)
+        or not isinstance(time_limit_seconds, int)
+        or time_limit_seconds < 1
+    ):
+        raise ContractError("time_limit_seconds must be a positive integer")
+    return TaskDescriptor(
+        task_id=task_id,
+        snapshot_sha256=snapshot_sha256,
+        language=language,
+        allowed_commands=tuple(commands),
+        time_limit_seconds=time_limit_seconds,
+    )
+
+
 def _parse_gold_path(value: object) -> GoldPath:
     data = _require_object(value, "gold path")
     _require_exact_fields(
@@ -271,6 +355,15 @@ def _require_non_empty_string(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ContractError(f"{name} must be a non-empty string")
     return value
+
+
+def _require_sha256(value: object, name: str) -> str:
+    digest = _require_non_empty_string(value, name)
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ContractError(f"{name} must be a lowercase SHA-256 digest")
+    return digest
 
 
 def _require_exact_fields(

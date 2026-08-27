@@ -26,7 +26,7 @@
 - [x] Implement paired endpoint and trace scoring.
 - [x] Implement fixed-negative and adjudication handling.
 - [x] Implement reproducible run receipts and separated token accounting.
-- [ ] Implement Canary, Mini, and Full manifest loaders.
+- [x] Implement Canary, Mini, and Full manifest loaders.
 - [x] Implement Mini-to-Full escalation decisions.
 - [x] Implement the strict reviewed VulnGym importer and keyed anonymous IDs.
 - [ ] Add synthetic end-to-end fixtures.
