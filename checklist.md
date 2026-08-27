@@ -36,7 +36,10 @@
 
 - [ ] Define the strict model-adapter request, response, and task receipt contracts.
 - [x] Implement the snapshot-safe paired runner and deterministic fake Canary.
-- [ ] Implement and verify the hardened Docker execution boundary.
+- [x] Implement and verify the hardened Docker execution boundary.
+  - [x] Record Task 4 RED unit evidence.
+  - [x] Verify the exact Docker lifecycle and mount boundary with unit tests.
+  - [x] Verify the opt-in live Docker isolation smoke and private receipt.
 - [ ] Connect one common Codex non-interactive adapter to Standard and Hunt.
 - [ ] Connect the benchmark runner to the unchanged Standard workflow.
 - [ ] Run and verify Canary.

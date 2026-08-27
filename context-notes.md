@@ -4,6 +4,9 @@
 
 ### HermesBench runner task
 
+- Task 4 implementation contract: the Docker runtime accepts only an audited snapshot path, executor scratch path, optional plugin path, command argv, and exact timeout. It resolves a mutable image reference to an immutable image ID before create, and it never accepts final artifact, grader, or oracle paths.
+- Task 4 live validation on Docker 29.7.2 Linux amd64 built the pinned runtime image, resolved `sha256:cf81c3683950a37b95e31abb84e9faf99bd7009dccae50f345a4dced2074d579`, and proved read-only inputs/root, writable scratch, absent Docker socket, non-`none` outer network, and Codex sandbox child denial of a reachable host-local sentinel. Docker does not accept `--pid private`; its default private PID namespace is retained by omitting only that invalid flag.
+
 - The runner must complete a full read-only snapshot preflight before it creates run output or calls an adapter. Snapshot hash, bundle audit, path containment, output-root link checks, and snapshot/output disjointness are all fail-closed boundaries.
 - Task output uses a digest of the raw task ID rather than the task ID as a filesystem component. The adapter request and task receipt retain the original task ID.
 - The runner receives an executor seam that reports raw protocol data, scrubbed event rows, and observed command argument vectors. It records timeout as a terminal receipt but delegates process termination to the later Docker executor.
