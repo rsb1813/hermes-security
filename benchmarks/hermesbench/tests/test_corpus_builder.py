@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -59,9 +61,9 @@ def _tree(repository: Path, commit: str) -> str:
     return _git(repository, "rev-parse", f"{commit}^{{tree}}")
 
 
-def _license_hash(repository: Path, commit: str) -> str:
+def _license_hash(repository: Path, commit: str, path: str = "LICENSE") -> str:
     contents = subprocess.run(
-        ["git", "-C", str(repository), "show", f"{commit}:LICENSE"],
+        ["git", "-C", str(repository), "show", f"{commit}:{path}"],
         check=True,
         shell=False,
         capture_output=True,
@@ -98,6 +100,16 @@ def _synthetic_pair(
     return repository, vulnerable, fixed
 
 
+def _ignored_workspace(root: Path) -> Path:
+    workspace = root / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "--quiet")
+    (workspace / ".gitignore").write_text(
+        "/benchmarks/hermesbench/corpora/\n", encoding="utf-8"
+    )
+    return workspace
+
+
 def _gold(path_id: str = "path-1", line: int = 2) -> GoldPath:
     location = Location("module.py", line, line)
     return GoldPath(path_id, location, Location("module.py", 3, 3), (location,))
@@ -117,8 +129,14 @@ def _candidate(vulnerable_commit: str) -> CorpusCandidate:
     )
 
 
-def _selected_row(repository: Path, vulnerable: str, fixed: str) -> dict[str, object]:
-    return {
+def _selected_row(
+    repository: Path,
+    vulnerable: str,
+    fixed: str,
+    *,
+    license_path: str = "LICENSE",
+) -> dict[str, object]:
+    row: dict[str, object] = {
         "schema_version": 1,
         "state": "selected",
         "candidate_task_id": "source-candidate-1",
@@ -130,7 +148,8 @@ def _selected_row(repository: Path, vulnerable: str, fixed: str) -> dict[str, ob
         "fixed_commit": fixed,
         "primary_evidence": "review://synthetic-primary",
         "license_identifier": "Synthetic-1.0",
-        "license_sha256": _license_hash(repository, vulnerable),
+        "license_path": license_path,
+        "license_sha256": _license_hash(repository, vulnerable, license_path),
         "vulnerable_tree": _tree(repository, vulnerable),
         "fixed_tree": _tree(repository, fixed),
         "language": "python",
@@ -143,6 +162,7 @@ def _selected_row(repository: Path, vulnerable: str, fixed: str) -> dict[str, ob
         "comment_redactions": [],
         "quarantine_paths": [],
     }
+    return row
 
 
 def _excluded_row() -> dict[str, object]:
@@ -344,6 +364,179 @@ class CorpusBuilderTests(unittest.TestCase):
                     {first_candidate.task_id: first_candidate, second_candidate.task_id: second_candidate},
                     {first_candidate.task_id: repository, second_candidate.task_id: repository},
                     root / "output",
+                    b"synthetic-key",
+                    suite="canary",
+                )
+
+    def test_builder_rejects_tracked_repository_output_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, fixed = _synthetic_pair(root)
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [_selected_row(repository, vulnerable, fixed)])
+            workspace = _ignored_workspace(root)
+            output = workspace / "benchmarks" / "hermesbench" / "tracked-output"
+            output.parent.mkdir(parents=True)
+            with patch.object(corpus_builder, "_REPOSITORY_ROOT", workspace, create=True):
+                try:
+                    with self.assertRaisesRegex(CorpusBuildError, "ignored"):
+                        build_reviewed_corpus(
+                            ledger,
+                            {"source-candidate-1": _candidate(vulnerable)},
+                            {"source-candidate-1": repository},
+                            output,
+                            b"synthetic-key",
+                            suite="canary",
+                        )
+                finally:
+                    shutil.rmtree(output, ignore_errors=True)
+
+    def test_builder_accepts_an_actually_ignored_repository_corpus_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, fixed = _synthetic_pair(root)
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [_selected_row(repository, vulnerable, fixed)])
+            workspace = _ignored_workspace(root)
+            output = workspace / "benchmarks" / "hermesbench" / "corpora" / "nested" / "synthetic"
+            output.parent.mkdir(parents=True)
+            with patch.object(corpus_builder, "_REPOSITORY_ROOT", workspace, create=True):
+                result = build_reviewed_corpus(
+                    ledger,
+                    {"source-candidate-1": _candidate(vulnerable)},
+                    {"source-candidate-1": repository},
+                    output,
+                    b"synthetic-key",
+                    suite="canary",
+                )
+            self.assertTrue(result.manifest_path.exists())
+
+    def test_builder_rejects_a_linked_internal_output_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, fixed = _synthetic_pair(root)
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [_selected_row(repository, vulnerable, fixed)])
+            workspace = _ignored_workspace(root)
+            output = workspace / "benchmarks" / "hermesbench" / "corpora" / "nested" / "synthetic"
+            output.parent.mkdir(parents=True)
+            original = corpus_builder._is_link_or_reparse
+            with (
+                patch.object(corpus_builder, "_REPOSITORY_ROOT", workspace, create=True),
+                patch.object(
+                    corpus_builder,
+                    "_is_link_or_reparse",
+                    side_effect=lambda path: path == output.parents[1] or original(path),
+                ),
+            ):
+                with self.assertRaisesRegex(CorpusBuildError, "link or reparse"):
+                    build_reviewed_corpus(
+                        ledger,
+                        {"source-candidate-1": _candidate(vulnerable)},
+                        {"source-candidate-1": repository},
+                        output,
+                        b"synthetic-key",
+                        suite="canary",
+                    )
+
+    def test_builder_quarantines_fixed_only_files_from_both_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, _ = _synthetic_pair(root)
+            (repository / "fixed-only.patch").write_text("metadata\n", encoding="utf-8")
+            fixed = _commit(repository, "fixed metadata")
+            selected = _selected_row(repository, vulnerable, fixed)
+            selected["quarantine_paths"] = ["fixed-only.patch"]
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [selected])
+            result = build_reviewed_corpus(
+                ledger,
+                {"source-candidate-1": _candidate(vulnerable)},
+                {"source-candidate-1": repository},
+                root / "output",
+                b"synthetic-key",
+                suite="canary",
+            )
+            self.assertFalse(any(path.name == "fixed-only.patch" for path in result.snapshots_root.rglob("*")))
+
+    def test_tree_reader_rejects_clock_device_alias(self) -> None:
+        raw = b"100644 blob " + b"1" * 40 + b"\tCLOCK$\0"
+        with patch.object(corpus_builder, "_git_bytes", side_effect=(raw, b"contents")):
+            with self.assertRaisesRegex(CorpusBuildError, "Windows-unsafe"):
+                corpus_builder._read_tree(Path("synthetic"), "2" * 40)
+
+    def test_builder_ignores_inherited_git_repository_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, vulnerable, fixed = _synthetic_pair(root)
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [_selected_row(repository, vulnerable, fixed)])
+            poisoned = {
+                "GIT_DIR": str(root / "missing-git-dir"),
+                "GIT_WORK_TREE": str(root / "missing-work-tree"),
+                "GIT_OBJECT_DIRECTORY": str(root / "missing-objects"),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(root / "missing-alternates"),
+                "GIT_INDEX_FILE": str(root / "missing-index"),
+                "GIT_COMMON_DIR": str(root / "missing-common"),
+                "GIT_NAMESPACE": "synthetic-namespace",
+                "GIT_REPLACE_REF_BASE": "refs/replace/",
+                "GIT_NO_REPLACE_OBJECTS": "0",
+            }
+            with patch.dict(os.environ, poisoned, clear=False):
+                result = build_reviewed_corpus(
+                    ledger,
+                    {"source-candidate-1": _candidate(vulnerable)},
+                    {"source-candidate-1": repository},
+                    root / "output",
+                    b"synthetic-key",
+                    suite="canary",
+                )
+            self.assertTrue(result.manifest_path.exists())
+
+    def test_builder_binds_selected_license_path_in_both_trees(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            _git(repository, "init", "--quiet")
+            (repository / "LICENSE.md").write_text("Synthetic license\n", encoding="utf-8")
+            (repository / "module.py").write_text(VULNERABLE_SOURCE, encoding="utf-8")
+            vulnerable = _commit(repository, "vulnerable")
+            (repository / "module.py").write_text(FIXED_SOURCE, encoding="utf-8")
+            fixed = _commit(repository, "fixed")
+            selected = _selected_row(
+                repository,
+                vulnerable,
+                fixed,
+                license_path="LICENSE.md",
+            )
+            ledger = root / "ledger.jsonl"
+            _write_ledger(ledger, [selected])
+            result = build_reviewed_corpus(
+                ledger,
+                {"source-candidate-1": _candidate(vulnerable)},
+                {"source-candidate-1": repository},
+                root / "output",
+                b"synthetic-key",
+                suite="canary",
+            )
+            self.assertTrue(result.manifest_path.exists())
+            (repository / "LICENSE.md").write_text("Changed license\n", encoding="utf-8")
+            changed_fixed = _commit(repository, "changed license")
+            changed = _selected_row(
+                repository,
+                vulnerable,
+                changed_fixed,
+                license_path="LICENSE.md",
+            )
+            ledger = root / "changed-ledger.jsonl"
+            _write_ledger(ledger, [changed])
+            with self.assertRaisesRegex(CorpusBuildError, "license blob"):
+                build_reviewed_corpus(
+                    ledger,
+                    {"source-candidate-1": _candidate(vulnerable)},
+                    {"source-candidate-1": repository},
+                    root / "rejected",
                     b"synthetic-key",
                     suite="canary",
                 )

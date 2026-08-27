@@ -199,7 +199,8 @@ code, tests, package managers, or hooks.
 
 A selected ledger row has an exact versioned shape. It binds one imported
 candidate identity, vulnerable and independently reviewed fixed commits, primary
-evidence, license identifier and blob hash, both tree IDs, language, anonymous
+evidence, license identifier, safe repository-relative `license_path`, and blob
+hash, both tree IDs, language, anonymous
 group input, split, suites, time limit, explicit fixed retired-path locations,
 fixed-only comment redactions, and symmetric quarantine paths. The vulnerable
 gold path remains the single source of truth in the imported `CorpusCandidate`;
@@ -228,14 +229,19 @@ identity-free manifest and summary, and private oracle and provenance files.
 Keep the ledger, keys, built corpora, private oracles, provenance receipts, and
 run outputs outside Git. The repository ignore rules cover conventional paths
 under `benchmarks/hermesbench/`, but an external private storage location is
-still preferred.
+still preferred. When an output root is inside this repository, it must be a
+child of `benchmarks/hermesbench/corpora/`, be actually ignored by Git, and have
+no symbolic-link, junction, or reparse-point ancestor. Existing output roots
+are never overwritten.
 
 ## Current limits
 
 The builder intentionally does not infer fixed commits, clone repositories, or
 perform network access. It also does not reuse blobs with hard links: snapshots
 remain independent until a private materializer can add that optimization with
-equivalent audit and publication guarantees.
+equivalent audit and publication guarantees. Git reads clear inherited `GIT_*`
+repository-routing state, disable replace-object behavior, and use only the
+provided local repository object store.
 
 HermesBench Mini is optimization evidence, not final proof. A final, release,
 or public performance claim always requires the full HermesBench. The first

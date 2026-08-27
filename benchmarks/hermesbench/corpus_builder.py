@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -23,8 +24,9 @@ _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _SPLITS = frozenset({"public_dev", "hidden_test", "rotating_audit", "full_holdout"})
 _SUITES = frozenset({"canary", "mini", "full"})
 _WINDOWS_RESERVED_NAMES = frozenset(
-    {"CON", "PRN", "AUX", "NUL", *(f"COM{number}" for number in range(1, 10)), *(f"LPT{number}" for number in range(1, 10))}
+    {"CON", "PRN", "AUX", "NUL", "CLOCK$", *(f"COM{number}" for number in range(1, 10)), *(f"LPT{number}" for number in range(1, 10))}
 )
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 class CorpusBuildError(ValueError):
@@ -52,6 +54,7 @@ class SelectedLedgerRow:
     fixed_commit: str
     primary_evidence: str
     license_identifier: str
+    license_path: str
     license_sha256: str
     vulnerable_tree: str
     fixed_tree: str
@@ -158,11 +161,8 @@ def build_reviewed_corpus(
 
     if suite not in _SUITES:
         raise CorpusBuildError("unsupported corpus suite")
-    if output_root.exists() or output_root.is_symlink():
-        raise CorpusBuildError("corpus output root must not exist")
+    _validate_output_root(output_root)
     parent = output_root.parent
-    if not parent.is_dir() or parent.is_symlink():
-        raise CorpusBuildError("corpus output parent must be a real directory")
     derive_anonymous_id(anonymization_key, "group", "0" * 40, "key-check")
 
     ledger_rows = parse_reviewed_ledger(ledger_path)
@@ -187,8 +187,7 @@ def build_reviewed_corpus(
             anonymization_key,
             suite,
         )
-        if output_root.exists() or output_root.is_symlink():
-            raise CorpusBuildError("corpus output root must not exist")
+        _validate_output_root(output_root)
         os.replace(stage, output_root)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
@@ -289,6 +288,7 @@ def _build_stage(
                     "vulnerable_tree": row.vulnerable_tree,
                     "fixed_tree": row.fixed_tree,
                     "license_sha256": row.license_sha256,
+                    "license_path": row.license_path,
                     "snapshot_sha256": snapshot_hash,
                 }
             )
@@ -357,7 +357,7 @@ def _parse_ledger_row(value: object, path: Path, line_number: int) -> LedgerRow:
         expected = {
             "schema_version", "state", "candidate_task_id", "dataset_revision", "entry_id",
             "report_identity", "repository_identity", "vulnerable_commit", "fixed_commit",
-            "primary_evidence", "license_identifier", "license_sha256", "vulnerable_tree",
+            "primary_evidence", "license_identifier", "license_path", "license_sha256", "vulnerable_tree",
             "fixed_tree", "language", "group_input", "split", "suites", "time_limit_seconds",
             "excluded", "fixed_locations", "comment_redactions", "quarantine_paths",
         }
@@ -385,6 +385,7 @@ def _parse_ledger_row(value: object, path: Path, line_number: int) -> LedgerRow:
             fixed_commit=_require_commit(value["fixed_commit"], "fixed_commit"),
             primary_evidence=_require_non_empty_string(value["primary_evidence"], "primary_evidence"),
             license_identifier=_require_non_empty_string(value["license_identifier"], "license_identifier"),
+            license_path=_require_git_path(value["license_path"], "license_path"),
             license_sha256=_require_sha256(value["license_sha256"], "license_sha256"),
             vulnerable_tree=_require_commit(value["vulnerable_tree"], "vulnerable_tree"),
             fixed_tree=_require_commit(value["fixed_tree"], "fixed_tree"),
@@ -447,8 +448,14 @@ def _verify_git_revisions(repository: Path, row: SelectedLedgerRow) -> tuple[dic
         raise CorpusBuildError("fixed tree does not match reviewed commit")
     vulnerable_tree = _read_tree(repository, row.vulnerable_tree)
     fixed_tree = _read_tree(repository, row.fixed_tree)
-    license_blob = vulnerable_tree.get("LICENSE")
-    if license_blob is None or hashlib.sha256(license_blob).hexdigest() != row.license_sha256:
+    vulnerable_license = vulnerable_tree.get(row.license_path)
+    fixed_license = fixed_tree.get(row.license_path)
+    if (
+        vulnerable_license is None
+        or fixed_license is None
+        or hashlib.sha256(vulnerable_license).hexdigest() != row.license_sha256
+        or hashlib.sha256(fixed_license).hexdigest() != row.license_sha256
+    ):
         raise CorpusBuildError("license blob does not match reviewed license hash")
     return vulnerable_tree, fixed_tree
 
@@ -506,8 +513,8 @@ def _verify_quarantine_paths(
     for path in quarantine_paths:
         if path in protected:
             raise CorpusBuildError("quarantine path cannot contain a gold or root source file")
-        if path not in vulnerable_tree or path not in fixed_tree:
-            raise CorpusBuildError("quarantine path must exist in both pinned trees")
+        if path not in vulnerable_tree and path not in fixed_tree:
+            raise CorpusBuildError("quarantine path must exist in at least one pinned tree")
 
 
 def _verify_disclosure_metadata_is_quarantined(
@@ -618,34 +625,112 @@ def _validate_git_path(path: str) -> None:
             raise CorpusBuildError("Git tree contains a Windows-unsafe path")
 
 
+def _require_git_path(value: object, name: str) -> str:
+    path = _require_non_empty_string(value, name)
+    _validate_git_path(path)
+    return path
+
+
+def _validate_output_root(output_root: Path) -> None:
+    if output_root.exists() or _is_link_or_reparse(output_root):
+        raise CorpusBuildError("corpus output root must not exist")
+    parent = output_root.parent
+    if not parent.is_dir() or _is_link_or_reparse(parent):
+        raise CorpusBuildError("corpus output parent must be a real directory")
+    repository_root = _REPOSITORY_ROOT.resolve(strict=True)
+    absolute_output = Path(os.path.abspath(output_root))
+    if not _is_within(absolute_output, repository_root):
+        return
+    allowed_root = repository_root / "benchmarks" / "hermesbench" / "corpora"
+    if not _is_within(absolute_output, allowed_root) or absolute_output == allowed_root:
+        raise CorpusBuildError("repository output root must be below the ignored corpus root")
+    _reject_linked_ancestors(absolute_output.parent, repository_root)
+    if not _git_ignored(repository_root, absolute_output):
+        raise CorpusBuildError("repository output root must be ignored by Git")
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _reject_linked_ancestors(path: Path, stop: Path) -> None:
+    current = path
+    while True:
+        if _is_link_or_reparse(current):
+            raise CorpusBuildError("repository output path must not traverse a link or reparse point")
+        if current == stop:
+            return
+        current = current.parent
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse)
+
+
+def _git_ignored(repository_root: Path, output_root: Path) -> bool:
+    completed = _git_completed(
+        repository_root,
+        "check-ignore",
+        "--no-index",
+        "--quiet",
+        "--",
+        os.fspath(output_root),
+        check=False,
+    )
+    if completed.returncode not in {0, 1}:
+        raise CorpusBuildError("could not verify repository output ignore rule")
+    return completed.returncode == 0
+
+
 def _git(repository: Path, *arguments: str) -> str:
     return _git_bytes(repository, *arguments).decode("utf-8", errors="strict").strip()
 
 
 def _git_bytes(repository: Path, *arguments: str) -> bytes:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", os.fspath(repository), *arguments],
-            check=True,
-            shell=False,
-            capture_output=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise CorpusBuildError("pinned local Git verification failed") from error
+    completed = _git_completed(repository, *arguments, check=True)
     return completed.stdout
 
 
 def _git_success(repository: Path, *arguments: str) -> bool:
+    return _git_completed(repository, *arguments, check=False).returncode == 0
+
+
+def _git_completed(
+    repository: Path, *arguments: str, check: bool
+) -> subprocess.CompletedProcess[bytes]:
     try:
         completed = subprocess.run(
-            ["git", "-C", os.fspath(repository), *arguments],
-            check=False,
+            ["git", "--no-replace-objects", "-C", os.fspath(repository), *arguments],
+            check=check,
             shell=False,
             capture_output=True,
+            env=_git_environment(),
         )
-    except OSError as error:
+    except (OSError, subprocess.CalledProcessError) as error:
         raise CorpusBuildError("pinned local Git verification failed") from error
-    return completed.returncode == 0
+    return completed
+
+
+def _git_environment() -> dict[str, str]:
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
 
 
 def _parse_suites(value: object) -> tuple[str, ...]:
