@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -12,6 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import benchmarks.hermesbench.container_runtime as container_runtime
 from benchmarks.hermesbench.container_runtime import (
     ContainerRuntime,
     ContainerRuntimeError,
@@ -121,6 +123,92 @@ class ContainerRuntimeTests(unittest.TestCase):
             self.assertNotIn(final_artifact_sentinel, all_tokens)
             self.assertNotIn(final_artifact_sentinel, str(popen.call_args.kwargs.get("cwd")))
             self.assertNotIn(final_artifact_sentinel, str(popen.call_args.kwargs.get("env")))
+
+    def test_rejects_every_resolved_mount_overlap_before_docker_invocation(self) -> None:
+        cases = (
+            ("scratch equals snapshot", "snapshot", "plugin", "snapshot"),
+            ("scratch is below snapshot", "snapshot", "plugin", "snapshot/scratch"),
+            ("scratch contains snapshot", "scratch/snapshot", "plugin", "scratch"),
+            ("plugin equals snapshot", "snapshot", "snapshot", "scratch"),
+            ("plugin is below snapshot", "snapshot", "snapshot/plugin", "scratch"),
+            ("plugin contains snapshot", "plugin/snapshot", "plugin", "scratch"),
+            ("scratch equals plugin", "snapshot", "plugin", "plugin"),
+            ("scratch is below plugin", "snapshot", "plugin", "plugin/scratch"),
+            ("scratch contains plugin", "snapshot", "scratch/plugin", "scratch"),
+        )
+        for label, snapshot_name, plugin_name, scratch_name in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                snapshot = root / snapshot_name
+                plugin = root / plugin_name
+                scratch = root / scratch_name
+                snapshot.mkdir(parents=True, exist_ok=True)
+                plugin.mkdir(parents=True, exist_ok=True)
+                scratch.mkdir(parents=True, exist_ok=True)
+                with patch("benchmarks.hermesbench.container_runtime.subprocess.run") as docker_run:
+                    with self.assertRaisesRegex(ContainerRuntimeError, "overlap"):
+                        ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
+                docker_run.assert_not_called()
+
+    def test_rejects_linked_original_mount_source_before_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            linked_source = root / "linked-source"
+            plugin = root / "plugin"
+            scratch = root / "scratch"
+            target.mkdir()
+            plugin.mkdir()
+            scratch.mkdir()
+            real_resolve = Path.resolve
+            real_lstat = os.lstat
+
+            def resolved_path(path: Path, strict: bool = False) -> Path:
+                if path == linked_source:
+                    return target
+                return real_resolve(path, strict=strict)
+
+            def linked_lstat(path: Path) -> os.stat_result:
+                if path == linked_source.absolute():
+                    return os.stat_result((stat.S_IFLNK,) + (0,) * 9)
+                return real_lstat(path)
+
+            with patch.object(Path, "resolve", autospec=True, side_effect=resolved_path), patch.object(
+                container_runtime.os, "lstat", side_effect=linked_lstat
+            ), patch("benchmarks.hermesbench.container_runtime.subprocess.run") as docker_run:
+                with self.assertRaisesRegex(ContainerRuntimeError, "link or junction"):
+                    ContainerRuntime("runtime:mutable").execute(linked_source, scratch, plugin, ("true",), 17)
+            docker_run.assert_not_called()
+
+    def test_rejects_original_mount_inspection_error_before_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            unresolved_source = root / "unresolved-source"
+            plugin = root / "plugin"
+            scratch = root / "scratch"
+            target.mkdir()
+            plugin.mkdir()
+            scratch.mkdir()
+            real_resolve = Path.resolve
+            real_lstat = os.lstat
+
+            def resolved_path(path: Path, strict: bool = False) -> Path:
+                if path == unresolved_source:
+                    return target
+                return real_resolve(path, strict=strict)
+
+            def denied_lstat(path: Path) -> os.stat_result:
+                if path == unresolved_source.absolute():
+                    raise OSError("denied")
+                return real_lstat(path)
+
+            with patch.object(Path, "resolve", autospec=True, side_effect=resolved_path), patch.object(
+                container_runtime.os, "lstat", side_effect=denied_lstat
+            ), patch("benchmarks.hermesbench.container_runtime.subprocess.run") as docker_run:
+                with self.assertRaisesRegex(ContainerRuntimeError, "cannot be inspected"):
+                    ContainerRuntime("runtime:mutable").execute(unresolved_source, scratch, plugin, ("true",), 17)
+            docker_run.assert_not_called()
 
     def test_rejects_unresolved_or_malicious_ids_without_starting_a_container(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -236,6 +324,77 @@ class ContainerRuntimeTests(unittest.TestCase):
                     ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
             self.assertEqual(start_calls[2][0], ["docker", "rm", "--force", CONTAINER_ID])
 
+    def test_docker_lifecycle_calls_use_a_bounded_cli_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=self._docker_run(calls)), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", return_value=_AttachProcess()
+            ):
+                ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
+
+            for _argv, kwargs in calls:
+                self.assertGreater(kwargs["timeout"], 0)
+                self.assertLessEqual(kwargs["timeout"], 30)
+
+    def test_normal_result_is_not_returned_when_exact_remove_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def remove_failure(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                calls.append((argv, kwargs))
+                if argv[1] == "rm":
+                    return _completed(argv, returncode=1)
+                return self._docker_run([])(argv, **kwargs)
+
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=remove_failure), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", return_value=_AttachProcess()
+            ):
+                with self.assertRaises(container_runtime.ContainerCleanupError):
+                    ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
+            self.assertEqual(calls[-1][0], ["docker", "rm", "--force", CONTAINER_ID])
+
+    def test_timeout_attempts_remove_after_kill_failure_and_reports_cleanup_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def kill_failure(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                calls.append((argv, kwargs))
+                if argv[1] == "kill":
+                    return _completed(argv, returncode=1)
+                return self._docker_run([])(argv, **kwargs)
+
+            attach = _AttachProcess(subprocess.TimeoutExpired(["docker"], 17))
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=kill_failure), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", return_value=attach
+            ):
+                with self.assertRaises(container_runtime.ContainerCleanupError):
+                    ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
+            self.assertTrue(attach.terminated)
+            self.assertEqual(calls[-2][0], ["docker", "kill", CONTAINER_ID])
+            self.assertEqual(calls[-1][0], ["docker", "rm", "--force", CONTAINER_ID])
+
+    def test_cleanup_cli_timeout_is_not_reported_as_a_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot, plugin, scratch = self._paths(root)
+
+            def remove_timeout(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                if argv[1] == "rm":
+                    raise subprocess.TimeoutExpired(argv, 10)
+                return self._docker_run([])(argv, **kwargs)
+
+            with patch("benchmarks.hermesbench.container_runtime.subprocess.run", side_effect=remove_timeout), patch(
+                "benchmarks.hermesbench.container_runtime.subprocess.Popen", return_value=_AttachProcess()
+            ):
+                with self.assertRaises(container_runtime.ContainerCleanupError):
+                    ContainerRuntime("runtime:mutable").execute(snapshot, scratch, plugin, ("true",), 17)
+
 
 @unittest.skipUnless(
     os.environ.get("HERMESBENCH_RUN_DOCKER_SMOKE") == "1",
@@ -245,6 +404,10 @@ class DockerIsolationSmokeTests(unittest.TestCase):
     def test_runtime_image_enforces_the_live_boundary(self) -> None:
         runtime_directory = Path(__file__).parents[1] / "containers"
         image_ref = f"hermesbench-runtime-task4-smoke:{os.getpid()}"
+        receipt_path_value = os.environ.get("HERMESBENCH_DOCKER_RECEIPT_PATH")
+        if not receipt_path_value:
+            self.fail("HERMESBENCH_DOCKER_RECEIPT_PATH is required for the Docker isolation smoke")
+        receipt_path = Path(receipt_path_value)
         build = subprocess.run(
             ["docker", "build", "-f", str(runtime_directory / "Dockerfile"), "-t", image_ref, str(runtime_directory)],
             capture_output=True,
@@ -311,6 +474,25 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                     separators=(",", ":"),
                 )
                 with _local_sentinel() as (host, port, connected):
+                    started_marker = scratch / "sandbox-child-started"
+                    blocked_marker = scratch / "sandbox-network-blocked"
+                    unexpected_marker = scratch / "sandbox-network-unexpected"
+                    sandbox_program = "\n".join(
+                        (
+                            "from pathlib import Path",
+                            "import socket",
+                            "scratch = Path('/workspace/scratch')",
+                            "(scratch / 'sandbox-child-started').write_text('started')",
+                            "try:",
+                            f"    socket.create_connection(({host!r}, {port}), timeout=3).close()",
+                            "except OSError:",
+                            "    (scratch / 'sandbox-network-blocked').write_text('blocked')",
+                            "    raise SystemExit(0)",
+                            "(scratch / 'sandbox-network-unexpected').write_text('connected')",
+                            "raise SystemExit(71)",
+                        )
+                    )
+                    sandbox_payload = f"exec({sandbox_program!r})"
                     sandboxed = runtime.execute(
                         snapshot,
                         scratch,
@@ -318,11 +500,14 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                         (
                             "codex", "sandbox", "--sandbox-state-json", sandbox_state,
                             "--sandbox-state-disable-network", "--", "python3", "-c",
-                            f"import socket; socket.create_connection(({host!r}, {port}), timeout=3).close()",
+                            sandbox_payload,
                         ),
                         20,
                     )
-                    self.assertNotEqual(sandboxed.exit_code, 0)
+                    self.assertEqual(sandboxed.exit_code, 0)
+                    self.assertEqual(started_marker.read_text(encoding="utf-8"), "started")
+                    self.assertEqual(blocked_marker.read_text(encoding="utf-8"), "blocked")
+                    self.assertFalse(unexpected_marker.exists())
                     self.assertFalse(connected.wait(1), "sandboxed child reached the host sentinel")
 
                 image_id = runtime._resolve_image_id()
@@ -346,6 +531,7 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                     self.assertIn("no-new-privileges:true", inspected["HostConfig"]["SecurityOpt"])
                     self.assertEqual(inspected["HostConfig"]["IpcMode"], "private")
                     self.assertEqual(inspected["HostConfig"]["CgroupnsMode"], "private")
+                    self.assertNotEqual(inspected["HostConfig"]["PidMode"], "host")
                     self.assertEqual(inspected["HostConfig"]["PidsLimit"], 128)
                     self.assertFalse(inspected["HostConfig"]["Privileged"])
                     mounts = {mount["Destination"]: mount for mount in inspected["Mounts"]}
@@ -354,6 +540,42 @@ class DockerIsolationSmokeTests(unittest.TestCase):
                     self.assertTrue(mounts["/workspace/scratch"]["RW"])
                     self.assertNotIn(final_artifact_root.name, json.dumps(inspected))
                     self.assertNotIn("/var/run/docker.sock", json.dumps(inspected))
+                    docker_version = subprocess.run(
+                        ["docker", "version", "--format", "{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}"],
+                        capture_output=True,
+                        check=False,
+                        shell=False,
+                    )
+                    self.assertEqual(docker_version.returncode, 0)
+                    receipt = {
+                        "schema_version": 1,
+                        "task": "HermesBench Task 4 Docker isolation smoke",
+                        "image_ref": image_ref,
+                        "resolved_image_id": image_id,
+                        "docker_server": docker_version.stdout.decode("utf-8", errors="strict").strip(),
+                        "observations": {
+                            "snapshot_write_rejected": True,
+                            "plugin_write_rejected": True,
+                            "root_filesystem_write_rejected": True,
+                            "scratch_write_succeeded": True,
+                            "docker_socket_absent": True,
+                            "outer_network_mode_is_not_none": True,
+                            "outer_container_reached_host_local_sentinel": True,
+                            "codex_sandbox_child_started": True,
+                            "codex_sandbox_child_host_local_sentinel_rejected": True,
+                            "host_pid_namespace_absent": True,
+                            "inspect_has_only_snapshot_plugin_and_scratch_mounts": True,
+                            "snapshot_and_plugin_mounts_read_only": True,
+                            "scratch_mount_writable": True,
+                            "final_artifact_root_absent": True,
+                        },
+                    }
+                    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+                    receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+                    recorded = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    self.assertEqual(recorded, receipt)
+                    self.assertNotIn(str(root), json.dumps(recorded))
+                    self.assertNotIn(final_artifact_root.name, json.dumps(recorded))
                 finally:
                     subprocess.run(
                         ["docker", "rm", "--force", container_id],

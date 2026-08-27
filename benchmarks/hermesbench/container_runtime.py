@@ -8,12 +8,13 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}\Z")
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+_DOCKER_CLI_TIMEOUT_SECONDS = 15
 
 
 class ContainerRuntimeError(RuntimeError):
@@ -22,6 +23,10 @@ class ContainerRuntimeError(RuntimeError):
 
 class ContainerTimeoutError(TimeoutError):
     """Signals that the exact created container was stopped for timeout."""
+
+
+class ContainerCleanupError(ContainerRuntimeError):
+    """Signals that exact-container cleanup could not be confirmed."""
 
 
 @dataclass(frozen=True)
@@ -55,14 +60,51 @@ class ContainerRuntime:
         plugin = (
             _resolve_mount_source(plugin_path, "plugin path") if plugin_path is not None else None
         )
+        _assert_disjoint_mount_sources(snapshot, scratch, plugin)
         command = _require_command(command_argv)
         timeout = _require_timeout(timeout_seconds)
         image_id = self._resolve_image_id()
         container_id = self._create(image_id, snapshot, scratch, plugin, command)
+        process: subprocess.Popen[bytes] | None = None
         try:
-            return self._start_attached(container_id, image_id, timeout)
-        finally:
-            self._remove_exact(container_id)
+            process = subprocess.Popen(
+                [self._docker_binary, "start", "--attach", container_id],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+            )
+        except OSError as exc:
+            cleanup_error = self._cleanup_container(container_id, None, stop_container=False)
+            if cleanup_error is not None:
+                raise cleanup_error from exc
+            raise ContainerRuntimeError("Docker container start failed") from exc
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            cleanup_error = self._cleanup_container(container_id, process, stop_container=True)
+            if cleanup_error is not None:
+                raise cleanup_error from exc
+            raise ContainerTimeoutError("container execution timed out") from exc
+        except KeyboardInterrupt as exc:
+            cleanup_error = self._cleanup_container(container_id, process, stop_container=True)
+            if cleanup_error is not None:
+                raise cleanup_error from exc
+            raise
+        except Exception as exc:
+            cleanup_error = self._cleanup_container(container_id, process, stop_container=True)
+            if cleanup_error is not None:
+                raise cleanup_error from exc
+            raise ContainerRuntimeError("Docker container attach failed") from exc
+        cleanup_error = self._cleanup_container(container_id, process, stop_container=False)
+        if cleanup_error is not None:
+            raise cleanup_error
+        return ContainerResult(
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=process.returncode,
+            resolved_image_id=image_id,
+        )
 
     def _resolve_image_id(self) -> str:
         completed = _run_docker(
@@ -133,45 +175,44 @@ class ContainerRuntime:
             raise ContainerRuntimeError("Docker create did not return an exact container ID")
         return container_id
 
-    def _start_attached(
-        self, container_id: str, image_id: str, timeout_seconds: int
-    ) -> ContainerResult:
-        try:
-            process = subprocess.Popen(
-                [self._docker_binary, "start", "--attach", container_id],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=False,
-            )
-        except OSError as exc:
-            raise ContainerRuntimeError("Docker container start failed") from exc
-        try:
-            stdout, stderr = process.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            self._kill_exact(container_id)
-            _terminate_attach(process)
-            raise ContainerTimeoutError("container execution timed out") from exc
-        except KeyboardInterrupt:
-            self._kill_exact(container_id)
-            _terminate_attach(process)
-            raise
-        return ContainerResult(
-            stdout=stdout,
-            stderr=stderr,
-            exit_code=process.returncode,
-            resolved_image_id=image_id,
-        )
-
     def _kill_exact(self, container_id: str) -> None:
-        _run_docker([self._docker_binary, "kill", container_id])
+        completed = _run_docker([self._docker_binary, "kill", container_id])
+        if completed.returncode != 0:
+            raise ContainerCleanupError("Docker exact-container kill failed")
 
     def _remove_exact(self, container_id: str) -> None:
-        _run_docker([self._docker_binary, "rm", "--force", container_id])
+        completed = _run_docker([self._docker_binary, "rm", "--force", container_id])
+        if completed.returncode != 0:
+            raise ContainerCleanupError("Docker exact-container remove failed")
+
+    def _cleanup_container(
+        self,
+        container_id: str,
+        process: subprocess.Popen[bytes] | None,
+        stop_container: bool,
+    ) -> ContainerCleanupError | None:
+        failures: list[str] = []
+        if stop_container:
+            _attempt_cleanup("kill", lambda: self._kill_exact(container_id), failures)
+        if process is not None and stop_container:
+            _attempt_cleanup("attach", lambda: _terminate_attach(process), failures)
+        _attempt_cleanup("remove", lambda: self._remove_exact(container_id), failures)
+        if failures:
+            return ContainerCleanupError(f"Docker exact-container cleanup failed: {', '.join(failures)}")
+        return None
 
 
 def _run_docker(argv: list[str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(argv, capture_output=True, check=False, shell=False)
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            shell=False,
+            timeout=_DOCKER_CLI_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ContainerRuntimeError("Docker CLI command timed out") from exc
 
 
 def _decode_stdout(value: bytes | str | None) -> str:
@@ -207,6 +248,11 @@ def _resolve_mount_source(value: Path, name: str) -> Path:
     if not isinstance(value, Path):
         raise ValueError(f"{name} must be a Path")
     try:
+        original = value.absolute()
+    except OSError as exc:
+        raise ContainerRuntimeError(f"{name} cannot be inspected") from exc
+    _assert_safe_path_components(original, name)
+    try:
         resolved = value.resolve(strict=True)
     except OSError as exc:
         raise ContainerRuntimeError(f"{name} cannot be resolved") from exc
@@ -216,6 +262,22 @@ def _resolve_mount_source(value: Path, name: str) -> Path:
     if "," in str(resolved):
         raise ContainerRuntimeError(f"{name} cannot contain a comma")
     return resolved
+
+
+def _assert_disjoint_mount_sources(snapshot: Path, scratch: Path, plugin: Path | None) -> None:
+    sources = [("snapshot", snapshot), ("scratch", scratch)]
+    if plugin is not None:
+        sources.append(("plugin", plugin))
+    for index, (left_name, left_path) in enumerate(sources):
+        for right_name, right_path in sources[index + 1 :]:
+            if _paths_overlap(left_path, right_path):
+                raise ContainerRuntimeError(
+                    f"container mount sources overlap: {left_name} and {right_name}"
+                )
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
 
 
 def _assert_safe_path_components(path: Path, name: str) -> None:
@@ -242,4 +304,11 @@ def _terminate_attach(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait()
+        process.wait(timeout=5)
+
+
+def _attempt_cleanup(label: str, action: Callable[[], None], failures: list[str]) -> None:
+    try:
+        action()
+    except Exception:
+        failures.append(label)
