@@ -222,16 +222,18 @@ class CodexExecAdapter:
             raise CodexExecError("adapter scratch path is invalid")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
             raise CodexExecError("adapter timeout is invalid")
-        started = time.monotonic()
         prepared = None
         if self._workflow == "hunt" and self._phase == "discovery":
+            started = time.monotonic()
             try:
                 prepared = prepare_hunt_artifacts(Path(request.snapshot_path), scratch_path, self._profile)
             except (HuntEvidenceError, OSError, ValueError) as error:
                 raise CodexExecError("Hunt evidence preparation failed", failure_code="hunt_evidence_invalid") from error
-        remaining = math.floor(timeout_seconds - (time.monotonic() - started))
-        if remaining < 1:
-            raise CodexExecError("Hunt evidence preparation exhausted the task budget", failure_code="hunt_evidence_invalid")
+            remaining = math.floor(timeout_seconds - (time.monotonic() - started))
+            if remaining < 1:
+                raise CodexExecError("Hunt evidence preparation exhausted the task budget", failure_code="hunt_evidence_invalid")
+        else:
+            remaining = timeout_seconds
         allowed_commands = _effective_allowed_commands(
             self._allowed_command_prefixes, request.allowed_commands
         )

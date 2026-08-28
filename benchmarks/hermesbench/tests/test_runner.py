@@ -142,6 +142,22 @@ class HuntEvidenceRunnerTests(unittest.TestCase):
         self.assertFalse((standard_root / "output" / "run-001" / "evidence.jsonl").exists())
         self.assertFalse((verification_root / "output" / "run-001" / "evidence.jsonl").exists())
 
+    def test_hunt_evidence_rejects_non_path_free_or_malformed_values(self) -> None:
+        # A replacement executor must not bypass the path-free evidence contract.
+        invalid_values = (
+            hunt_evidence() | {"source_path": "src/private.py"},
+            hunt_evidence() | {"frontier_sha256": "not-a-digest"},
+            hunt_evidence() | {"frontier_count": True},
+            hunt_evidence() | {"coverage_debt_count": -1},
+            hunt_evidence() | {"validated_closure_count": 1},
+        )
+        for evidence in invalid_values:
+            with self.subTest(evidence=evidence):
+                root, receipt = self._run("hunt-discovery", ExecutorResult(hunt_discovery_response("task-a"), (), (), evidence))
+                self.assertEqual(receipt.status, "failed")
+                task = next((root / "output" / "run-001" / "tasks").iterdir())
+                self.assertEqual({path.name for path in task.iterdir()}, {"request.json", "failure.json"})
+
 
 class SnapshotPreflightTests(unittest.TestCase):
     def test_reparse_point_is_rejected_without_pathlib_junction_support(self) -> None:

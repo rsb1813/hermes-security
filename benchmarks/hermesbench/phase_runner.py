@@ -22,7 +22,7 @@ from .hunt_protocol import (
     parse_hunt_discovery_prediction,
     parse_hunt_verification_prediction,
 )
-from .hunt_evidence import HUNT_EVIDENCE_PROTOCOL_VERSION, reproduce_hunt_evidence
+from .hunt_evidence import HUNT_EVIDENCE_PROTOCOL_VERSION, HuntEvidenceError, parse_hunt_evidence, reproduce_hunt_evidence
 from .receipts import (
     RECEIPT_SCHEMA_VERSION,
     RunConfig,
@@ -635,6 +635,10 @@ def validate_workflow_receipt(
         evidence_rows = _read_jsonl(evidence_path, "discovery evidence")
         if len(evidence_rows) != len(manifest.tasks):
             raise PhaseRunnerError("discovery evidence is incomplete")
+        try:
+            evidence_rows = [parse_hunt_evidence(row, receipt.profile) for row in evidence_rows]
+        except HuntEvidenceError as error:
+            raise PhaseRunnerError("discovery evidence is invalid") from error
         expected_evidence = _jsonl_bytes(
             reproduce_hunt_evidence(
                 snapshots_root / task.task_id,

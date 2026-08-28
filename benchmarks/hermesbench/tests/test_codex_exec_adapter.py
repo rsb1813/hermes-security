@@ -181,6 +181,21 @@ class CodexExecAdapterTests(unittest.TestCase):
         self.assertNotIn("priority-packet.jsonl", standard.calls[0]["command_argv"][-1])
         self.assertNotIn("priority-packet.jsonl", verification.calls[0]["command_argv"][-1])
 
+    def test_non_discovery_paths_preserve_one_second_and_general_timeouts(self) -> None:
+        # Charging elapsed adapter overhead outside Hunt discovery would change timeout semantics.
+        for workflow, profile, verification in (("standard", "baseline", False), ("hunt", "hunt-balanced", True)):
+            for timeout in (1, 480):
+                with self.subTest(workflow=workflow, timeout=timeout):
+                    final_message = _FINAL_PREDICTION if not verification else json.dumps({"schema_version": 1, "task_id": "task-001", "findings": [], "decisions": []})
+                    runtime = _Runtime(_stream(), final_message=final_message)
+                    adapter = self._adapter(workflow, profile, runtime)
+                    if verification:
+                        adapter = adapter.for_verification({"task-001": ()})
+                    with tempfile.TemporaryDirectory() as directory:
+                        with patch("benchmarks.hermesbench.adapters.codex_exec.time.monotonic", side_effect=(10.0, 10.8)):
+                            adapter(_request(), Path(directory), timeout)
+                    self.assertEqual(runtime.calls[0]["timeout_seconds"], timeout)
+
     def test_global_commands_allow_an_empty_task_local_list_to_reach_runtime(self) -> None:
         runtime = _Runtime(_stream())
         auth_calls = 0

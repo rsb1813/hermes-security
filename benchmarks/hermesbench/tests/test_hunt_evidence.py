@@ -204,6 +204,45 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
             self.assertEqual(evidence.coverage_debt_count, prepared.frontier_pass_count)
             self.assertEqual(evidence.validated_closure_count, 0)
 
+    def test_duplicate_priority_packet_read_fails_closed(self) -> None:
+        # The fixed packet may be presented exactly once, never repeatedly.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction(Path(directory))
+            with self.assertRaises(HuntEvidenceError):
+                attest_hunt_discovery(prepared, prediction, (self._PACKET_READ, self._PACKET_READ))
+
+    def test_frontier_receipt_must_be_bounded_and_match_frontier_inputs(self) -> None:
+        # The helper receipt is a bound artifact, not unvalidated metadata.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction(Path(directory))
+            prepared.frontier_receipt.path.write_bytes(b"{" + b"x" * (64 * 1024) + b"}")
+            with self.assertRaises(HuntEvidenceError):
+                attest_hunt_discovery(prepared, prediction, (self._PACKET_READ,))
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction(Path(directory))
+            prepared.frontier_receipt.path.write_text("{}\n", encoding="utf-8")
+            with self.assertRaises(HuntEvidenceError):
+                attest_hunt_discovery(prepared, prediction, (self._PACKET_READ,))
+
+    def test_post_attestation_reopen_replacement_fails_closed(self) -> None:
+        # A replacement between preflight and a later parsed artifact read must be detected.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction(Path(directory))
+            original_read = hunt_evidence.os.read
+            replaced = False
+
+            def replace_rank_input(descriptor: int, size: int) -> bytes:
+                nonlocal replaced
+                if not replaced:
+                    replaced = True
+                    prepared.rank_input.path.unlink()
+                    prepared.rank_input.path.write_bytes(b"{}\n")
+                return original_read(descriptor, size)
+
+            with patch.object(hunt_evidence.os, "read", side_effect=replace_rank_input):
+                with self.assertRaises(HuntEvidenceError):
+                    attest_hunt_discovery(prepared, prediction, (self._PACKET_READ,))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from .adapter_contract import AdapterTaskRequest, parse_adapter_response
 from .contracts import BenchmarkManifest, TaskDescriptor
 from .receipts import RECEIPT_SCHEMA_VERSION, RunConfig, RunReceipt, TaskRunReceipt, TokenUsage
 from .sanitize import BundleAuditError, audit_bundle, tree_sha256
+from .hunt_evidence import HuntEvidenceError, parse_hunt_evidence
 
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -178,6 +179,7 @@ def run_suite(
             execution_policy,
             executor,
             response_kind,
+            profile,
         )
         records.append(record)
         commands.extend(task_commands)
@@ -265,6 +267,7 @@ def _run_task(
     policy: ExecutionPolicy,
     executor: Executor,
     response_kind: str,
+    profile: str,
 ) -> tuple[TaskRunReceipt, dict[str, object] | None, tuple[dict[str, object], ...], dict[str, object] | None]:
     descriptor = prepared.descriptor
     task_directory = tasks_directory / _task_directory_name(descriptor.task_id)
@@ -327,7 +330,10 @@ def _run_task(
                 if response_kind == "hunt-discovery":
                     if not isinstance(result.hunt_evidence, dict):
                         raise ExecutorFailureError("Hunt discovery evidence is required", failure_code="hunt_evidence_invalid")
-                    evidence = result.hunt_evidence
+                    try:
+                        evidence = parse_hunt_evidence(result.hunt_evidence, profile)
+                    except HuntEvidenceError as error:
+                        raise ExecutorFailureError("Hunt discovery evidence is invalid", failure_code="hunt_evidence_invalid") from error
                 elif result.hunt_evidence is not None:
                     raise ExecutorFailureError("Hunt evidence is forbidden for this phase", failure_code="hunt_evidence_invalid")
                 usage = parsed.token_usage

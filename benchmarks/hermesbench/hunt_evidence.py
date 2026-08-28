@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -26,11 +27,19 @@ MAX_INVENTORY_BYTES = 8 * 1024 * 1024
 MAX_RANK_INPUT_BYTES = 32 * 1024 * 1024
 MAX_FRONTIER_ROWS = 100_000
 MAX_FRONTIER_BYTES = 32 * 1024 * 1024
+MAX_FRONTIER_RECEIPT_BYTES = 64 * 1024
 MAX_PRIORITY_PACKET_BYTES = 1024 * 1024
 PRIORITY_ROW_LIMITS = {"hunt-balanced": 512, "hunt-max": 1024}
 PRIORITY_PREVIEW_BYTES = 384
 _REQUIRED_PACKET_READ = ("cat", "/workspace/scratch/hermesbench-hunt/priority-packet.jsonl")
 _PLUGIN_SCRIPTS = Path(__file__).resolve().parents[2] / "sdk" / "typescript" / "_bundled_plugin" / "scripts"
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+HUNT_EVIDENCE_FIELDS = frozenset({
+    "schema_version", "profile", "inventory_sha256", "inventory_count", "rank_input_sha256",
+    "frontier_sha256", "frontier_count", "frontier_pass_count", "priority_packet_sha256",
+    "priority_packet_count", "candidate_links_sha256", "candidate_count", "linked_location_count",
+    "coverage_debt_sha256", "coverage_debt_count", "validated_closure_count",
+})
 
 
 class HuntEvidenceError(ValueError):
@@ -110,6 +119,31 @@ class HuntEvidence:
         }
 
 
+def parse_hunt_evidence(value: object, profile: str | None = None) -> dict[str, object]:
+    """Validates the exact path-free evidence serialization before persistence."""
+    if not isinstance(value, dict) or set(value) != HUNT_EVIDENCE_FIELDS:
+        raise HuntEvidenceError("Hunt evidence fields are invalid")
+    if value["schema_version"] != HUNT_EVIDENCE_PROTOCOL_VERSION or isinstance(value["schema_version"], bool):
+        raise HuntEvidenceError("Hunt evidence schema version is invalid")
+    if value["profile"] not in PRIORITY_ROW_LIMITS or (profile is not None and value["profile"] != profile):
+        raise HuntEvidenceError("Hunt evidence profile is invalid")
+    for field in (
+        "inventory_sha256", "rank_input_sha256", "frontier_sha256", "priority_packet_sha256",
+        "candidate_links_sha256", "coverage_debt_sha256",
+    ):
+        if not isinstance(value[field], str) or _SHA256.fullmatch(value[field]) is None:
+            raise HuntEvidenceError("Hunt evidence hash is invalid")
+    for field in (
+        "inventory_count", "frontier_count", "frontier_pass_count", "priority_packet_count",
+        "candidate_count", "linked_location_count", "coverage_debt_count", "validated_closure_count",
+    ):
+        if isinstance(value[field], bool) or not isinstance(value[field], int) or value[field] < 0:
+            raise HuntEvidenceError("Hunt evidence count is invalid")
+    if value["validated_closure_count"] != 0 or value["linked_location_count"] < value["candidate_count"]:
+        raise HuntEvidenceError("Hunt evidence closure state is invalid")
+    return dict(value)
+
+
 def prepare_hunt_artifacts(snapshot_path: Path, scratch_path: Path, profile: str) -> PreparedHuntArtifacts:
     """Creates and records the complete immutable Hunt plan using bundled helpers."""
     if profile not in PRIORITY_ROW_LIMITS:
@@ -128,9 +162,9 @@ def prepare_hunt_artifacts(snapshot_path: Path, scratch_path: Path, profile: str
     priority_packet = plan / PRIORITY_PACKET_NAME
     _run_helper("generate_in_scope_files.py", ("--repo", str(snapshot), "--scope", ".", "--out", str(inventory)))
     _run_helper("generate_rank_input.py", ("make-repo-rank-input", "--repo", str(snapshot), "--scope", ".", "--out", str(rank_input)))
-    _run_helper("hunt_workflow.py", ("make-frontier", "--work-dir", str(plan), "--repository", str(snapshot), "--rank-input", str(rank_input), "--profile", profile, "--out", str(frontier), "--receipt", str(receipt)))
     _normalize_lf(inventory, "inventory")
     _normalize_lf(rank_input, "rank input")
+    _run_helper("hunt_workflow.py", ("make-frontier", "--work-dir", str(plan), "--repository", str(snapshot), "--rank-input", str(rank_input), "--profile", profile, "--out", str(frontier), "--receipt", str(receipt)))
     _normalize_lf(frontier, "frontier")
     inventory_paths = _inventory_paths(inventory)
     rank_rows = _jsonl_rows(rank_input, "rank input", MAX_RANK_INPUT_BYTES, None)
@@ -159,15 +193,16 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
     """Checks prepared bytes and binds a valid discovery result without source paths."""
     if not isinstance(prepared, PreparedHuntArtifacts):
         raise HuntEvidenceError("prepared Hunt artifacts are invalid")
-    if not isinstance(observed_argv, tuple) or _REQUIRED_PACKET_READ not in observed_argv:
+    if not isinstance(observed_argv, tuple) or observed_argv.count(_REQUIRED_PACKET_READ) != 1:
         raise HuntEvidenceError("priority packet was not read exactly as required")
     for artifact, label in ((prepared.inventory, "inventory"), (prepared.rank_input, "rank input"), (prepared.frontier, "frontier"), (prepared.frontier_receipt, "frontier receipt"), (prepared.priority_packet, "priority packet")):
         _verify_record(artifact, label)
-    inventory_paths = _inventory_paths(prepared.inventory.path)
-    rank_rows = _jsonl_rows(prepared.rank_input.path, "rank input", MAX_RANK_INPUT_BYTES, None)
-    frontier_rows = _jsonl_rows(prepared.frontier.path, "frontier", MAX_FRONTIER_BYTES, MAX_FRONTIER_ROWS)
+    inventory_paths = _inventory_paths_value(_read_pinned_bytes(prepared.inventory, "inventory", MAX_INVENTORY_BYTES))
+    rank_rows = _jsonl_rows_value(_read_pinned_bytes(prepared.rank_input, "rank input", MAX_RANK_INPUT_BYTES), "rank input", None)
+    frontier_rows = _jsonl_rows_value(_read_pinned_bytes(prepared.frontier, "frontier", MAX_FRONTIER_BYTES), "frontier", MAX_FRONTIER_ROWS)
     rank_by_path = _validate_rank_rows(rank_rows, inventory_paths)
     frontier_by_path = _validate_frontier_rows(frontier_rows, set(rank_by_path))
+    _validate_frontier_receipt(_read_pinned_bytes(prepared.frontier_receipt, "frontier receipt", MAX_FRONTIER_RECEIPT_BYTES), prepared.profile, prepared.rank_input.sha256, len(frontier_rows))
     candidates = getattr(prediction, "candidates", None)
     if not isinstance(candidates, tuple):
         raise HuntEvidenceError("Hunt discovery prediction is invalid")
@@ -288,8 +323,43 @@ def _read_sha256(path: Path, label: str, identity: tuple[int, int, int, int]) ->
     return digest.hexdigest(), total
 
 
+def _read_pinned_bytes(artifact: _Artifact, label: str, maximum: int) -> bytes:
+    """Reads one recorded regular file once while preserving its exact identity."""
+    value = _regular_stat(artifact.path, label)
+    if (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns) != artifact.identity:
+        raise HuntEvidenceError(f"{label} identity changed")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(artifact.path, flags)
+    except OSError as error:
+        raise HuntEvidenceError(f"{label} cannot be opened") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != artifact.identity:
+            raise HuntEvidenceError(f"{label} identity changed before read")
+        chunks: list[bytes] = []
+        size = 0
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, min(1024 * 1024, maximum + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+            digest.update(chunk)
+            if size > maximum:
+                raise HuntEvidenceError(f"{label} exceeds its byte limit")
+    finally:
+        os.close(descriptor)
+    after = _regular_stat(artifact.path, label)
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != artifact.identity or digest.hexdigest() != artifact.sha256:
+        raise HuntEvidenceError(f"{label} identity changed after read")
+    return b"".join(chunks)
+
+
 def _inventory_paths(path: Path) -> set[str]:
     value = _read_bounded(path, "inventory", MAX_INVENTORY_BYTES)
+    return _inventory_paths_value(value)
+
+
+def _inventory_paths_value(value: bytes) -> set[str]:
     try:
         text = value.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -304,6 +374,10 @@ def _inventory_paths(path: Path) -> set[str]:
 
 def _jsonl_rows(path: Path, label: str, maximum_bytes: int, maximum_rows: int | None) -> list[dict[str, object]]:
     value = _read_bounded(path, label, maximum_bytes)
+    return _jsonl_rows_value(value, label, maximum_rows)
+
+
+def _jsonl_rows_value(value: bytes, label: str, maximum_rows: int | None) -> list[dict[str, object]]:
     try:
         text = value.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -322,6 +396,16 @@ def _jsonl_rows(path: Path, label: str, maximum_bytes: int, maximum_rows: int | 
     if maximum_rows is not None and len(rows) > maximum_rows:
         raise HuntEvidenceError(f"{label} has too many rows")
     return rows
+
+
+def _validate_frontier_receipt(value: bytes, profile: str, rank_input_sha256: str, frontier_count: int) -> None:
+    try:
+        decoded = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HuntEvidenceError("frontier receipt is invalid") from error
+    expected = {"schema_version", "profile", "cache_key", "rank_input_sha256", "rank_output_sha256", "total_files", "components", "rank_excluded_but_retained", "signal_counts", "coverage_strategy", "eligibility_dropped"}
+    if not isinstance(decoded, dict) or set(decoded) != expected or decoded["schema_version"] != 1 or decoded["profile"] != profile or decoded["rank_input_sha256"] != rank_input_sha256 or decoded["total_files"] != frontier_count:
+        raise HuntEvidenceError("frontier receipt is invalid")
 
 
 def _validate_rank_rows(rows: list[dict[str, object]], inventory_paths: set[str]) -> dict[str, dict[str, object]]:
