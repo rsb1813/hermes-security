@@ -318,3 +318,11 @@
 - Implementation is split into five reviewable commits: lexical builder, Hunt evidence v2, discovery prompt and public failures, version-aware workflow reconstruction, and documentation plus fixed diagnostic evidence.
 - The plan records current golden hashes for Standard discovery, Standard verification, and Hunt verification prompts so the semantic strategy cannot change unrelated prompt behavior.
 - New workflows select the expected Hunt evidence protocol explicitly and the runner rejects a mismatched evidence row, preventing silent downgrade. Workflow receipts retain that selected version even when discovery fails before producing an evidence row; retained receipts reconstruct using their recorded version.
+
+### Task 23 deterministic lexical guidance builder
+
+- The new standard-library-only builder emits canonical investigation-only JSONL from immutable snapshot bytes for Python, Go, TypeScript/JavaScript, and a conservative generic fallback.
+- Profile bounds cover per-file and total bytes, declarations, edges, route candidates, rows, output bytes, and graph depth. Paths are canonicalized, strictly resolved, and required to remain under the snapshot before reading.
+- Task-level review found three Important issues in the first implementation: intermediate-link containment and equivalent-path deduplication, loss of additional operation families in one declaration, and incomplete independent hard-bound tests.
+- Fix round 1 addressed all three findings. The focused suite passed 15 tests with one Windows link-creation skip, followed by successful compileall and diff checks. Scoped re-review found no new Critical or Important issue.
+- Guidance strength remains an investigation priority only. The builder does not execute source, create model calls, change frontier eligibility, or claim reachability or vulnerability proof.
