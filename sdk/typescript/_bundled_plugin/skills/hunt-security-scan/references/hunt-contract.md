@@ -6,6 +6,7 @@ Use this contract for every `hunt-security-scan` run. All paths are repository-r
 
 - Safety and ownership
 - Artifact sequence
+- HermesBench host guidance
 - Ranking and frontier contracts
 - Closure and candidate contracts
 - Independent validation contract
@@ -44,6 +45,36 @@ finalization-receipt.json
 ```
 
 The required state progression is `discovered -> evidence_built -> challenged -> accepted|rejected|inconclusive`.
+
+## HermesBench Host Guidance
+
+When HermesBench wraps this workflow, the trusted host prepares two immutable
+discovery packets from the snapshot before the container starts. Read the
+priority packet exactly once, then read `semantic-guidance.jsonl` exactly once.
+Do not author, rewrite, or treat either packet as closure evidence.
+
+Semantic guidance contains bounded lexical source-to-operation routes with
+`direct`, `import-linked`, or `name-only` strength. Every row is
+`investigation_only`. Strength orders investigation; it never raises candidate
+confidence or proves attacker control, reachability, impact, or guard failure.
+Open the actual source, trace the route, and check reachable controls and
+counterevidence before producing a candidate. Continue beyond guidance when
+source inspection identifies a better route because the complete frontier
+remains eligible.
+
+The host scans each source file only up to 1 MiB. `hunt-balanced` scans at most
+64 MiB, retains at most 50,000 declarations, 200,000 call/import references,
+200,000 resolved edges, and 1,024 route work items or candidates at depth 4,
+then emits at most 256 rows or 512 KiB. `hunt-max` scans at most 128 MiB,
+retains at most 100,000 declarations, 400,000 references, 400,000 resolved
+edges, and 2,048 route work items or candidates at depth 6, then emits at most
+512 rows or 1 MiB. Empty or truncated guidance is valid and never removes
+frontier work or coverage debt.
+
+Retained evidence protocol version 1 has only the legacy priority packet. New
+version-2 runs bind the semantic packet hash and path-free counts. Both versions
+retain the same fresh discovery and independent validation actors; no extra
+model invocation or command prefix is introduced.
 
 ## Ranking and Frontier Contracts
 

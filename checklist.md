@@ -116,7 +116,7 @@
   - [x] Bind semantic guidance into Hunt evidence protocol version 2.
   - [x] Require the guidance in Hunt discovery without changing Standard or verification prompts.
   - [x] Reconstruct retained Hunt receipts by their explicit evidence protocol version.
-- [ ] Complete independent review and all no-model boundary checks.
+- [x] Complete independent review and all no-model boundary checks.
 - [ ] Run one fixed protocol-v2 paid diagnostic and compare it with v10, v11, and v12c.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.

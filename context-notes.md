@@ -352,3 +352,18 @@
 - Comparison output records the Hunt protocol as strategy metadata without treating Standard's absent value as a comparable mismatch.
 - Tests cover v1/v2 completed workflows, partial and failed discovery, protocol mismatch before verification or public publication, field mixing, missing v2 fields, and rehashed receipt tampering. Focused phase/evidence tests passed 63 cases with three skips, and runner/CLI tests passed 47 cases.
 - Task-level review found no Critical, Important, or Minor issue. Workflow receipt schema remains 3, frozen controls remain 2, and Standard, prompts, scoring, candidate verification, frontier, and coverage debt remain unchanged.
+
+### Task 27 semantic-guidance security and quality review
+
+- The final specification review approved exact same-file and import-linked boundaries, reverse traversal, lexical masking, declaration coverage, protocol read ordering, and version-aware reconstruction with no remaining finding.
+- The independent security and quality review identified source-read races, a Python sibling-class boundary leak, missing live adapter protocol propagation, unbounded call and traversal work, and escaped single-quote masking. Public-only TDD corrections bound the source descriptor and complete path identity chain, preserve multiline Python headers while stopping at sibling declarations, propagate protocol versions through preparation and prompting, cap references and traversal work, and keep escaped strings masked.
+- Follow-up review found two narrower source containment gaps and one multiline-header regression. Commits `c6be7751`, `13d03ff8`, and their public regression tests close intermediate-directory and snapshot-root replacement windows while retaining multiline function bodies. The final reviewer reported no Critical, Important, or Minor finding.
+- Independent focused verification passed 81 semantic/adapter tests with one platform skip, 110 evidence/runner/phase/CLI tests with three platform or opt-in skips, and the final 39 semantic tests with three Windows link-permission skips. Compile and diff checks remained clean.
+
+### Task 28 refreshed no-model semantic-guidance boundaries
+
+- The retained v12c protocol-1 receipt revalidated as completed with two top-level invocations and unchanged separated usage of 3,537,152 cached input, 185,505 uncached input, and 12,902 output tokens.
+- Fixed-snapshot protocol-1 preparation reproduced twice with identical non-time fields in 18.073 and 17.832 seconds: 15,027 inventory rows, 11,277 frontier rows, 13,594 passes, and a 512-row 266,238-byte priority packet.
+- Protocol-2 preparation reproduced twice with identical non-time fields in 51.901 and 51.986 seconds. It retained 238 semantic rows, reached the 200,000-edge hard cap, scanned 11,275 files, skipped two files, and emitted 166,015 canonical bytes while preserving the protocol-1 inventory, frontier, pass, and priority counts.
+- All three response schemas matched host SHA-256 bytes inside the pinned image at mode `0444`. The local smoke tag resolved to that exact image. The regular-file authentication runtime passed with two independent reads, and the named permission profile denied authentication-source access, writes, and network in one live no-model container test.
+- All eight Canary snapshots reported zero audit violations, zero hash mismatches, and zero reparse entries. Twenty-three retained v12c files contained zero bounded authentication or host-auth-path matches and zero reparse entries. No pinned or named HermesBench container remained.
