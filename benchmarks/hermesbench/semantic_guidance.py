@@ -13,8 +13,9 @@ import stat
 from benchmarks.hermesbench.hunt_protocol import HUNT_SEARCH_PASS_ORDER
 
 LEGACY_SEMANTIC_GUIDANCE_SCHEMA_VERSION = 1
-SEMANTIC_GUIDANCE_SCHEMA_VERSION = 2
-SUPPORTED_SEMANTIC_GUIDANCE_SCHEMA_VERSIONS = frozenset({1, 2})
+PASS_ANNOTATED_SEMANTIC_GUIDANCE_SCHEMA_VERSION = 2
+SEMANTIC_GUIDANCE_SCHEMA_VERSION = 3
+SUPPORTED_SEMANTIC_GUIDANCE_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 MAX_FILE_BYTES = 1024 * 1024
 _CODE = "C"
 _STRING = "S"
@@ -145,6 +146,8 @@ class _Route:
     trace: tuple[_Location, ...]
     controls: tuple[_Location, ...]
     reason_codes: tuple[str, ...]
+    hint_kind: str = "call-route"
+    output_context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,7 +158,7 @@ class _ScanStats:
 
 def build_semantic_guidance(
     snapshot_path: Path,
-    frontier_passes: tuple[tuple[str, tuple[str, ...]], ...],
+    frontier_contexts: tuple[tuple[str, str, tuple[str, ...]], ...],
     profile: str,
     *,
     guidance_schema_version: int,
@@ -170,7 +173,10 @@ def build_semantic_guidance(
         or guidance_schema_version not in SUPPORTED_SEMANTIC_GUIDANCE_SCHEMA_VERSIONS
     ):
         raise SemanticGuidanceError("semantic guidance schema version is unsupported")
-    paths, frontier_passes_by_path = _normalize_frontier_passes(frontier_passes)
+    paths, frontier_passes_by_path, frontier_components_by_path = _normalize_frontier_contexts(
+        frontier_contexts,
+        guidance_schema_version,
+    )
     snapshot = _safe_snapshot(snapshot_path)
     declarations, scan = _scan_files(snapshot, paths, limits)
     routes, edge_count = _build_routes(declarations, limits)
@@ -179,6 +185,7 @@ def build_semantic_guidance(
         limits,
         guidance_schema_version,
         frontier_passes_by_path,
+        frontier_components_by_path,
     )
     return SemanticGuidance(
         canonical_bytes,
@@ -189,19 +196,29 @@ def build_semantic_guidance(
     )
 
 
-def _normalize_frontier_passes(
-    frontier_passes: tuple[tuple[str, tuple[str, ...]], ...],
-) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
-    if not isinstance(frontier_passes, tuple) or not frontier_passes:
+def _normalize_frontier_contexts(
+    frontier_contexts: tuple[tuple[str, str, tuple[str, ...]], ...],
+    guidance_schema_version: int,
+) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]], dict[str, str]]:
+    if not isinstance(frontier_contexts, tuple) or not frontier_contexts:
         raise SemanticGuidanceError("semantic guidance frontier passes are invalid")
     paths: list[str] = []
     by_path: dict[str, tuple[str, ...]] = {}
-    for item in frontier_passes:
-        if not isinstance(item, tuple) or len(item) != 2:
+    components_by_path: dict[str, str] = {}
+    for item in frontier_contexts:
+        if not isinstance(item, tuple) or len(item) not in {2, 3}:
             raise SemanticGuidanceError("semantic guidance frontier passes are invalid")
-        raw_path, raw_passes = item
+        if len(item) == 2:
+            raw_path, raw_passes = item
+            raw_component = None
+        else:
+            raw_path, raw_component, raw_passes = item
         if not isinstance(raw_path, str) or not isinstance(raw_passes, tuple) or not raw_passes:
             raise SemanticGuidanceError("semantic guidance frontier passes are invalid")
+        if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION and (
+            not isinstance(raw_component, str) or not raw_component or "\x00" in raw_component
+        ):
+            raise SemanticGuidanceError("semantic guidance frontier component is invalid")
         if any(
             not isinstance(value, str) or value not in HUNT_SEARCH_PASS_ORDER
             for value in raw_passes
@@ -210,12 +227,18 @@ def _normalize_frontier_passes(
         path = _canonical_relative_path(raw_path)
         ordered = tuple(value for value in HUNT_SEARCH_PASS_ORDER if value in raw_passes)
         if path in by_path:
-            if by_path[path] != ordered:
+            if by_path[path] != ordered or (
+                isinstance(raw_component, str)
+                and path in components_by_path
+                and components_by_path[path] != raw_component
+            ):
                 raise SemanticGuidanceError("semantic guidance frontier passes conflict")
             continue
         paths.append(path)
         by_path[path] = ordered
-    return tuple(paths), by_path
+        if isinstance(raw_component, str):
+            components_by_path[path] = raw_component
+    return tuple(paths), by_path, components_by_path
 
 
 def _safe_snapshot(snapshot_path: Path) -> Path:
@@ -987,11 +1010,17 @@ def _canonical_guidance(
     limits: GuidanceLimits,
     guidance_schema_version: int,
     frontier_passes_by_path: dict[str, tuple[str, ...]],
+    frontier_components_by_path: dict[str, str],
 ) -> tuple[bytes, int]:
     ordered = sorted(routes, key=_route_sort_key)
     lines: list[bytes] = []
     for route in ordered:
-        row = _canonical_row(route, guidance_schema_version, frontier_passes_by_path)
+        row = _canonical_row(
+            route,
+            guidance_schema_version,
+            frontier_passes_by_path,
+            frontier_components_by_path,
+        )
         _validate_row(row)
         encoded = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         if len(lines) >= limits.row_count or sum(map(len, lines)) + len(encoded) > limits.output_bytes:
@@ -1037,11 +1066,15 @@ def _canonical_row(
     route: _Route,
     guidance_schema_version: int,
     frontier_passes_by_path: dict[str, tuple[str, ...]],
+    frontier_components_by_path: dict[str, str] | None = None,
 ) -> dict[str, object]:
-    identity = "\x1f".join(
+    identity_values = (
         [route.strength, route.operation_family]
         + [f"{item.path}:{item.line}:{item.symbol}" for item in (route.source, route.operation, *route.trace)]
     )
+    if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+        identity_values.extend((route.hint_kind, route.output_context or ""))
+    identity = "\x1f".join(identity_values)
     row: dict[str, object] = {
         "schema_version": guidance_schema_version,
         "hint_id": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
@@ -1054,8 +1087,17 @@ def _canonical_row(
         "reason_codes": list(route.reason_codes),
         "proof_status": "investigation_only",
     }
-    if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+    if guidance_schema_version in {
+        PASS_ANNOTATED_SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+        SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+    }:
         row["eligible_search_passes"] = _eligible_search_passes(route, frontier_passes_by_path)
+    if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+        if frontier_components_by_path is None or route.operation.path not in frontier_components_by_path:
+            raise SemanticGuidanceError("semantic guidance route has no component")
+        row["hint_kind"] = route.hint_kind
+        row["output_context"] = route.output_context
+        row["component"] = frontier_components_by_path[route.operation.path]
     return row
 
 
@@ -1073,8 +1115,13 @@ def _validate_row(row: dict[str, object]) -> None:
         "proof_status",
     }
     schema_version = row.get("schema_version")
-    if schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+    if schema_version in {
+        PASS_ANNOTATED_SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+        SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+    }:
         required_keys.add("eligible_search_passes")
+    if schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+        required_keys.update(("hint_kind", "output_context", "component"))
     if (
         isinstance(schema_version, bool)
         or not isinstance(schema_version, int)
@@ -1098,7 +1145,10 @@ def _validate_row(row: dict[str, object]) -> None:
         or not all(isinstance(item, str) and item for item in row["reason_codes"])
     ):
         raise SemanticGuidanceError("semantic guidance row is invalid")
-    if schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+    if schema_version in {
+        PASS_ANNOTATED_SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+        SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+    }:
         eligible = row["eligible_search_passes"]
         if (
             not isinstance(eligible, list)
@@ -1108,6 +1158,14 @@ def _validate_row(row: dict[str, object]) -> None:
             or eligible != [value for value in HUNT_SEARCH_PASS_ORDER if value in eligible]
         ):
             raise SemanticGuidanceError("semantic guidance row is invalid")
+    if schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION and (
+        row["hint_kind"] != "call-route"
+        or row["output_context"] is not None
+        or not isinstance(row["component"], str)
+        or not row["component"]
+        or "\x00" in row["component"]
+    ):
+        raise SemanticGuidanceError("semantic guidance row is invalid")
 
 
 def _valid_location(value: object) -> bool:

@@ -251,7 +251,7 @@ class CandidateCanonicalizationTests(unittest.TestCase):
 
 class WorkflowTests(unittest.TestCase):
     def test_hunt_schema_three_receipt_accepts_each_supported_evidence_protocol(self) -> None:
-        for version in (1, 2, 3):
+        for version in (1, 2, 3, 4):
             with self.subTest(version=version):
                 self.assertEqual(
                     WorkflowReceipt.from_json(
@@ -261,7 +261,7 @@ class WorkflowTests(unittest.TestCase):
                 )
 
     def test_hunt_schema_three_receipt_rejects_unsupported_evidence_protocol(self) -> None:
-        for version in (0, 4):
+        for version in (0, 5):
             with self.subTest(version=version):
                 with self.assertRaisesRegex(PhaseRunnerError, "protocol"):
                     WorkflowReceipt.from_json(_hunt_receipt(version))
@@ -292,7 +292,7 @@ class WorkflowTests(unittest.TestCase):
                     )
                 return verification
 
-            for version in (1, 2, 3):
+            for version in (1, 2, 3, 4):
                 with self.subTest(version=version):
                     result = run_workflow(
                         manifest,
@@ -364,7 +364,7 @@ class WorkflowTests(unittest.TestCase):
                 return verification
 
             original_evidence: dict[int, bytes] = {}
-            for version in (1, 2, 3):
+            for version in (1, 2, 3, 4):
                 run_id = f"mixed-{version}"
                 run_workflow(
                     manifest,
@@ -674,7 +674,7 @@ class WorkflowTests(unittest.TestCase):
                     failure_code="final_response_invalid",
                 )
 
-            for version in (1, 2, 3):
+            for version in (1, 2, 3, 4):
                 with self.subTest(version=version):
                     result = run_workflow(
                         manifest,

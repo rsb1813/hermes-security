@@ -17,6 +17,7 @@ from pathlib import Path
 from benchmarks.hermesbench.hunt_protocol import HUNT_SEARCH_PASSES
 from benchmarks.hermesbench.semantic_guidance import (
     LEGACY_SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+    PASS_ANNOTATED_SEMANTIC_GUIDANCE_SCHEMA_VERSION,
     SEMANTIC_GUIDANCE_SCHEMA_VERSION,
     build_semantic_guidance,
 )
@@ -31,9 +32,11 @@ PRIORITY_PACKET_NAME = "priority-packet.jsonl"
 SEMANTIC_GUIDANCE_NAME = "semantic-guidance.jsonl"
 LEGACY_HUNT_EVIDENCE_PROTOCOL_VERSION = 1
 SEMANTIC_GUIDANCE_HUNT_EVIDENCE_PROTOCOL_VERSION = 2
-HUNT_EVIDENCE_PROTOCOL_VERSION = 3
-SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({1, 2, 3})
-_SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({2, 3})
+PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION = 3
+NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION = 4
+HUNT_EVIDENCE_PROTOCOL_VERSION = PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION
+SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({1, 2, 3, 4})
+_SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({2, 3, 4})
 MAX_INVENTORY_ROWS = 100_000
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
 MAX_RANK_INPUT_BYTES = 32 * 1024 * 1024
@@ -62,6 +65,7 @@ HUNT_EVIDENCE_FIELDS_V2 = HUNT_EVIDENCE_FIELDS_V1 | frozenset({
     "semantic_guidance_skipped_file_count",
 })
 HUNT_EVIDENCE_FIELDS_V3 = HUNT_EVIDENCE_FIELDS_V2
+HUNT_EVIDENCE_FIELDS_V4 = HUNT_EVIDENCE_FIELDS_V3
 HUNT_EVIDENCE_FIELDS = HUNT_EVIDENCE_FIELDS_V3
 HUNT_EVIDENCE_FAILURE_CODES = frozenset({
     "hunt_evidence_packet_missing",
@@ -194,7 +198,7 @@ def parse_hunt_evidence(
         not _supported_protocol_version(evidence_protocol_version) or version != evidence_protocol_version
     ):
         raise HuntEvidenceError("Hunt evidence schema version is invalid")
-    fields = HUNT_EVIDENCE_FIELDS_V1 if version == LEGACY_HUNT_EVIDENCE_PROTOCOL_VERSION else HUNT_EVIDENCE_FIELDS_V2
+    fields = _evidence_fields(version)
     if set(value) != fields:
         raise HuntEvidenceError("Hunt evidence fields are invalid")
     if value["profile"] not in PRIORITY_ROW_LIMITS or (profile is not None and value["profile"] != profile):
@@ -261,9 +265,10 @@ def prepare_hunt_artifacts(
     frontier_rows = _jsonl_rows(frontier, "frontier", MAX_FRONTIER_BYTES, MAX_FRONTIER_ROWS)
     rank_by_path = _validate_rank_rows(rank_rows, inventory_paths)
     _validate_frontier_rows(frontier_rows, set(rank_by_path))
-    frontier_passes = tuple(
+    frontier_contexts = tuple(
         (
             str(row["path"]),
+            str(row["component"]),
             tuple(str(value) for value in row["passes"]),
         )
         for row in frontier_rows
@@ -282,7 +287,7 @@ def prepare_hunt_artifacts(
     if _uses_semantic_guidance(evidence_protocol_version):
         guidance = build_semantic_guidance(
             snapshot,
-            frontier_passes,
+            frontier_contexts,
             profile,
             guidance_schema_version=_semantic_guidance_schema_version(evidence_protocol_version),
         )
@@ -406,9 +411,23 @@ def _uses_semantic_guidance(version: int) -> bool:
 def _semantic_guidance_schema_version(version: int) -> int:
     if version == SEMANTIC_GUIDANCE_HUNT_EVIDENCE_PROTOCOL_VERSION:
         return LEGACY_SEMANTIC_GUIDANCE_SCHEMA_VERSION
-    if version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+    if version == PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return PASS_ANNOTATED_SEMANTIC_GUIDANCE_SCHEMA_VERSION
+    if version == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION:
         return SEMANTIC_GUIDANCE_SCHEMA_VERSION
     raise HuntEvidenceError("Hunt evidence protocol has no semantic guidance")
+
+
+def _evidence_fields(version: int) -> frozenset[str]:
+    if version == LEGACY_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return HUNT_EVIDENCE_FIELDS_V1
+    if version == SEMANTIC_GUIDANCE_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return HUNT_EVIDENCE_FIELDS_V2
+    if version == PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return HUNT_EVIDENCE_FIELDS_V3
+    if version == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return HUNT_EVIDENCE_FIELDS_V4
+    raise HuntEvidenceError("Hunt evidence protocol is unsupported")
 
 
 def _run_helper(script_name: str, arguments: tuple[str, ...]) -> None:

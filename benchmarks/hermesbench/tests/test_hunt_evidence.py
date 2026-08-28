@@ -82,7 +82,7 @@ class HuntEvidencePreparationTests(unittest.TestCase):
             "coverage_debt_count": 3,
             "validated_closure_count": 0,
         }
-        if version in (2, 3):
+        if version in (2, 3, 4):
             payload |= {
                 "semantic_guidance_sha256": "6" * 64,
                 "semantic_guidance_count": 2,
@@ -252,6 +252,20 @@ class HuntEvidencePreparationTests(unittest.TestCase):
         self.assertNotEqual(first.semantic_guidance.sha256, protocol_two.semantic_guidance.sha256)
         self.assertNotEqual(first.preparation_fingerprint, protocol_two.preparation_fingerprint)
 
+    def test_protocol_four_records_schema_three_guidance_without_changing_legacy_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = self._semantic_snapshot(root)
+            protocol_two = prepare_hunt_artifacts(snapshot, root / "two", "hunt-balanced", evidence_protocol_version=2)
+            protocol_three = prepare_hunt_artifacts(snapshot, root / "three", "hunt-balanced", evidence_protocol_version=3)
+            protocol_four = prepare_hunt_artifacts(snapshot, root / "four", "hunt-balanced", evidence_protocol_version=4)
+            row = json.loads(protocol_four.semantic_guidance.path.read_text(encoding="utf-8"))
+        self.assertEqual(row["schema_version"], 3)
+        self.assertEqual(row["hint_kind"], "call-route")
+        self.assertEqual(row["component"], ".")
+        self.assertNotEqual(protocol_four.semantic_guidance.sha256, protocol_three.semantic_guidance.sha256)
+        self.assertEqual(protocol_two.semantic_guidance.sha256, "c7521cf55318dc1cc393c12e39c643fbabdd003d02329160f92861c257549a37")
+
 
 class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
     """Proves that post-execution artifact and provenance changes fail closed."""
@@ -412,7 +426,7 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
         self.assertEqual(caught.exception.category, "hunt_evidence_packet_missing")
 
     def test_semantic_protocols_attest_one_semantic_guidance_read(self) -> None:
-        for version in (2, 3):
+        for version in (2, 3, 4):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 prepared, prediction = self._prepared_prediction_semantic(Path(directory), version)
                 evidence = attest_hunt_discovery(
@@ -424,7 +438,7 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 self.assertEqual(set(evidence.to_json()), hunt_evidence.HUNT_EVIDENCE_FIELDS_V2)
 
     def test_parser_accepts_literal_evidence_for_each_supported_protocol(self) -> None:
-        for version in (1, 2, 3):
+        for version in (1, 2, 3, 4):
             with self.subTest(version=version):
                 payload = self._evidence_payload(version)
                 self.assertEqual(
@@ -457,14 +471,14 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
 
     def test_parser_rejects_unsupported_and_mismatched_protocol_versions(self) -> None:
         # Unsupported schema values and receipt-version disagreement must both fail.
-        for version in (0, 4):
+        for version in (0, 5):
             with self.subTest(unsupported=version):
                 unsupported = self._evidence_payload(1)
                 unsupported["schema_version"] = version
                 with self.assertRaises(HuntEvidenceError):
                     parse_hunt_evidence(unsupported, "hunt-balanced")
-        for row_version in (1, 2, 3):
-            for expected_version in (1, 2, 3):
+        for row_version in (1, 2, 3, 4):
+            for expected_version in (1, 2, 3, 4):
                 if row_version == expected_version:
                     continue
                 with self.subTest(row_version=row_version, expected_version=expected_version), self.assertRaises(HuntEvidenceError):
@@ -475,7 +489,7 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                     )
 
     def test_semantic_protocols_missing_semantic_guidance_read_have_their_own_category(self) -> None:
-        for version in (2, 3):
+        for version in (2, 3, 4):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 prepared, prediction = self._prepared_prediction_semantic(Path(directory), version)
                 with self.assertRaises(HuntEvidenceError) as caught:
@@ -483,7 +497,7 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 self.assertEqual(caught.exception.category, "hunt_semantic_guidance_missing")
 
     def test_semantic_protocols_duplicate_or_reversed_semantic_guidance_reads_fail(self) -> None:
-        for version in (2, 3):
+        for version in (2, 3, 4):
             with self.subTest(version=version, reads="duplicate"), tempfile.TemporaryDirectory() as directory:
                 prepared, prediction = self._prepared_prediction_semantic(Path(directory), version)
                 with self.assertRaises(HuntEvidenceError) as caught:

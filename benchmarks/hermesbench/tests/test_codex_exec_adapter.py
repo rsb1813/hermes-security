@@ -173,6 +173,7 @@ class CodexExecAdapterTests(unittest.TestCase):
             1: "4713cf562c5efa5bf504b909bac0bf8f18673aca5991fd00b5e89b211d5f2c47",
             2: "8563f2276a113797a5896f1b500198afe519bf5cb497a98a526abbdbcef01dca",
             3: "98906c398f5e15319266983ce30d1b18cf4a45b100f4123956220a2eb447b006",
+            4: "6d565ccd1b04118ac5644054304abfe4dc82ee28ccdcd271edd0469d812b809b",
         }
         for version, digest in expected.items():
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
@@ -234,11 +235,42 @@ class CodexExecAdapterTests(unittest.TestCase):
                 self.assertNotIn(instruction, v2_prompt)
                 self.assertIn(instruction, v3_prompt)
 
+    def test_hunt_discovery_protocol_four_preserves_pass_selection_and_prioritizes_nested_output_context(self) -> None:
+        protocol_three = _Runtime(_hunt_stream())
+        protocol_four = _Runtime(_hunt_stream())
+        with tempfile.TemporaryDirectory() as directory:
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                protocol_three,
+                hunt_evidence_protocol_version=3,
+            )(_request(), Path(directory) / "three", 60)
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                protocol_four,
+                hunt_evidence_protocol_version=4,
+            )(_request(), Path(directory) / "four", 60)
+        v3_prompt = protocol_three.calls[0]["command_argv"][-1]
+        v4_prompt = protocol_four.calls[0]["command_argv"][-1]
+        for instruction in (
+            "eligible_search_passes",
+            "frontier.jsonl",
+            "exact submitted path",
+            "Never invent, generalize, substitute, or default a search pass",
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertIn(instruction, v3_prompt)
+                self.assertIn(instruction, v4_prompt)
+        for instruction in ("nested-output-context", "output_context", "investigation only"):
+            with self.subTest(instruction=instruction):
+                self.assertIn(instruction, v4_prompt)
+
     def test_hunt_discovery_requires_exact_semantic_guidance_reads_and_investigation_only_prompt(self) -> None:
         # Hunt discovery must attest separate priority and semantic guidance reads.
         priority = "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
         semantic = "cat /workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl"
-        for version in (2, 3):
+        for version in (2, 3, 4):
             with self.subTest(version=version, read="one"), tempfile.TemporaryDirectory() as directory:
                 runtime = _Runtime(_hunt_stream())
                 result = self._adapter(
@@ -287,7 +319,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         reverse = json.dumps(
             {"type": "item.completed", "item": {"type": "command_execution", "command": semantic}}
         ).encode("utf-8") + b"\n" + _stream(command=priority)
-        for version in (2, 3):
+        for version in (2, 3, 4):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 with self.assertRaises(CodexExecError) as caught:
                     self._adapter(

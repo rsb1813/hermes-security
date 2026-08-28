@@ -15,12 +15,21 @@ from benchmarks.hermesbench.semantic_guidance import (
 )
 
 
-def _frontier_passes(
+def _frontier_contexts(
     files: dict[str, str | bytes],
-    overrides: dict[str, tuple[str, ...]] | None = None,
-) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    selected = overrides or {}
-    return tuple((path, selected.get(path, ("forward",))) for path in files)
+    passes: dict[str, tuple[str, ...]] | None = None,
+    components: dict[str, str] | None = None,
+) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    selected_passes = passes or {}
+    selected_components = components or {}
+    return tuple(
+        (
+            path,
+            selected_components.get(path, "component-default"),
+            selected_passes.get(path, ("forward",)),
+        )
+        for path in files
+    )
 
 
 class SemanticGuidanceTests(unittest.TestCase):
@@ -39,6 +48,7 @@ class SemanticGuidanceTests(unittest.TestCase):
         *,
         guidance_schema_version: int = 1,
         passes: dict[str, tuple[str, ...]] | None = None,
+        components: dict[str, str] | None = None,
     ) -> SemanticGuidance:
         snapshot = self._root / name
         snapshot.mkdir()
@@ -48,7 +58,7 @@ class SemanticGuidanceTests(unittest.TestCase):
             path.write_bytes(value if isinstance(value, bytes) else value.encode("utf-8"))
         return build_semantic_guidance(
             snapshot,
-            _frontier_passes(files, passes),
+            _frontier_contexts(files, passes, components),
             profile,
             guidance_schema_version=guidance_schema_version,
         )
@@ -130,6 +140,21 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(legacy["hint_id"], annotated["hint_id"])
         self.assertNotIn("eligible_search_passes", legacy)
 
+    def test_schema_three_classifies_call_routes_and_exact_operation_component(self) -> None:
+        result = self._build(
+            "schema-three-call",
+            {"src/app.ts": "export function handle(request: Request) { return child_process.exec(request.query.q); }\n"},
+            guidance_schema_version=3,
+            components={"src/app.ts": "component-api"},
+        )
+        row = json.loads(result.canonical_bytes)
+        self.assertEqual(row["schema_version"], 3)
+        self.assertEqual(row["hint_kind"], "call-route")
+        self.assertIsNone(row["output_context"])
+        self.assertEqual(row["component"], "component-api")
+        self.assertEqual(row["eligible_search_passes"], ["forward"])
+        self.assertEqual(row["proof_status"], "investigation_only")
+
     def test_schema_two_includes_general_only_from_an_exact_route_location(self) -> None:
         files = {
             "app.py": "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
@@ -175,7 +200,7 @@ class SemanticGuidanceTests(unittest.TestCase):
         snapshot = self._root / "invalid-schema"
         snapshot.mkdir()
         (snapshot / "app.py").write_text("value = 1\n", encoding="utf-8")
-        for guidance_schema_version in (0, 3, True):
+        for guidance_schema_version in (0, 4, True):
             with self.subTest(guidance_schema_version=guidance_schema_version):
                 with self.assertRaises(semantic_guidance.SemanticGuidanceError):
                     build_semantic_guidance(
