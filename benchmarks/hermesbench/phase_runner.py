@@ -22,7 +22,13 @@ from .hunt_protocol import (
     parse_hunt_discovery_prediction,
     parse_hunt_verification_prediction,
 )
-from .hunt_evidence import HUNT_EVIDENCE_PROTOCOL_VERSION, HuntEvidenceError, parse_hunt_evidence, reproduce_hunt_evidence
+from .hunt_evidence import (
+    HUNT_EVIDENCE_PROTOCOL_VERSION,
+    SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS,
+    HuntEvidenceError,
+    parse_hunt_evidence,
+    reproduce_hunt_evidence,
+)
 from .receipts import (
     RECEIPT_SCHEMA_VERSION,
     RunConfig,
@@ -256,8 +262,13 @@ class WorkflowReceipt:
         if self.public_predictions_sha256 is not None:
             _sha256(self.public_predictions_sha256, "public_predictions_sha256")
         if self.workflow == "hunt":
-            if self.discovery_evidence_sha256 is None or self.hunt_evidence_protocol_version != HUNT_EVIDENCE_PROTOCOL_VERSION:
-                raise PhaseRunnerError("Hunt workflow receipt must bind discovery evidence")
+            if (
+                self.discovery_evidence_sha256 is None
+                or not isinstance(self.hunt_evidence_protocol_version, int)
+                or isinstance(self.hunt_evidence_protocol_version, bool)
+                or self.hunt_evidence_protocol_version not in SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS
+            ):
+                raise PhaseRunnerError("Hunt workflow receipt evidence protocol is unsupported")
             _sha256(self.discovery_evidence_sha256, "discovery_evidence_sha256")
         elif self.discovery_evidence_sha256 is not None or self.hunt_evidence_protocol_version is not None:
             raise PhaseRunnerError("Standard workflow receipt must omit Hunt evidence")
@@ -421,9 +432,20 @@ def run_workflow(
     discovery_executor: Executor,
     verification_executor_factory: VerificationExecutorFactory,
     score_callback: HostScoreCallback | None = None,
+    *,
+    hunt_evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
 ) -> WorkflowResult:
     """Runs exactly one discovery suite and, when auditable, one verification suite."""
     _workflow_profile(workflow, profile)
+    selected_hunt_evidence_protocol_version: int | None = None
+    if workflow == "hunt":
+        if (
+            not isinstance(hunt_evidence_protocol_version, int)
+            or isinstance(hunt_evidence_protocol_version, bool)
+            or hunt_evidence_protocol_version not in SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS
+        ):
+            raise PhaseRunnerError("Hunt evidence protocol is unsupported")
+        selected_hunt_evidence_protocol_version = hunt_evidence_protocol_version
     if not isinstance(controls, FrozenControls):
         raise PhaseRunnerError("controls must be FrozenControls")
     if not callable(discovery_executor) or not callable(verification_executor_factory):
@@ -435,7 +457,19 @@ def run_workflow(
     snapshot_hash = _snapshot_set_sha256(manifest)
     discovery_run_id = f"{run_id}-discovery"
     discovery_kind = "hunt-discovery" if workflow == "hunt" else "standard"
-    discovery = run_suite(manifest, snapshots_root, output_root, discovery_run_id, workflow, profile, config, execution_policy, discovery_executor, discovery_kind)
+    discovery = run_suite(
+        manifest,
+        snapshots_root,
+        output_root,
+        discovery_run_id,
+        workflow,
+        profile,
+        config,
+        execution_policy,
+        discovery_executor,
+        discovery_kind,
+        selected_hunt_evidence_protocol_version,
+    )
     discovery_dir = output_root / discovery_run_id
     _validate_phase(manifest, discovery_dir, discovery, config)
 
@@ -445,6 +479,7 @@ def run_workflow(
         receipt = _workflow_receipt(
             run_id, workflow, profile, controls, config, snapshot_hash, len(manifest.tasks), discovery_dir / "receipt.json",
             discovery_dir / "commands.jsonl", candidate_path, None, None, None, discovery.elapsed_seconds, discovery.token_usage,
+            hunt_evidence_protocol_version=selected_hunt_evidence_protocol_version,
         )
         aggregate_path = output_root / f"{run_id}-workflow-receipt.json"
         _write_json(aggregate_path, receipt.to_json())
@@ -460,7 +495,18 @@ def run_workflow(
         raise PhaseRunnerError("verification executor factory returned an invalid executor")
     verification_run_id = f"{run_id}-verification"
     verification_kind = "hunt-verification" if workflow == "hunt" else "standard"
-    verification = run_suite(manifest, snapshots_root, output_root, verification_run_id, workflow, profile, config, execution_policy, verification_executor, verification_kind)
+    verification = run_suite(
+        manifest,
+        snapshots_root,
+        output_root,
+        verification_run_id,
+        workflow,
+        profile,
+        config,
+        execution_policy,
+        verification_executor,
+        verification_kind,
+    )
     verification_dir = output_root / verification_run_id
     _validate_phase(manifest, verification_dir, verification, config)
     if verification.status != "completed":
@@ -470,6 +516,7 @@ def run_workflow(
             discovery.elapsed_seconds + verification.elapsed_seconds,
             _add_usage(discovery.token_usage, verification.token_usage),
             status="incomplete",
+            hunt_evidence_protocol_version=selected_hunt_evidence_protocol_version,
         )
         _write_json(output_root / f"{run_id}-workflow-receipt.json", receipt.to_json())
         paths = _artifact_paths(run_id, workflow, verification_started=True, completed=False)
@@ -486,6 +533,7 @@ def run_workflow(
         discovery_dir / "commands.jsonl", candidate_path, verification_dir / "receipt.json", verification_dir / "commands.jsonl", public_predictions_path,
         discovery.elapsed_seconds + verification.elapsed_seconds,
         _add_usage(discovery.token_usage, verification.token_usage),
+        hunt_evidence_protocol_version=selected_hunt_evidence_protocol_version,
     )
     aggregate_path = output_root / f"{run_id}-workflow-receipt.json"
     _write_json(aggregate_path, receipt.to_json())
@@ -513,6 +561,8 @@ def run_paired(
     verification_executor_factories: Mapping[str, VerificationExecutorFactory],
     profiles: Mapping[str, str],
     score_callbacks: Mapping[str, HostScoreCallback] | None = None,
+    *,
+    hunt_evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
 ) -> PairedRunResult:
     """Runs the frozen paired order without automatic retries."""
     if set(discovery_executors) != {"standard", "hunt"} or set(verification_executor_factories) != {"standard", "hunt"} or set(profiles) != {"standard", "hunt"}:
@@ -527,10 +577,16 @@ def run_paired(
     for repeat, order in enumerate(schedule, start=1):
         results: dict[str, WorkflowResult] = {}
         for workflow in order:
+            workflow_options = (
+                {"hunt_evidence_protocol_version": hunt_evidence_protocol_version}
+                if workflow == "hunt"
+                else {}
+            )
             results[workflow] = run_workflow(
                 manifest, snapshots_root, output_root, f"{run_id}-repeat-{repeat}-{workflow}", workflow, profiles[workflow], controls,
                 execution_policy, discovery_executors[workflow], verification_executor_factories[workflow],
                 score_callbacks[workflow] if score_callbacks is not None else None,
+                **workflow_options,
             )
             validate_workflow_receipt(
                 manifest,
@@ -550,6 +606,7 @@ def run_paired(
         )
     _write_json(output_root / f"{run_id}-comparison.json", {
         "schedule": [list(order) for order in schedule],
+        "hunt_evidence_protocol_version": hunt_evidence_protocol_version,
         "comparisons": [{"comparable": item.comparable, "mismatches": list(item.mismatches)} for item in comparisons],
         "evidence": evidence,
     })
@@ -651,7 +708,14 @@ def validate_workflow_receipt(
         if len(evidence_rows) != len(completed_discovery_tasks):
             raise PhaseRunnerError("discovery evidence is incomplete")
         try:
-            evidence_rows = [parse_hunt_evidence(row, receipt.profile) for row in evidence_rows]
+            evidence_rows = [
+                parse_hunt_evidence(
+                    row,
+                    receipt.profile,
+                    evidence_protocol_version=receipt.hunt_evidence_protocol_version,
+                )
+                for row in evidence_rows
+            ]
         except HuntEvidenceError as error:
             raise PhaseRunnerError("discovery evidence is invalid") from error
         expected_evidence = _jsonl_bytes(
@@ -659,6 +723,7 @@ def validate_workflow_receipt(
                 snapshots_root / task.task_id,
                 receipt.profile,
                 parse_hunt_discovery_prediction(discovery_predictions[task.task_id], task.task_id),
+                evidence_protocol_version=receipt.hunt_evidence_protocol_version,
             ).to_json()
             for task in completed_discovery_tasks
         )
@@ -731,6 +796,7 @@ def _workflow_receipt(
     task_count: int, discovery_path: Path, discovery_commands_path: Path, candidate_path: Path,
     verification_path: Path | None, verification_commands_path: Path | None, public_predictions_path: Path | None, elapsed: float, usage: TokenUsage,
     status: str | None = None,
+    hunt_evidence_protocol_version: int | None = None,
 ) -> WorkflowReceipt:
     return WorkflowReceipt(
         schema_version=HUNT_WORKFLOW_RECEIPT_SCHEMA_VERSION if workflow == "hunt" else STANDARD_WORKFLOW_RECEIPT_SCHEMA_VERSION, run_id=run_id, workflow=workflow, profile=profile,
@@ -745,7 +811,7 @@ def _workflow_receipt(
         verification_predictions_sha256=sha256_file(verification_path.parent / "predictions.jsonl") if verification_path else None,
         public_predictions_sha256=sha256_file(public_predictions_path) if public_predictions_path else None,
         discovery_evidence_sha256=sha256_file(discovery_path.parent / "evidence.jsonl") if workflow == "hunt" else None,
-        hunt_evidence_protocol_version=HUNT_EVIDENCE_PROTOCOL_VERSION if workflow == "hunt" else None,
+        hunt_evidence_protocol_version=hunt_evidence_protocol_version if workflow == "hunt" else None,
         phase_protocol_version=controls.phase_protocol_version,
         top_level_invocation_count=task_count * (2 if verification_path else 1),
         status=status or ("completed" if verification_path else "incomplete"), elapsed_seconds=elapsed, token_usage=usage,

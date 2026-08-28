@@ -102,7 +102,12 @@ def hunt_evidence() -> dict[str, object]:
 class HuntEvidenceRunnerTests(unittest.TestCase):
     """Verifies the Hunt-only persisted evidence channel and task allowlist."""
 
-    def _run(self, response_kind: str, result: ExecutorResult):
+    def _run(
+        self,
+        response_kind: str,
+        result: ExecutorResult,
+        evidence_protocol_version: int | None = None,
+    ):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
@@ -112,7 +117,23 @@ class HuntEvidenceRunnerTests(unittest.TestCase):
         output.mkdir()
         manifest = manifest_for("task-a", snapshots_root=snapshots)
         policy = ExecutionPolicy((("python",),))
-        receipt = run_suite(manifest, snapshots, output, "run-001", "hunt" if response_kind.startswith("hunt") else "standard", "hunt-balanced" if response_kind.startswith("hunt") else "baseline", config_for(manifest, policy), policy, lambda *_: result, response_kind)
+        selected_protocol = (
+            1 if response_kind == "hunt-discovery" and evidence_protocol_version is None
+            else evidence_protocol_version
+        )
+        receipt = run_suite(
+            manifest,
+            snapshots,
+            output,
+            "run-001",
+            "hunt" if response_kind.startswith("hunt") else "standard",
+            "hunt-balanced" if response_kind.startswith("hunt") else "baseline",
+            config_for(manifest, policy),
+            policy,
+            lambda *_: result,
+            response_kind,
+            selected_protocol,
+        )
         return root, receipt
 
     def test_hunt_discovery_requires_persists_and_aggregates_evidence(self) -> None:
@@ -124,6 +145,22 @@ class HuntEvidenceRunnerTests(unittest.TestCase):
         self.assertEqual(len(evidence_files), 1)
         aggregate = (root / "output" / "run-001" / "evidence.jsonl").read_text(encoding="utf-8")
         self.assertEqual(json.loads(aggregate), hunt_evidence())
+
+    def test_hunt_discovery_uses_the_selected_evidence_protocol_for_strict_parsing(self) -> None:
+        matching_root, matching_receipt = self._run(
+            "hunt-discovery",
+            ExecutorResult(hunt_discovery_response("task-a"), (), (), hunt_evidence()),
+            1,
+        )
+        mismatched_root, mismatched_receipt = self._run(
+            "hunt-discovery",
+            ExecutorResult(hunt_discovery_response("task-a"), (), (), hunt_evidence()),
+            2,
+        )
+        self.assertEqual(matching_receipt.status, "completed")
+        self.assertEqual(mismatched_receipt.status, "failed")
+        self.assertTrue((matching_root / "output" / "run-001" / "evidence.jsonl").is_file())
+        self.assertEqual((mismatched_root / "output" / "run-001" / "evidence.jsonl").read_bytes(), b"")
 
     def test_missing_hunt_discovery_evidence_fails_and_cleans_success_artifacts(self) -> None:
         # Hunt discovery evidence is mandatory and a failure keeps only request plus failure evidence.
@@ -503,7 +540,7 @@ class SuiteExecutionTests(unittest.TestCase):
 
                 receipt = run_suite(
                     manifest, snapshots, output, "run-001", "hunt", "hunt-balanced",
-                    config_for(manifest, policy), policy, executor, "hunt-discovery",
+                    config_for(manifest, policy), policy, executor, "hunt-discovery", 2,
                 )
                 run_directory = output / "run-001"
                 task_directory = next((run_directory / "tasks").iterdir())

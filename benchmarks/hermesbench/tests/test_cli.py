@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import benchmarks.hermesbench.cli as hermes_cli
+from benchmarks.hermesbench.hunt_evidence import HUNT_EVIDENCE_PROTOCOL_VERSION
 from benchmarks.hermesbench.receipts import (
     RECEIPT_SCHEMA_VERSION,
     RunConfig,
@@ -146,6 +147,65 @@ HUNT_READ_ONLY_COMMAND_PREFIXES = [
     ["python3", "/workspace/plugin/scripts/resolve_security_md.py"],
     ["python3", "/workspace/plugin/scripts/finalize_scan_contract.py"],
 ]
+
+
+class LiveProtocolRunCommandTests(unittest.TestCase):
+    def test_live_hunt_run_passes_the_current_evidence_protocol_explicitly(self) -> None:
+        args = SimpleNamespace(
+            workflow="hunt",
+            snapshots_root=Path("snapshots"),
+            output_root=Path("outputs"),
+            run_id="run-001",
+            profile="hunt-balanced",
+            oracles=None,
+        )
+        result = SimpleNamespace(
+            receipt=SimpleNamespace(status="completed"),
+            artifact_paths={"aggregate_receipt": "run-001-workflow-receipt.json"},
+        )
+        with (
+            patch.object(
+                hermes_cli,
+                "_run_inputs",
+                return_value=(object(), object(), SimpleNamespace(allowed_command_prefixes=())),
+            ),
+            patch.object(hermes_cli, "validate_hunt_execution_policy"),
+            patch.object(hermes_cli, "_codex_adapter", return_value=SimpleNamespace(for_verification=object())),
+            patch.object(hermes_cli, "run_workflow", return_value=result) as run_workflow,
+        ):
+            self.assertEqual(hermes_cli._run_command(args), 0)
+
+        self.assertEqual(
+            run_workflow.call_args.kwargs["hunt_evidence_protocol_version"],
+            HUNT_EVIDENCE_PROTOCOL_VERSION,
+        )
+
+    def test_live_paired_run_passes_the_current_hunt_evidence_protocol_explicitly(self) -> None:
+        args = SimpleNamespace(
+            snapshots_root=Path("snapshots"),
+            output_root=Path("outputs"),
+            run_id="run-001",
+            hunt_profile="hunt-balanced",
+            oracles=None,
+        )
+        result = SimpleNamespace(schedule=(("standard", "hunt"),), comparisons=(SimpleNamespace(comparable=True),))
+        adapter = SimpleNamespace(for_verification=object())
+        with (
+            patch.object(
+                hermes_cli,
+                "_run_inputs",
+                return_value=(object(), object(), SimpleNamespace(allowed_command_prefixes=())),
+            ),
+            patch.object(hermes_cli, "validate_hunt_execution_policy"),
+            patch.object(hermes_cli, "_codex_adapter", return_value=adapter),
+            patch.object(hermes_cli, "run_paired", return_value=result) as run_paired,
+        ):
+            self.assertEqual(hermes_cli._run_paired_command(args), 0)
+
+        self.assertEqual(
+            run_paired.call_args.kwargs["hunt_evidence_protocol_version"],
+            HUNT_EVIDENCE_PROTOCOL_VERSION,
+        )
 
 
 class AuditCommandTests(unittest.TestCase):

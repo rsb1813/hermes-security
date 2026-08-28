@@ -17,7 +17,11 @@ from .adapter_contract import AdapterTaskRequest, parse_adapter_response
 from .contracts import BenchmarkManifest, TaskDescriptor
 from .receipts import RECEIPT_SCHEMA_VERSION, RunConfig, RunReceipt, TaskRunReceipt, TokenUsage
 from .sanitize import BundleAuditError, audit_bundle, tree_sha256
-from .hunt_evidence import HuntEvidenceError, parse_hunt_evidence
+from .hunt_evidence import (
+    SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS,
+    HuntEvidenceError,
+    parse_hunt_evidence,
+)
 
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -157,6 +161,7 @@ def run_suite(
     execution_policy: ExecutionPolicy,
     executor: Executor,
     response_kind: str = "standard",
+    evidence_protocol_version: int | None = None,
 ) -> RunReceipt:
     """Runs one manifest in order after completing every snapshot preflight."""
     _require_safe_run_id(run_id)
@@ -172,6 +177,15 @@ def run_suite(
         raise RunnerError("manifest hash does not match RunConfig")
     if config.task_order_sha256 != task_order_sha256(manifest):
         raise RunnerError("task order hash does not match RunConfig")
+    if response_kind == "hunt-discovery":
+        if (
+            not isinstance(evidence_protocol_version, int)
+            or isinstance(evidence_protocol_version, bool)
+            or evidence_protocol_version not in SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS
+        ):
+            raise RunnerError("Hunt discovery evidence protocol is unsupported")
+    elif evidence_protocol_version is not None:
+        raise RunnerError("only Hunt discovery accepts an evidence protocol")
 
     resolved_output = _resolve_existing_directory(output_root, "output root")
     _assert_path_components_safe(output_root, "output root")
@@ -201,6 +215,7 @@ def run_suite(
             executor,
             response_kind,
             profile,
+            evidence_protocol_version,
         )
         records.append(record)
         commands.extend(task_commands)
@@ -289,6 +304,7 @@ def _run_task(
     executor: Executor,
     response_kind: str,
     profile: str,
+    evidence_protocol_version: int | None,
 ) -> tuple[TaskRunReceipt, dict[str, object] | None, tuple[dict[str, object], ...], dict[str, object] | None]:
     descriptor = prepared.descriptor
     task_directory = tasks_directory / _task_directory_name(descriptor.task_id)
@@ -352,7 +368,11 @@ def _run_task(
                     if not isinstance(result.hunt_evidence, dict):
                         raise ExecutorFailureError("Hunt discovery evidence is required", failure_code="hunt_evidence_invalid")
                     try:
-                        evidence = parse_hunt_evidence(result.hunt_evidence, profile)
+                        evidence = parse_hunt_evidence(
+                            result.hunt_evidence,
+                            profile,
+                            evidence_protocol_version=evidence_protocol_version,
+                        )
                     except HuntEvidenceError as error:
                         raise ExecutorFailureError("Hunt discovery evidence is invalid", failure_code="hunt_evidence_invalid") from error
                 elif result.hunt_evidence is not None:

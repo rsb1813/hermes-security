@@ -17,6 +17,7 @@ from .container_runtime import ContainerRuntime
 from .contracts import ContractError, load_manifest, load_oracles, load_predictions
 from .corpus import load_vulngym_candidates
 from .escalation import MiniEvidence, decide_escalation
+from .hunt_evidence import HUNT_EVIDENCE_PROTOCOL_VERSION
 from .receipts import comparison_mismatches, load_receipt
 from .phase_runner import FrozenControls, PhaseRunnerError, run_paired, run_workflow
 from .runner import ExecutionPolicy
@@ -158,6 +159,7 @@ def _run_command(args: argparse.Namespace) -> int:
         discovery_executor=adapter,
         verification_executor_factory=adapter.for_verification,
         score_callback=_host_score_callback(args.oracles) if args.oracles is not None else None,
+        hunt_evidence_protocol_version=HUNT_EVIDENCE_PROTOCOL_VERSION,
     )
     _print_json({"artifacts": result.artifact_paths})
     return 0 if result.receipt.status == "completed" else 2
@@ -195,6 +197,7 @@ def _run_paired_command(args: argparse.Namespace) -> int:
             if args.oracles is not None
             else None
         ),
+        hunt_evidence_protocol_version=HUNT_EVIDENCE_PROTOCOL_VERSION,
     )
     _print_json(
         {
