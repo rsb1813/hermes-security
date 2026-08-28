@@ -64,9 +64,10 @@ _PUBLIC_FAILURE_CODES = frozenset(
         "setup_auth_runtime",
         "setup_child_start",
         "setup_wrapper_os_error",
+        "hunt_evidence_invalid",
     }
 )
-_SUCCESS_ARTIFACT_NAMES = frozenset({"adapter-response.json", "events.jsonl", "commands.jsonl"})
+_SUCCESS_ARTIFACT_NAMES = frozenset({"adapter-response.json", "events.jsonl", "commands.jsonl", "evidence.json"})
 _MAX_FAILURE_EVIDENCE_BYTES = 512
 _ZERO_USAGE = TokenUsage(0, 0, 0)
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
@@ -110,6 +111,7 @@ class ExecutorResult:
     raw_response: object
     event_rows: tuple[dict[str, object], ...]
     observed_argv: tuple[tuple[str, ...], ...]
+    hunt_evidence: dict[str, object] | None = None
 
 
 Executor = Callable[[AdapterTaskRequest, Path, int], ExecutorResult]
@@ -167,9 +169,10 @@ def run_suite(
     records: list[TaskRunReceipt] = []
     predictions: list[dict[str, object]] = []
     commands: list[dict[str, object]] = []
+    evidence_rows: list[dict[str, object]] = []
     total_usage = _ZERO_USAGE
     for prepared in preflight:
-        record, prediction, task_commands = _run_task(
+        record, prediction, task_commands, task_evidence = _run_task(
             prepared,
             tasks_directory,
             execution_policy,
@@ -178,6 +181,8 @@ def run_suite(
         )
         records.append(record)
         commands.extend(task_commands)
+        if task_evidence is not None:
+            evidence_rows.append(task_evidence)
         if prediction is not None:
             predictions.append(prediction)
             total_usage = _add_usage(total_usage, record.token_usage)
@@ -185,6 +190,8 @@ def run_suite(
     _write_jsonl(run_directory / "predictions.jsonl", predictions)
     _write_jsonl(run_directory / "task-receipts.jsonl", (record.to_json() for record in records))
     _write_jsonl(run_directory / "commands.jsonl", commands)
+    if response_kind == "hunt-discovery":
+        _write_jsonl(run_directory / "evidence.jsonl", evidence_rows)
     receipt = RunReceipt(
         schema_version=RECEIPT_SCHEMA_VERSION,
         run_id=run_id,
@@ -258,7 +265,7 @@ def _run_task(
     policy: ExecutionPolicy,
     executor: Executor,
     response_kind: str,
-) -> tuple[TaskRunReceipt, dict[str, object] | None, tuple[dict[str, object], ...]]:
+) -> tuple[TaskRunReceipt, dict[str, object] | None, tuple[dict[str, object], ...], dict[str, object] | None]:
     descriptor = prepared.descriptor
     task_directory = tasks_directory / _task_directory_name(descriptor.task_id)
     task_directory.mkdir()
@@ -277,6 +284,7 @@ def _run_task(
     status = "failed"
     prediction: dict[str, object] | None = None
     command_rows: tuple[dict[str, object], ...] = ()
+    evidence: dict[str, object] | None = None
     try:
         pre_sha256 = _audit_and_hash(prepared.snapshot_path, descriptor.task_id)
     except RunnerError:
@@ -316,6 +324,12 @@ def _run_task(
                     parsed = type("HuntParsed", (), {"token_usage": usage, "prediction": parsed_prediction})()
                 event_rows = _normalize_event_rows(result.event_rows)
                 command_rows = _command_rows(descriptor.task_id, result.observed_argv)
+                if response_kind == "hunt-discovery":
+                    if not isinstance(result.hunt_evidence, dict):
+                        raise ExecutorFailureError("Hunt discovery evidence is required", failure_code="hunt_evidence_invalid")
+                    evidence = result.hunt_evidence
+                elif result.hunt_evidence is not None:
+                    raise ExecutorFailureError("Hunt evidence is forbidden for this phase", failure_code="hunt_evidence_invalid")
                 usage = parsed.token_usage
                 _write_json(
                     task_directory / "adapter-response.json",
@@ -333,9 +347,11 @@ def _run_task(
                     task_directory / "commands.jsonl",
                     ({"argv": row["argv"]} for row in command_rows),
                 )
+                if evidence is not None:
+                    _write_json(task_directory / "evidence.json", evidence)
                 _assert_artifact_tree(
                     task_directory,
-                    {"request.json", "adapter-response.json", "events.jsonl", "commands.jsonl"},
+                    {"request.json", "adapter-response.json", "events.jsonl", "commands.jsonl", *({"evidence.json"} if evidence is not None else set())},
                 )
                 try:
                     post_sha256 = _audit_and_hash(prepared.snapshot_path, descriptor.task_id)
@@ -370,6 +386,7 @@ def _run_task(
         ),
         prediction,
         command_rows,
+        evidence,
     )
 
 

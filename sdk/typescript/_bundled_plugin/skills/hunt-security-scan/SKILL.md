@@ -17,6 +17,7 @@ Read [references/hunt-contract.md](references/hunt-contract.md) completely befor
 - Do not generate exploits, proof-of-concept payloads, crash inputs, or remote attacks. Validate only with the safe methods in the contract.
 - Give every frontier item and candidate exactly one terminal record. Deferred work remains visible coverage debt.
 - Use a fresh verifier context whose actor identity differs from the discovery actor. Only accepted, exact-root-deduplicated findings enter the draft report.
+- When HermesBench provides a fixed precomputed priority packet, read the packet exactly once before hypotheses. Read the fixed precomputed priority packet exactly once, use it only as priority guidance, keep the complete repository eligible, and never treat packet rows or candidate links as reviewed closure.
 
 ## Profiles
 

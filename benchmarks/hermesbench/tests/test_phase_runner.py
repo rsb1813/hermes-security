@@ -27,6 +27,8 @@ from benchmarks.hermesbench.runner import (
 )
 from benchmarks.hermesbench.sanitize import tree_sha256
 from benchmarks.hermesbench.receipts import sha256_file
+from benchmarks.hermesbench.hunt_evidence import reproduce_hunt_evidence
+from benchmarks.hermesbench.hunt_protocol import parse_hunt_discovery_prediction
 
 
 def _manifest(root: Path) -> BenchmarkManifest:
@@ -35,7 +37,7 @@ def _manifest(root: Path) -> BenchmarkManifest:
     for task_id in ("task-a", "task-b"):
         snapshot = snapshots / task_id
         snapshot.mkdir()
-        (snapshot / "source.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+        (snapshot / "source.py").write_text("def request_handler(request):\n    value = request\n    return execute(value)\n", encoding="utf-8")
     return parse_manifest(
         {
             "schema_version": 1,
@@ -106,6 +108,13 @@ def _hunt_candidate(number: int) -> dict[str, object]:
 
 def _hunt_discovery(task_id: str, count: int = 1) -> dict[str, object]:
     return {"prediction": {"schema_version": 1, "task_id": task_id, "candidates": [_hunt_candidate(number) for number in range(1, count + 1)]}, "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}}
+
+
+def _hunt_result(request: object, count: int = 1) -> ExecutorResult:
+    response = _hunt_discovery(request.task_id, count)
+    prediction = parse_hunt_discovery_prediction(response["prediction"], request.task_id)
+    evidence = reproduce_hunt_evidence(Path(request.snapshot_path), "hunt-balanced", prediction).to_json()
+    return ExecutorResult(response, ({"event": "done"},), (), evidence)
 
 
 def _hunt_verification(task_id: str, candidate: object) -> dict[str, object]:
@@ -197,6 +206,91 @@ class CandidateCanonicalizationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_hunt_schema_three_binds_reproducible_evidence_and_rejects_tampering(self) -> None:
+        # Rewriting receipt or evidence bytes cannot replace host-reproduced evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return _hunt_result(request)
+
+            def verification_factory(candidates: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    return ExecutorResult(_hunt_verification(request.task_id, candidates[request.task_id][0]), ({"event": "done"},), ())
+                return verification
+
+            run_workflow(manifest, root / "snapshots", outputs, "evidence", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory)
+            receipt_path = outputs / "evidence-workflow-receipt.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["schema_version"], 3)
+            self.assertEqual(receipt["hunt_evidence_protocol_version"], 1)
+            self.assertIn("discovery_evidence_sha256", receipt)
+            self.assertEqual(validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),))).status, "completed")
+            evidence_path = outputs / "evidence-discovery" / "evidence.jsonl"
+            original_evidence = evidence_path.read_bytes()
+            evidence_rows = [json.loads(line) for line in original_evidence.decode("utf-8").splitlines()]
+            for field in (
+                "inventory_sha256", "rank_input_sha256", "frontier_sha256", "priority_packet_sha256",
+                "candidate_links_sha256", "coverage_debt_sha256",
+            ):
+                with self.subTest(field=field):
+                    altered = [row.copy() for row in evidence_rows]
+                    altered[0][field] = "0" * 64
+                    evidence_path.write_text("".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in altered), encoding="utf-8")
+                    with self.assertRaisesRegex(PhaseRunnerError, "evidence"):
+                        validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),)))
+                    evidence_path.write_bytes(original_evidence)
+            evidence_path.write_bytes(original_evidence + b"\n")
+            with self.assertRaisesRegex(PhaseRunnerError, "evidence"):
+                validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),)))
+
+    def test_hunt_missing_evidence_rejects_completed_and_incomplete_receipts(self) -> None:
+        # Both receipt states require the complete Hunt discovery evidence aggregate.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return _hunt_result(request)
+
+            def verification_factory(_: object):
+                def verification(*_: object) -> ExecutorResult:
+                    raise ExecutorFailureError("failure", failure_code="final_response_invalid")
+                return verification
+
+            run_workflow(manifest, root / "snapshots", outputs, "missing-evidence", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory)
+            evidence_path = outputs / "missing-evidence-discovery" / "evidence.jsonl"
+            evidence_path.unlink()
+            with self.assertRaisesRegex(PhaseRunnerError, "evidence"):
+                validate_workflow_receipt(manifest, root / "snapshots", outputs, outputs / "missing-evidence-workflow-receipt.json", _controls(), ExecutionPolicy((("python",),)))
+
+    def test_standard_receipt_remains_schema_two_without_evidence_artifacts(self) -> None:
+        # Hunt evidence must not add fields or files to the Standard workflow.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return ExecutorResult(_prediction(request.task_id), ({"event": "done"},), ())
+
+            def verification_factory(candidates: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    return ExecutorResult(_prediction(request.task_id, finding_id=candidates[request.task_id][0].candidate_id), ({"event": "done"},), ())
+                return verification
+
+            run_workflow(manifest, root / "snapshots", outputs, "standard-evidence", "standard", "baseline", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory)
+            receipt = json.loads((outputs / "standard-evidence-workflow-receipt.json").read_text(encoding="utf-8"))
+            self.assertEqual(receipt["schema_version"], 2)
+            self.assertNotIn("discovery_evidence_sha256", receipt)
+            self.assertNotIn("hunt_evidence_protocol_version", receipt)
+            self.assertFalse((outputs / "standard-evidence-discovery" / "evidence.jsonl").exists())
     def test_incomplete_hunt_receipt_has_no_public_predictions_and_revalidates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -205,7 +299,7 @@ class WorkflowTests(unittest.TestCase):
             outputs.mkdir()
 
             def discovery(request: object, *_: object) -> ExecutorResult:
-                return ExecutorResult(_hunt_discovery(request.task_id), ({"event": "done"},), ())
+                return _hunt_result(request)
 
             def verification_factory(_: object):
                 def verification(*_: object) -> ExecutorResult:
@@ -231,7 +325,7 @@ class WorkflowTests(unittest.TestCase):
             outputs.mkdir()
 
             def discovery(request: object, *_: object) -> ExecutorResult:
-                return ExecutorResult(_hunt_discovery(request.task_id, 6), ({"event": "done"},), ())
+                return _hunt_result(request, 6)
 
             def valid_factory(candidate_sets: object):
                 def verification(request: object, *_: object) -> ExecutorResult:
@@ -277,7 +371,7 @@ class WorkflowTests(unittest.TestCase):
             outputs.mkdir()
 
             def discovery(request: object, *_: object) -> ExecutorResult:
-                return ExecutorResult(_hunt_discovery(request.task_id), ({"event": "done"},), ())
+                return _hunt_result(request)
 
             def verification_factory(candidates: object):
                 def verification(request: object, *_: object) -> ExecutorResult:
@@ -578,16 +672,7 @@ class WorkflowTests(unittest.TestCase):
                 return verification
 
             def hunt_executor(request: object, *_: object) -> ExecutorResult:
-                candidate = _prediction(request.task_id)["prediction"]["findings"][0]
-                candidate |= {
-                    "vulnerability_family": "injection", "search_pass": "forward",
-                    "hypothesis": "Input reaches the operation.", "evidence": "Trace exists.",
-                    "counterevidence": "No guard found.", "expected_control": "Validate input.",
-                }
-                return ExecutorResult(
-                    {"prediction": {"schema_version": 1, "task_id": request.task_id, "candidates": [candidate]}, "usage": _prediction(request.task_id)["usage"]},
-                    ({"event": "done"},), (),
-                )
+                return _hunt_result(request)
 
             def hunt_factory(candidate_sets: object):
                 def verification(request: object, *_: object) -> ExecutorResult:

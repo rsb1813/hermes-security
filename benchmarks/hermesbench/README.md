@@ -170,6 +170,12 @@ arguments, requests, prompts, container mounts, or result-manifest fields.
 When `--oracles` is provided, the public result manifest also names the
 identity-free score artifact produced after verification.
 
+## Hunt artifact evidence
+
+Hunt discovery prepares a host-side inventory, rank input, full frontier, and bounded priority packet before the container starts. The discovery agent reads the fixed packet once; it is priority guidance only and does not make any repository path ineligible or count as reviewed closure. Each successful Hunt discovery task stores path-free `evidence.json`, and the phase stores ordered `evidence.jsonl` rows. Evidence exposes the inventory, rank-input, frontier, priority-packet, candidate-link, and coverage-debt hashes without source paths, previews, candidate prose, or work IDs.
+
+Standard workflow receipts remain schema version `2` with their unchanged field set. Hunt receipts use schema version `3` and bind the aggregate discovery-evidence hash plus evidence protocol version `1`. Discovery preparation time is included in the task budget; the container receives only the positive whole-second remainder.
+
 ## Run paired repeats
 
 ```powershell

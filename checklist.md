@@ -95,7 +95,7 @@
 - [x] Preserve up to 12 bounded internal Hunt candidates with blinded hypothesis, family, pass, evidence, counterevidence, and expected-control fields.
 - [x] Require one terminal verifier decision per internal candidate and project no more than five accepted findings to the public prediction contract.
 - [x] Run the fixed paid diagnostic after the rich-candidate change and record its separated cost, candidate, decision, score, and integrity evidence.
-- [ ] Bind deterministic inventory, frontier, candidate references, and explicit coverage debt into the Hunt receipts.
+- [x] Bind deterministic inventory, frontier, candidate references, and explicit coverage debt into the Hunt receipts.
 - [ ] Rerun the fixed single-task diagnostic with one material strategy change at a time.
 - [ ] Measure `hunt-balanced` and `hunt-max` on Canary.
 - [ ] Tune one material variable at a time on Mini.

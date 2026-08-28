@@ -1,5 +1,11 @@
 # Hermes Security Context Notes
 
+## 2026-08-28
+
+- Hunt discovery now prepares a host-owned deterministic inventory, rank input, full frontier, and bounded priority packet before the container starts. It records pre-execution identities and hashes, requires the exact packet read command, and persists only path-free evidence.
+- Hunt workflow receipts use schema version 3 with a discovery-evidence aggregate hash and evidence protocol version 1. Standard workflow receipts retain their exact schema version 2 field set.
+- Receipt validation reproduces Hunt discovery evidence from the audited snapshot and prediction, so changing both a persisted evidence artifact and its receipt hash cannot establish acceptance.
+
 ## 2026-08-27
 
 ### HermesBench runner task

@@ -22,6 +22,7 @@ from .hunt_protocol import (
     parse_hunt_discovery_prediction,
     parse_hunt_verification_prediction,
 )
+from .hunt_evidence import HUNT_EVIDENCE_PROTOCOL_VERSION, reproduce_hunt_evidence
 from .receipts import (
     RECEIPT_SCHEMA_VERSION,
     RunConfig,
@@ -44,7 +45,8 @@ from .runner import (
 
 
 PHASE_PROTOCOL_VERSION = 1
-WORKFLOW_RECEIPT_SCHEMA_VERSION = 2
+STANDARD_WORKFLOW_RECEIPT_SCHEMA_VERSION = 2
+HUNT_WORKFLOW_RECEIPT_SCHEMA_VERSION = 3
 _MAX_CANDIDATE_PATH_BYTES = 240
 _MAX_CANDIDATE_TRACE = 16
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -219,6 +221,8 @@ class WorkflowReceipt:
     verification_commands_sha256: str | None
     verification_predictions_sha256: str | None
     public_predictions_sha256: str | None
+    discovery_evidence_sha256: str | None
+    hunt_evidence_protocol_version: int | None
     phase_protocol_version: int
     top_level_invocation_count: int
     status: str
@@ -226,7 +230,8 @@ class WorkflowReceipt:
     token_usage: TokenUsage
 
     def __post_init__(self) -> None:
-        if self.schema_version != WORKFLOW_RECEIPT_SCHEMA_VERSION:
+        expected_schema = HUNT_WORKFLOW_RECEIPT_SCHEMA_VERSION if self.workflow == "hunt" else STANDARD_WORKFLOW_RECEIPT_SCHEMA_VERSION
+        if self.schema_version != expected_schema:
             raise PhaseRunnerError("workflow receipt schema_version is unsupported")
         _required_text(self.run_id, "run_id")
         _workflow_profile(self.workflow, self.profile)
@@ -250,6 +255,12 @@ class WorkflowReceipt:
             _sha256(self.verification_predictions_sha256, "verification_predictions_sha256")
         if self.public_predictions_sha256 is not None:
             _sha256(self.public_predictions_sha256, "public_predictions_sha256")
+        if self.workflow == "hunt":
+            if self.discovery_evidence_sha256 is None or self.hunt_evidence_protocol_version != HUNT_EVIDENCE_PROTOCOL_VERSION:
+                raise PhaseRunnerError("Hunt workflow receipt must bind discovery evidence")
+            _sha256(self.discovery_evidence_sha256, "discovery_evidence_sha256")
+        elif self.discovery_evidence_sha256 is not None or self.hunt_evidence_protocol_version is not None:
+            raise PhaseRunnerError("Standard workflow receipt must omit Hunt evidence")
         if self.phase_protocol_version != PHASE_PROTOCOL_VERSION:
             raise PhaseRunnerError("workflow receipt phase protocol is unsupported")
         if self.status not in {"completed", "incomplete"}:
@@ -278,7 +289,7 @@ class WorkflowReceipt:
             raise PhaseRunnerError("token_usage must be TokenUsage")
 
     def to_json(self) -> dict[str, object]:
-        return {
+        value = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "workflow": self.workflow,
@@ -302,11 +313,15 @@ class WorkflowReceipt:
             "elapsed_seconds": self.elapsed_seconds,
             "token_usage": self.token_usage.to_json(),
         }
+        if self.workflow == "hunt":
+            value |= {"discovery_evidence_sha256": self.discovery_evidence_sha256, "hunt_evidence_protocol_version": self.hunt_evidence_protocol_version}
+        return value
 
     @classmethod
     def from_json(cls, value: object) -> "WorkflowReceipt":
         data = _object(value, "workflow receipt")
-        _exact_fields(data, {field.name for field in fields(cls)}, "workflow receipt")
+        expected = {field.name for field in fields(cls)} if data.get("workflow") == "hunt" else {field.name for field in fields(cls)} - {"discovery_evidence_sha256", "hunt_evidence_protocol_version"}
+        _exact_fields(data, expected, "workflow receipt")
         return cls(
             schema_version=data["schema_version"], run_id=data["run_id"], workflow=data["workflow"], profile=data["profile"],
             frozen_controls_sha256=data["frozen_controls_sha256"], manifest_sha256=data["manifest_sha256"],
@@ -314,7 +329,7 @@ class WorkflowReceipt:
             snapshot_set_sha256=data["snapshot_set_sha256"], discovery_receipt_sha256=data["discovery_receipt_sha256"],
             discovery_commands_sha256=data["discovery_commands_sha256"], candidate_transfer_sha256=data["candidate_transfer_sha256"],
             discovery_predictions_sha256=data["discovery_predictions_sha256"], verification_receipt_sha256=data["verification_receipt_sha256"], verification_commands_sha256=data["verification_commands_sha256"], verification_predictions_sha256=data["verification_predictions_sha256"], public_predictions_sha256=data["public_predictions_sha256"],
-            phase_protocol_version=data["phase_protocol_version"], top_level_invocation_count=data["top_level_invocation_count"],
+            discovery_evidence_sha256=data.get("discovery_evidence_sha256"), hunt_evidence_protocol_version=data.get("hunt_evidence_protocol_version"), phase_protocol_version=data["phase_protocol_version"], top_level_invocation_count=data["top_level_invocation_count"],
             status=data["status"], elapsed_seconds=data["elapsed_seconds"], token_usage=TokenUsage.from_json(data["token_usage"]),
         )
 
@@ -433,7 +448,7 @@ def run_workflow(
         )
         aggregate_path = output_root / f"{run_id}-workflow-receipt.json"
         _write_json(aggregate_path, receipt.to_json())
-        paths = _artifact_paths(run_id, verification_started=False, completed=False)
+        paths = _artifact_paths(run_id, workflow, verification_started=False, completed=False)
         _write_json(output_root / f"{run_id}-result.json", paths)
         return WorkflowResult(receipt, paths)
 
@@ -457,7 +472,7 @@ def run_workflow(
             status="incomplete",
         )
         _write_json(output_root / f"{run_id}-workflow-receipt.json", receipt.to_json())
-        paths = _artifact_paths(run_id, verification_started=True, completed=False)
+        paths = _artifact_paths(run_id, workflow, verification_started=True, completed=False)
         _write_json(output_root / f"{run_id}-result.json", paths)
         return WorkflowResult(receipt, paths)
     verification_predictions = _load_phase_predictions(manifest, verification_dir / "predictions.jsonl", verification_kind)
@@ -482,7 +497,7 @@ def run_workflow(
         score_file = output_root / f"{run_id}-score.json"
         _write_json(score_file, dict(score))
         score_path = score_file.name
-    paths = _artifact_paths(run_id, verification_started=True, completed=True, score_path=score_path, public_predictions_path=public_predictions_path.name if public_predictions_path else None)
+    paths = _artifact_paths(run_id, workflow, verification_started=True, completed=True, score_path=score_path, public_predictions_path=public_predictions_path.name if public_predictions_path else None)
     _write_json(output_root / f"{run_id}-result.json", paths)
     return WorkflowResult(receipt, paths)
 
@@ -613,6 +628,23 @@ def validate_workflow_receipt(
         raise PhaseRunnerError("workflow receipt candidate hash does not match")
     discovery_kind = "hunt-discovery" if receipt.workflow == "hunt" else "standard"
     discovery_predictions = _load_phase_predictions(manifest, discovery_predictions_path, discovery_kind)
+    if receipt.workflow == "hunt":
+        evidence_path = discovery_dir / "evidence.jsonl"
+        if not evidence_path.is_file() or receipt.discovery_evidence_sha256 is None or sha256_file(evidence_path) != receipt.discovery_evidence_sha256:
+            raise PhaseRunnerError("workflow receipt discovery evidence hash does not match")
+        evidence_rows = _read_jsonl(evidence_path, "discovery evidence")
+        if len(evidence_rows) != len(manifest.tasks):
+            raise PhaseRunnerError("discovery evidence is incomplete")
+        expected_evidence = _jsonl_bytes(
+            reproduce_hunt_evidence(
+                snapshots_root / task.task_id,
+                receipt.profile,
+                parse_hunt_discovery_prediction(discovery_predictions[task.task_id], task.task_id),
+            ).to_json()
+            for task in manifest.tasks
+        )
+        if evidence_path.read_bytes() != expected_evidence:
+            raise PhaseRunnerError("workflow receipt discovery evidence does not reproduce")
     candidates = canonicalize_candidates(manifest, snapshots_root, discovery_predictions, receipt.workflow)
     expected_candidate_bytes = _jsonl_bytes(
         _candidate_row(task.task_id, candidates[task.task_id]) for task in manifest.tasks
@@ -665,7 +697,7 @@ def _workflow_receipt(
     status: str | None = None,
 ) -> WorkflowReceipt:
     return WorkflowReceipt(
-        schema_version=WORKFLOW_RECEIPT_SCHEMA_VERSION, run_id=run_id, workflow=workflow, profile=profile,
+        schema_version=HUNT_WORKFLOW_RECEIPT_SCHEMA_VERSION if workflow == "hunt" else STANDARD_WORKFLOW_RECEIPT_SCHEMA_VERSION, run_id=run_id, workflow=workflow, profile=profile,
         frozen_controls_sha256=controls.sha256(), manifest_sha256=config.manifest_sha256,
         task_order_sha256=config.task_order_sha256, execution_policy_sha256=config.execution_policy_sha256,
         snapshot_set_sha256=snapshot_hash, discovery_receipt_sha256=sha256_file(discovery_path),
@@ -676,6 +708,8 @@ def _workflow_receipt(
         verification_commands_sha256=sha256_file(verification_commands_path) if verification_commands_path else None,
         verification_predictions_sha256=sha256_file(verification_path.parent / "predictions.jsonl") if verification_path else None,
         public_predictions_sha256=sha256_file(public_predictions_path) if public_predictions_path else None,
+        discovery_evidence_sha256=sha256_file(discovery_path.parent / "evidence.jsonl") if workflow == "hunt" else None,
+        hunt_evidence_protocol_version=HUNT_EVIDENCE_PROTOCOL_VERSION if workflow == "hunt" else None,
         phase_protocol_version=controls.phase_protocol_version,
         top_level_invocation_count=task_count * (2 if verification_path else 1),
         status=status or ("completed" if verification_path else "incomplete"), elapsed_seconds=elapsed, token_usage=usage,
@@ -926,7 +960,7 @@ def _candidate_row(task_id: str, candidates: Sequence[CanonicalCandidate]) -> di
 
 
 def _artifact_paths(
-    run_id: str, verification_started: bool, completed: bool, score_path: str | None = None,
+    run_id: str, workflow: str, verification_started: bool, completed: bool, score_path: str | None = None,
     public_predictions_path: str | None = None,
 ) -> dict[str, object]:
     paths: dict[str, object] = {
@@ -937,6 +971,8 @@ def _artifact_paths(
         "candidate_transfer": f"{run_id}-candidates.jsonl",
         "aggregate_receipt": f"{run_id}-workflow-receipt.json",
     }
+    if workflow == "hunt":
+        paths["discovery_evidence"] = f"{run_id}-discovery/evidence.jsonl"
     if verification_started:
         paths |= {
             "verification_predictions": f"{run_id}-verification/predictions.jsonl",

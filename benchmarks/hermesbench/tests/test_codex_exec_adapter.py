@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -69,7 +70,7 @@ class _Runtime:
 def _request() -> AdapterTaskRequest:
     return AdapterTaskRequest(
         task_id="task-001",
-        snapshot_path="/host/snapshot/task-001",
+        snapshot_path=str(Path(__file__).parent),
         language="python",
         allowed_commands=(("python3", "-m", "unittest"),),
         time_limit_seconds=300,
@@ -98,6 +99,8 @@ class CodexExecAdapterTests(unittest.TestCase):
             runtime.final_message = json.dumps(
                 {"schema_version": 1, "task_id": "task-001", "candidates": []}
             )
+        if workflow == "hunt" and runtime.stdout == _stream():
+            runtime.stdout = _stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl")
         managed_auth = auth or {
             "auth_mode": "chatgpt",
             "installation_id": "123e4567-e89b-12d3-a456-426614174000",
@@ -116,6 +119,67 @@ class CodexExecAdapterTests(unittest.TestCase):
             reasoning_effort="high",
             allowed_command_prefixes=allowed_command_prefixes,
         )
+
+    def test_hunt_discovery_requires_the_exact_priority_packet_read(self) -> None:
+        # Omitting the required packet read must make a successful model response fail.
+        runtime = _Runtime(_stream())
+        adapter = self._adapter("hunt", "hunt-balanced", runtime)
+        runtime.stdout = _stream(command="python3 -m unittest")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                adapter(_request(), Path(directory), 60)
+        self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
+
+    def test_hunt_discovery_rejects_mutated_prepared_artifacts(self) -> None:
+        # Changing the prepared packet after container return must invalidate the result.
+        class MutatingRuntime(_Runtime):
+            def execute(self, **kwargs: object) -> ContainerResult:
+                result = super().execute(**kwargs)
+                packet = Path(kwargs["scratch_path"]) / "hermesbench-hunt" / "priority-packet.jsonl"
+                packet.write_bytes(packet.read_bytes() + b" ")
+                return result
+
+        runtime = MutatingRuntime(_stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
+        self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
+
+    def test_hunt_preparation_consumes_whole_task_timeout(self) -> None:
+        # A 17.2 second preparation must leave floor(480 - 17.2) seconds for Docker.
+        runtime = _Runtime(_stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"))
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("benchmarks.hermesbench.adapters.codex_exec.time.monotonic", side_effect=(10.0, 10.0, 27.2, 27.2)):
+                self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 480)
+        self.assertEqual(runtime.calls[0]["timeout_seconds"], 462)
+
+    def test_hunt_preparation_with_less_than_one_second_skips_runtime(self) -> None:
+        # An exhausted preparation budget must stop before Docker execution.
+        runtime = _Runtime(_stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"))
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("benchmarks.hermesbench.adapters.codex_exec.time.monotonic", side_effect=(0.0, 0.0, 479.1, 479.1)):
+                with self.assertRaises(CodexExecError) as caught:
+                    self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 480)
+        self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
+        self.assertEqual(runtime.calls, [])
+
+    def test_standard_and_hunt_verification_do_not_prepare_artifacts(self) -> None:
+        # Only Hunt discovery may call host preparation or change its prompt contract.
+        standard = _Runtime(_stream())
+        verification = _Runtime(
+            _stream(),
+            final_message=json.dumps({"schema_version": 1, "task_id": "task-001", "findings": [], "decisions": []}),
+        )
+        with patch("benchmarks.hermesbench.adapters.codex_exec.prepare_hunt_artifacts", side_effect=AssertionError("must not prepare")):
+            with tempfile.TemporaryDirectory() as directory:
+                standard_scratch = Path(directory) / "standard"
+                verification_scratch = Path(directory) / "verification"
+                standard_scratch.mkdir()
+                verification_scratch.mkdir()
+                self._adapter("standard", "baseline", standard)(_request(), standard_scratch, 60)
+                self._adapter("hunt", "hunt-balanced", verification).for_verification({"task-001": ()})(_request(), verification_scratch, 60)
+        self.assertNotIn("priority-packet.jsonl", standard.calls[0]["command_argv"][-1])
+        self.assertNotIn("priority-packet.jsonl", verification.calls[0]["command_argv"][-1])
 
     def test_global_commands_allow_an_empty_task_local_list_to_reach_runtime(self) -> None:
         runtime = _Runtime(_stream())

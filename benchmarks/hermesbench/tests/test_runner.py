@@ -81,6 +81,68 @@ def raw_response(task_id: str) -> dict[str, object]:
     }
 
 
+def hunt_discovery_response(task_id: str) -> dict[str, object]:
+    return {
+        "prediction": {"schema_version": 1, "task_id": task_id, "candidates": []},
+        "usage": {"input_tokens": 10, "cached_input_tokens": 4, "output_tokens": 2},
+    }
+
+
+def hunt_evidence() -> dict[str, object]:
+    return {
+        "schema_version": 1, "profile": "hunt-balanced", "inventory_sha256": "a" * 64,
+        "inventory_count": 1, "rank_input_sha256": "b" * 64, "frontier_sha256": "c" * 64,
+        "frontier_count": 1, "frontier_pass_count": 1, "priority_packet_sha256": "d" * 64,
+        "priority_packet_count": 1, "candidate_links_sha256": "e" * 64, "candidate_count": 0,
+        "linked_location_count": 0, "coverage_debt_sha256": "f" * 64, "coverage_debt_count": 1,
+        "validated_closure_count": 0,
+    }
+
+
+class HuntEvidenceRunnerTests(unittest.TestCase):
+    """Verifies the Hunt-only persisted evidence channel and task allowlist."""
+
+    def _run(self, response_kind: str, result: ExecutorResult):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        snapshots = root / "snapshots"
+        output = root / "output"
+        snapshots.mkdir()
+        output.mkdir()
+        manifest = manifest_for("task-a", snapshots_root=snapshots)
+        policy = ExecutionPolicy((("python",),))
+        receipt = run_suite(manifest, snapshots, output, "run-001", "hunt" if response_kind.startswith("hunt") else "standard", "hunt-balanced" if response_kind.startswith("hunt") else "baseline", config_for(manifest, policy), policy, lambda *_: result, response_kind)
+        return root, receipt
+
+    def test_hunt_discovery_requires_persists_and_aggregates_evidence(self) -> None:
+        # Removing Hunt evidence must change a successful discovery into a bounded failure.
+        root, receipt = self._run("hunt-discovery", ExecutorResult(hunt_discovery_response("task-a"), (), (), hunt_evidence()))
+        self.assertEqual(receipt.status, "completed")
+        task = root / "output" / "run-001" / "tasks"
+        evidence_files = list(task.glob("*/evidence.json"))
+        self.assertEqual(len(evidence_files), 1)
+        aggregate = (root / "output" / "run-001" / "evidence.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(json.loads(aggregate), hunt_evidence())
+
+    def test_missing_hunt_discovery_evidence_fails_and_cleans_success_artifacts(self) -> None:
+        # Hunt discovery evidence is mandatory and a failure keeps only request plus failure evidence.
+        root, receipt = self._run("hunt-discovery", ExecutorResult(hunt_discovery_response("task-a"), (), ()))
+        self.assertEqual(receipt.status, "failed")
+        task = next((root / "output" / "run-001" / "tasks").iterdir())
+        self.assertEqual({path.name for path in task.iterdir()}, {"request.json", "failure.json"})
+
+    def test_standard_and_hunt_verification_forbid_evidence(self) -> None:
+        # Evidence belongs only to successful Hunt discovery responses.
+        standard_root, standard_receipt = self._run("standard", ExecutorResult(raw_response("task-a"), (), (), hunt_evidence()))
+        verification_response = {"prediction": {"schema_version": 1, "task_id": "task-a", "findings": [], "decisions": []}, "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}}
+        verification_root, verification_receipt = self._run("hunt-verification", ExecutorResult(verification_response, (), (), hunt_evidence()))
+        self.assertEqual(standard_receipt.status, "failed")
+        self.assertEqual(verification_receipt.status, "failed")
+        self.assertFalse((standard_root / "output" / "run-001" / "evidence.jsonl").exists())
+        self.assertFalse((verification_root / "output" / "run-001" / "evidence.jsonl").exists())
+
+
 class SnapshotPreflightTests(unittest.TestCase):
     def test_reparse_point_is_rejected_without_pathlib_junction_support(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

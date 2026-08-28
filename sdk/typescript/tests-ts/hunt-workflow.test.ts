@@ -740,6 +740,7 @@ test("ships the explicit Hunt skill and its complete workflow contract", () => {
   expect(skill).toContain("Do not generate exploits");
   expect(skill).toContain("Standard remains unchanged");
   expect(skill).toContain("Do not run `select-deep-review-input`");
+  expect(skill).toContain("Read the fixed precomputed priority packet exactly once");
   expect(contract).toContain("discovered -> evidence_built -> challenged");
   expect(contract).toContain("static_trace");
   expect(agent).toContain('display_name: "Hunt Security Scan"');
