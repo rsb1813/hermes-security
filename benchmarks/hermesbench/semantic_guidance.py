@@ -794,6 +794,8 @@ def _module_matches(caller_path: str, module: str, target_path: str, language: s
         return target in candidates
     if language == "typescript":
         return target == normalized or target == f"{normalized}/index"
+    if language == "go":
+        return PurePosixPath(target_path).parent.as_posix() == normalized
     return target == normalized
 
 

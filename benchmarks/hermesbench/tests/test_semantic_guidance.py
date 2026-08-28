@@ -263,7 +263,7 @@ class SemanticGuidanceTests(unittest.TestCase):
             },
             "go": {
                 "api.go": "import \"pkg/store\"\nfunc handle(request *http.Request) { store.Run(request.URL.Query().Get(\"q\")) }\n",
-                "pkg/store.go": "func Run(value string) { exec.Command(value) }\n",
+                "pkg/store/impl.go": "func Run(value string) { exec.Command(value) }\n",
             },
             "typescript": {
                 "src/api.ts": "import { run } from './store';\nexport function handle(request: Request) { return run(request.query.q); }\n",
@@ -294,12 +294,12 @@ class SemanticGuidanceTests(unittest.TestCase):
                     "func handle(request *http.Request) { path.Run(request.URL.Query().Get(\"q\")); store.Run(request.URL.Query().Get(\"q\")) }\n"
                 ),
                 "fake/path.go": "func Run(value string) { exec.Command(value) }\n",
-                "pkg/store.go": "func Run(value string) { exec.Command(value) }\n",
+                "pkg/store/impl.go": "func Run(value string) { exec.Command(value) }\n",
             }
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["strength"], "import-linked")
-        self.assertEqual(rows[0]["operation"]["path"], "pkg/store.go")
+        self.assertEqual(rows[0]["operation"]["path"], "pkg/store/impl.go")
 
     def test_import_links_never_cross_language_families(self) -> None:
         fixtures = {
@@ -335,18 +335,28 @@ class SemanticGuidanceTests(unittest.TestCase):
         )
         self.assertFalse(any(row["strength"] == "import-linked" for row in ambiguous))
 
-    def test_go_import_targets_only_exact_same_language_package_files(self) -> None:
+    def test_go_import_targets_only_exact_same_language_package_directory(self) -> None:
         rows = self._rows(
             {
                 "api.go": "import \"pkg/store\"\nfunc handle(request *http.Request) { store.Run(request.URL.Query().Get(\"q\")) }\n",
+                "pkg/store/impl.go": "func Run(value string) { exec.Command(value) }\n",
                 "pkg/store.go": "func Run(value string) { exec.Command(value) }\n",
-                "pkg/store/child.go": "func Run(value string) { exec.Command(value) }\n",
+                "pkg/store/nested/impl.go": "func Run(value string) { exec.Command(value) }\n",
                 "pkg/store.ts": "export function Run(value: string) { return child_process.exec(value); }\n",
             }
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["strength"], "import-linked")
-        self.assertEqual(rows[0]["operation"]["path"], "pkg/store.go")
+        self.assertEqual(rows[0]["operation"]["path"], "pkg/store/impl.go")
+
+        ambiguous = self._rows(
+            {
+                "api.go": "import \"pkg/store\"\nfunc handle(request *http.Request) { store.Run(request.URL.Query().Get(\"q\")) }\n",
+                "pkg/store/first.go": "func Run(value string) { exec.Command(value) }\n",
+                "pkg/store/second.go": "func Run(value string) { exec.Command(value) }\n",
+            }
+        )
+        self.assertFalse(any(row["strength"] == "import-linked" for row in ambiguous))
 
     def test_parent_typescript_relative_module_remains_exact(self) -> None:
         row = self._single_row(
