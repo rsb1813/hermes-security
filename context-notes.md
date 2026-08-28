@@ -335,3 +335,11 @@
 - Task-level review found a public contract mismatch: the first implementation exposed `semantic_guidance_row_count` rather than `semantic_guidance_count`, and its test mirrored the same implementation constant. Fix round 1 corrected the field and added literal v1/v2 parser, field-mixing, unsupported-version, and explicit-mismatch tests.
 - The reviewed focused suite passed 50 tests with four Windows or opt-in skips, followed by successful compileall and diff checks. Scoped re-review found no new Critical or Important issue.
 - One unchanged phase-runner expectation still assumes the old default protocol. That planned cross-task integration remains explicit for the version-aware workflow task and is not silently inferred from evidence rows.
+
+### Task 25 Hunt discovery semantic guidance boundary
+
+- Hunt discovery now requires separate priority-packet and semantic-guidance command events. The prompt treats guidance only as an investigation queue, requires actual source inspection plus control and counterevidence review, and forbids confidence increases from route strength.
+- Standard discovery, Standard verification, and Hunt verification retained their exact pre-change SHA-256 values. Candidate limits, response schemas, command parsing, execution policy, verification, scoring, frontier, and coverage debt were unchanged.
+- The runner exposes only the two fixed semantic read-cardinality codes. Failure tasks retain canonical failure-only publication and reconstructible receipt hashes.
+- Task-level review found that the first test revision checked only `failure.json` for forbidden detail. Fix round 1 added concrete failure-origin sentinels and scans every task-level and run-level public JSON/JSONL artifact for leakage and partial-success markers while preserving legitimate request fields.
+- The reviewed adapter and runner suite passed 72 tests, followed by successful compileall and diff checks. Scoped re-review found no new Critical or Important issue.
