@@ -135,6 +135,20 @@
   - [x] Revalidate the completed two-invocation receipt, separated token usage, candidate decisions, public projection, and score.
   - [x] Confirm the command-compliance change restores workflow completion without claiming an accuracy gain.
   - [x] Audit all Canary snapshots, retained artifacts, public projections, and container cleanup after the run.
+- [x] Diagnose the completed protocol-v3 accuracy miss without publishing private paths, labels, or raw findings.
+- [x] Compare the two-call Protocol-v4 design with multi-lane and map-reduce alternatives.
+- [x] Receive in-chat approval for the two-call Protocol-v4 architecture.
+- [x] Write and self-review the nested-output guidance Protocol-v4 design specification.
+- [ ] Receive approval for the written Protocol-v4 design specification.
+- [ ] Write the file-by-file Protocol-v4 implementation plan with RED and GREEN checkpoints.
+- [ ] Implement schema-3 nested-output guidance with vulnerable, guarded, and decoy tests first.
+- [ ] Implement deterministic strong-edge and family/component row allocation with budget tests first.
+- [ ] Implement the v4 blind verifier projection and prompt golden test first.
+- [ ] Preserve exact protocol-v1 through protocol-v3 artifact, prompt, and receipt reconstruction.
+- [ ] Pass the label-independent retained-snapshot artifact build and separate private coverage gate.
+- [ ] Complete independent review and all full no-model verification gates.
+- [ ] Run exactly one fixed paid Protocol-v4 Canary diagnostic with no automatic retry.
+- [ ] Report localized accuracy, separated phase cost, integrity, and public-boundary evidence.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
 

@@ -2,6 +2,12 @@
 
 ## 2026-08-28
 
+- The latest completed two-invocation diagnostic restored workflow completion but did not improve target-localized recall. Independent verification accepted unrelated candidates, so completion and specificity are not being treated as discovery improvement.
+- Label-independent inspection found the relevant source in the immutable inventory and frontier but not in priority or semantic guidance. The existing extractor saw source-like syntax but no operation anchor because template bodies are masked and operation extraction is call-anchor based. Raising only the edge cap would not address this failure.
+- The user approved a two-call Protocol-v4 design over three-lane and map-reduce alternatives. It combines a JavaScript/TypeScript nested-output-context hint, fair strong-edge and family/component row allocation, and a blind verifier projection.
+- Protocol v4 will retain rich discovery candidates for host attestation while giving verification only candidate identity and exact locations. Discovery confidence, family, pass, hypothesis, evidence, counterevidence, and expected control must not enter the v4 verifier prompt.
+- Semantic artifact creation on the retained diagnostic snapshot must remain oracle-independent. A separate private host-only evaluator may compare the completed artifact to held-out locations, but oracle data cannot select or alter guidance rows.
+- The next paid action is exactly one same-variable Canary rerun after synthetic, compatibility, retained-receipt, offline coverage, full-suite, and independent-review gates pass. No automatic retry is authorized.
 - Hunt discovery now prepares a host-owned deterministic inventory, rank input, full frontier, and bounded priority packet before the container starts. It records pre-execution identities and hashes, requires the exact packet read command, and persists only path-free evidence.
 - Hunt workflow receipts use schema version 3 with a discovery-evidence aggregate hash and evidence protocol version 1. Standard workflow receipts retain their exact schema version 2 field set.
 - Receipt validation reproduces Hunt discovery evidence from the audited snapshot and prediction, so changing both a persisted evidence artifact and its receipt hash cannot establish acceptance.

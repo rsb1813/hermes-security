@@ -97,3 +97,15 @@ Verification: focused RED/GREEN tests prove that sensitive exception text cannot
 - Change one material variable per paid rerun and keep model, effort, image, policy, timeout, manifest, and snapshot hashes fixed.
 
 Verification: RED/GREEN tests prove that more than five internal candidates survive discovery, every packet is bounded and source-local, only five accepted findings can reach scoring, missing or mismatched Hunt evidence fails closed, and the fixed diagnostic improves recall before broader Canary or Mini promotion.
+
+## Current Protocol-v4 accuracy checkpoint
+
+- Treat the completed protocol-v3 diagnostic as evidence that workflow reliability is restored but target-localized recall is still insufficient.
+- Add a bounded JavaScript/TypeScript `nested-output-context` hint because the current call-anchor graph cannot represent active template-literal output contexts.
+- Allocate strong edges and semantic rows deterministically across declarations, operation families, and exact frontier components without raising current profile caps.
+- Preserve the rich discovery candidate transfer for host attestation, but give the protocol-v4 verifier only candidate identity and exact locations.
+- Keep the public CLI, SDK, Standard workflow, scorer, model-call count, runtime policy, candidate caps, and historical protocol-v1 through protocol-v3 reconstruction unchanged.
+- Gate implementation with synthetic vulnerable, guarded, and decoy fixtures; exact legacy golden bytes; a label-independent retained-snapshot build; and a separate private coverage comparison.
+- Make exactly one same-variable paid Canary rerun after all no-model and review gates pass. Do not retry automatically.
+
+Verification: protocol-v4 semantic guidance contains the reviewed output-context pattern without oracle input, guarded and decoy cases stay negative, the verifier prompt contains no discovery conclusion fields, legacy receipts revalidate exactly, the full no-model suites pass, and the single paid result is reported with localized accuracy and separated cost evidence.
