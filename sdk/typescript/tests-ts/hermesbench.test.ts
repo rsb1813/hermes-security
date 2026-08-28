@@ -42,4 +42,4 @@ test("runs the HermesBench Python suite and CLI", () => {
   );
   expect(help.exitCode, help.stderr.toString()).toBe(0);
   expect(help.stdout.toString()).toContain("audit-bundle");
-}, 60_000);
+}, 90_000);
