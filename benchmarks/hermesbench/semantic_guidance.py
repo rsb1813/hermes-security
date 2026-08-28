@@ -228,7 +228,8 @@ def _normalize_frontier_contexts(
         ordered = tuple(value for value in HUNT_SEARCH_PASS_ORDER if value in raw_passes)
         if path in by_path:
             if by_path[path] != ordered or (
-                isinstance(raw_component, str)
+                guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION
+                and isinstance(raw_component, str)
                 and path in components_by_path
                 and components_by_path[path] != raw_component
             ):
@@ -236,7 +237,7 @@ def _normalize_frontier_contexts(
             continue
         paths.append(path)
         by_path[path] = ordered
-        if isinstance(raw_component, str):
+        if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION and isinstance(raw_component, str):
             components_by_path[path] = raw_component
     return tuple(paths), by_path, components_by_path
 

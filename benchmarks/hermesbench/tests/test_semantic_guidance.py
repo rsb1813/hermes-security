@@ -823,6 +823,35 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(result.scanned_file_count, 1)
         self.assertEqual(result.row_count, 1)
 
+    def test_legacy_schemas_ignore_component_conflicts_for_exact_duplicate_frontier_paths(self) -> None:
+        snapshot = self._root / "duplicate-components"
+        snapshot.mkdir()
+        (snapshot / "app.py").write_text(
+            "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
+            encoding="utf-8",
+        )
+        for guidance_schema_version in (1, 2):
+            with self.subTest(guidance_schema_version=guidance_schema_version):
+                result = build_semantic_guidance(
+                    snapshot,
+                    (
+                        ("app.py", "component-first", ("forward",)),
+                        ("app.py", "component-conflict", ("forward",)),
+                    ),
+                    "hunt-balanced",
+                    guidance_schema_version=guidance_schema_version,
+                )
+                row = json.loads(result.canonical_bytes)
+                self.assertEqual(row["schema_version"], guidance_schema_version)
+                self.assertNotIn("component", row)
+                if guidance_schema_version == 1:
+                    self.assertEqual(
+                        result.canonical_bytes,
+                        b'{"controls":[],"hint_id":"f51a8b5b354cdafd","operation":{"line":3,"path":"app.py","symbol":"subprocess.run"},"operation_family":"command","proof_status":"investigation_only","reason_codes":["source_anchor","operation_anchor","same_declaration"],"schema_version":1,"source":{"line":2,"path":"app.py","symbol":"handle"},"strength":"direct","trace":[{"line":2,"path":"app.py","symbol":"handle"}]}\n',
+                    )
+                else:
+                    self.assertEqual(row["eligible_search_passes"], ["forward"])
+
     def test_equivalent_frontier_paths_are_canonicalized_before_deduplication(self) -> None:
         snapshot = self._root / "canonical"
         snapshot.mkdir()
