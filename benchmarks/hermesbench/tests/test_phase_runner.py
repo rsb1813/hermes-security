@@ -251,7 +251,7 @@ class CandidateCanonicalizationTests(unittest.TestCase):
 
 class WorkflowTests(unittest.TestCase):
     def test_hunt_schema_three_receipt_accepts_each_supported_evidence_protocol(self) -> None:
-        for version in (1, 2):
+        for version in (1, 2, 3):
             with self.subTest(version=version):
                 self.assertEqual(
                     WorkflowReceipt.from_json(
@@ -261,7 +261,7 @@ class WorkflowTests(unittest.TestCase):
                 )
 
     def test_hunt_schema_three_receipt_rejects_unsupported_evidence_protocol(self) -> None:
-        for version in (0, 3):
+        for version in (0, 4):
             with self.subTest(version=version):
                 with self.assertRaisesRegex(PhaseRunnerError, "protocol"):
                     WorkflowReceipt.from_json(_hunt_receipt(version))
@@ -292,7 +292,7 @@ class WorkflowTests(unittest.TestCase):
                     )
                 return verification
 
-            for version in (1, 2):
+            for version in (1, 2, 3):
                 with self.subTest(version=version):
                     result = run_workflow(
                         manifest,
@@ -364,7 +364,7 @@ class WorkflowTests(unittest.TestCase):
                 return verification
 
             original_evidence: dict[int, bytes] = {}
-            for version in (1, 2):
+            for version in (1, 2, 3):
                 run_id = f"mixed-{version}"
                 run_workflow(
                     manifest,
@@ -478,7 +478,7 @@ class WorkflowTests(unittest.TestCase):
             receipt_path = outputs / "evidence-workflow-receipt.json"
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             self.assertEqual(receipt["schema_version"], 3)
-            self.assertEqual(receipt["hunt_evidence_protocol_version"], 2)
+            self.assertEqual(receipt["hunt_evidence_protocol_version"], 3)
             self.assertIn("discovery_evidence_sha256", receipt)
             self.assertEqual(validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),))).status, "completed")
             evidence_path = outputs / "evidence-discovery" / "evidence.jsonl"
@@ -674,7 +674,7 @@ class WorkflowTests(unittest.TestCase):
                     failure_code="final_response_invalid",
                 )
 
-            for version in (1, 2):
+            for version in (1, 2, 3):
                 with self.subTest(version=version):
                     result = run_workflow(
                         manifest,

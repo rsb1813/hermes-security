@@ -14,7 +14,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from benchmarks.hermesbench.semantic_guidance import build_semantic_guidance
+from benchmarks.hermesbench.hunt_protocol import HUNT_SEARCH_PASSES
+from benchmarks.hermesbench.semantic_guidance import (
+    LEGACY_SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+    SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+    build_semantic_guidance,
+)
 
 
 PLAN_DIRECTORY = "hermesbench-hunt"
@@ -25,8 +30,10 @@ FRONTIER_RECEIPT_NAME = "frontier-receipt.json"
 PRIORITY_PACKET_NAME = "priority-packet.jsonl"
 SEMANTIC_GUIDANCE_NAME = "semantic-guidance.jsonl"
 LEGACY_HUNT_EVIDENCE_PROTOCOL_VERSION = 1
-HUNT_EVIDENCE_PROTOCOL_VERSION = 2
-SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({1, 2})
+SEMANTIC_GUIDANCE_HUNT_EVIDENCE_PROTOCOL_VERSION = 2
+HUNT_EVIDENCE_PROTOCOL_VERSION = 3
+SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({1, 2, 3})
+_SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({2, 3})
 MAX_INVENTORY_ROWS = 100_000
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
 MAX_RANK_INPUT_BYTES = 32 * 1024 * 1024
@@ -54,7 +61,8 @@ HUNT_EVIDENCE_FIELDS_V2 = HUNT_EVIDENCE_FIELDS_V1 | frozenset({
     "semantic_guidance_scanned_file_count",
     "semantic_guidance_skipped_file_count",
 })
-HUNT_EVIDENCE_FIELDS = HUNT_EVIDENCE_FIELDS_V2
+HUNT_EVIDENCE_FIELDS_V3 = HUNT_EVIDENCE_FIELDS_V2
+HUNT_EVIDENCE_FIELDS = HUNT_EVIDENCE_FIELDS_V3
 HUNT_EVIDENCE_FAILURE_CODES = frozenset({
     "hunt_evidence_packet_missing",
     "hunt_evidence_packet_duplicate",
@@ -159,7 +167,7 @@ class HuntEvidence:
             "coverage_debt_count": self.coverage_debt_count,
             "validated_closure_count": 0,
         }
-        if self.protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+        if _uses_semantic_guidance(self.protocol_version):
             value |= {
                 "semantic_guidance_sha256": self.semantic_guidance_sha256,
                 "semantic_guidance_count": self.semantic_guidance_count,
@@ -195,7 +203,7 @@ def parse_hunt_evidence(
         "inventory_sha256", "rank_input_sha256", "frontier_sha256", "priority_packet_sha256",
         "candidate_links_sha256", "coverage_debt_sha256",
     )
-    if version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+    if _uses_semantic_guidance(version):
         hashes += ("semantic_guidance_sha256",)
     for field in hashes:
         if not isinstance(value[field], str) or _SHA256.fullmatch(value[field]) is None:
@@ -204,7 +212,7 @@ def parse_hunt_evidence(
         "inventory_count", "frontier_count", "frontier_pass_count", "priority_packet_count",
         "candidate_count", "linked_location_count", "coverage_debt_count", "validated_closure_count",
     )
-    if version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+    if _uses_semantic_guidance(version):
         counts += (
             "semantic_guidance_count",
             "semantic_guidance_edge_count",
@@ -253,6 +261,13 @@ def prepare_hunt_artifacts(
     frontier_rows = _jsonl_rows(frontier, "frontier", MAX_FRONTIER_BYTES, MAX_FRONTIER_ROWS)
     rank_by_path = _validate_rank_rows(rank_rows, inventory_paths)
     _validate_frontier_rows(frontier_rows, set(rank_by_path))
+    frontier_passes = tuple(
+        (
+            str(row["path"]),
+            tuple(str(value) for value in row["passes"]),
+        )
+        for row in frontier_rows
+    )
     priority_rows = _priority_rows(frontier_rows, rank_by_path, PRIORITY_ROW_LIMITS[profile])
     _write_jsonl(priority_packet, priority_rows)
     artifacts = {
@@ -264,8 +279,13 @@ def prepare_hunt_artifacts(
     }
     semantic_guidance = None
     semantic_counts = (None, None, None, None)
-    if evidence_protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
-        guidance = build_semantic_guidance(snapshot, tuple(str(row["path"]) for row in frontier_rows), profile)
+    if _uses_semantic_guidance(evidence_protocol_version):
+        guidance = build_semantic_guidance(
+            snapshot,
+            frontier_passes,
+            profile,
+            guidance_schema_version=_semantic_guidance_schema_version(evidence_protocol_version),
+        )
         semantic_guidance_path.write_bytes(guidance.canonical_bytes)
         semantic_guidance = _record(semantic_guidance_path, "semantic guidance")
         artifacts["semantic_guidance"] = semantic_guidance
@@ -293,7 +313,7 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
         raise HuntEvidenceError("priority packet was not read", category="hunt_evidence_packet_missing")
     if observed_argv.count(_REQUIRED_PACKET_READ) != 1:
         raise HuntEvidenceError("priority packet was read more than once", category="hunt_evidence_packet_duplicate")
-    if prepared.evidence_protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+    if _uses_semantic_guidance(prepared.evidence_protocol_version):
         if observed_argv.count(_REQUIRED_SEMANTIC_READ) == 0:
             raise HuntEvidenceError("semantic guidance was not read", category="hunt_semantic_guidance_missing")
         if observed_argv.count(_REQUIRED_SEMANTIC_READ) != 1:
@@ -309,7 +329,7 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
         rank_by_path = _validate_rank_rows(rank_rows, inventory_paths)
         frontier_by_path = _validate_frontier_rows(frontier_rows, set(rank_by_path))
         _validate_frontier_receipt(_read_pinned_bytes(prepared.frontier_receipt, "frontier receipt", MAX_FRONTIER_RECEIPT_BYTES), prepared.profile, prepared.rank_input.sha256, len(frontier_rows))
-        if prepared.evidence_protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+        if _uses_semantic_guidance(prepared.evidence_protocol_version):
             if prepared.semantic_guidance is None or any(value is None for value in (
                 prepared.semantic_guidance_row_count,
                 prepared.semantic_guidance_edge_count,
@@ -370,13 +390,25 @@ def reproduce_hunt_evidence(
             evidence_protocol_version=evidence_protocol_version,
         )
         observed = (_REQUIRED_PACKET_READ,)
-        if evidence_protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+        if _uses_semantic_guidance(evidence_protocol_version):
             observed += (_REQUIRED_SEMANTIC_READ,)
         return attest_hunt_discovery(prepared, prediction, observed)
 
 
 def _supported_protocol_version(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value in SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS
+
+
+def _uses_semantic_guidance(version: int) -> bool:
+    return version in _SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS
+
+
+def _semantic_guidance_schema_version(version: int) -> int:
+    if version == SEMANTIC_GUIDANCE_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return LEGACY_SEMANTIC_GUIDANCE_SCHEMA_VERSION
+    if version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return SEMANTIC_GUIDANCE_SCHEMA_VERSION
+    raise HuntEvidenceError("Hunt evidence protocol has no semantic guidance")
 
 
 def _run_helper(script_name: str, arguments: tuple[str, ...]) -> None:
@@ -568,7 +600,7 @@ def _validate_frontier_rows(rows: list[dict[str, object]], rank_paths: set[str])
         if set(row) != expected or not _relative_path(row.get("path")) or not isinstance(row["work_id"], str) or not isinstance(row["component"], str) or isinstance(row["risk_score"], bool) or not isinstance(row["risk_score"], int) or not isinstance(row["signals"], list) or not isinstance(row["passes"], list) or row["priority"] != priority:
             raise HuntEvidenceError("frontier row is invalid")
         path = str(row["path"])
-        if path in result or row["work_id"] in work_ids or path not in rank_paths or not row["passes"] or any(not isinstance(item, str) for item in row["passes"]):
+        if path in result or row["work_id"] in work_ids or path not in rank_paths or not row["passes"] or any(not isinstance(item, str) or not item or item not in HUNT_SEARCH_PASSES for item in row["passes"]) or len(row["passes"]) != len(set(row["passes"])):
             raise HuntEvidenceError("frontier paths are invalid")
         result[path] = row
         work_ids.add(row["work_id"])

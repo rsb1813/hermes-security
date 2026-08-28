@@ -88,15 +88,24 @@ def hunt_discovery_response(task_id: str) -> dict[str, object]:
     }
 
 
-def hunt_evidence() -> dict[str, object]:
-    return {
-        "schema_version": 1, "profile": "hunt-balanced", "inventory_sha256": "a" * 64,
+def hunt_evidence(version: int = 1) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "schema_version": version, "profile": "hunt-balanced", "inventory_sha256": "a" * 64,
         "inventory_count": 1, "rank_input_sha256": "b" * 64, "frontier_sha256": "c" * 64,
         "frontier_count": 1, "frontier_pass_count": 1, "priority_packet_sha256": "d" * 64,
         "priority_packet_count": 1, "candidate_links_sha256": "e" * 64, "candidate_count": 0,
         "linked_location_count": 0, "coverage_debt_sha256": "f" * 64, "coverage_debt_count": 1,
         "validated_closure_count": 0,
     }
+    if version in (2, 3):
+        evidence |= {
+            "semantic_guidance_sha256": "0" * 64,
+            "semantic_guidance_count": 1,
+            "semantic_guidance_edge_count": 1,
+            "semantic_guidance_scanned_file_count": 1,
+            "semantic_guidance_skipped_file_count": 0,
+        }
+    return evidence
 
 
 class HuntEvidenceRunnerTests(unittest.TestCase):
@@ -147,20 +156,27 @@ class HuntEvidenceRunnerTests(unittest.TestCase):
         self.assertEqual(json.loads(aggregate), hunt_evidence())
 
     def test_hunt_discovery_uses_the_selected_evidence_protocol_for_strict_parsing(self) -> None:
-        matching_root, matching_receipt = self._run(
-            "hunt-discovery",
-            ExecutorResult(hunt_discovery_response("task-a"), (), (), hunt_evidence()),
-            1,
-        )
-        mismatched_root, mismatched_receipt = self._run(
-            "hunt-discovery",
-            ExecutorResult(hunt_discovery_response("task-a"), (), (), hunt_evidence()),
-            2,
-        )
-        self.assertEqual(matching_receipt.status, "completed")
-        self.assertEqual(mismatched_receipt.status, "failed")
-        self.assertTrue((matching_root / "output" / "run-001" / "evidence.jsonl").is_file())
-        self.assertEqual((mismatched_root / "output" / "run-001" / "evidence.jsonl").read_bytes(), b"")
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                matching_root, matching_receipt = self._run(
+                    "hunt-discovery",
+                    ExecutorResult(hunt_discovery_response("task-a"), (), (), hunt_evidence(version)),
+                    version,
+                )
+                self.assertEqual(matching_receipt.status, "completed")
+                self.assertTrue((matching_root / "output" / "run-001" / "evidence.jsonl").is_file())
+        for row_version in (1, 2, 3):
+            for selected_version in (1, 2, 3):
+                if row_version == selected_version:
+                    continue
+                with self.subTest(row_version=row_version, selected_version=selected_version):
+                    mismatched_root, mismatched_receipt = self._run(
+                        "hunt-discovery",
+                        ExecutorResult(hunt_discovery_response("task-a"), (), (), hunt_evidence(row_version)),
+                        selected_version,
+                    )
+                    self.assertEqual(mismatched_receipt.status, "failed")
+                    self.assertEqual((mismatched_root / "output" / "run-001" / "evidence.jsonl").read_bytes(), b"")
 
     def test_missing_hunt_discovery_evidence_fails_and_cleans_success_artifacts(self) -> None:
         # Hunt discovery evidence is mandatory and a failure keeps only request plus failure evidence.
