@@ -349,6 +349,39 @@ class SemanticGuidanceTests(unittest.TestCase):
         nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
         self.assertEqual(len(nested), 1)
 
+    def test_nested_output_lexical_goal_tracks_class_body_kinds(self) -> None:
+        regex = {
+            "method": "export function render(request) { class C { method() {} } /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "extends_static": "export function render(request) { class C extends Base { static {} method() {} } /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+        }
+        division = "export function render(request) { const value = (class C extends Base { static {} method() {} } / 2); return `<style>${request.q}</style>`; }\n"
+        for name, source in regex.items():
+            with self.subTest(kind="regex", name=name):
+                result = self._build(f"nested-goal-class-{name}", {"src/render.ts": source}, guidance_schema_version=3)
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(nested, [])
+        result = self._build("nested-goal-class-division", {"src/render.ts": division}, guidance_schema_version=3)
+        nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+        self.assertEqual(len(nested), 1)
+
+    def test_nested_output_depth_budget_counts_nested_template_levels(self) -> None:
+        fixtures = {}
+        for depth in (9, 16, 17):
+            nested_template = "'safe'"
+            for _ in range(depth):
+                nested_template = "`${" + nested_template + "}`"
+            source = (
+                "export function render(request) { const decoy = `${"
+                + nested_template
+                + "}`; return `<style>${request.q}</style>`; }\n"
+            )
+            fixtures[depth] = source
+        for depth, source in fixtures.items():
+            with self.subTest(depth=depth):
+                result = self._build(f"nested-depth-level-{depth}", {"src/render.ts": source}, guidance_schema_version=3)
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), 0 if depth == 17 else 1)
+
     def test_nested_output_depth_budget_bounds_declaration_template_skipping(self) -> None:
         nested_template = "request.q"
         for _ in range(600):

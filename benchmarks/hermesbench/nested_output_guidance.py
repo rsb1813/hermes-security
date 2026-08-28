@@ -80,8 +80,10 @@ class _LexicalGoal:
     statement_start: bool = True
     pending_control_header: bool = False
     pending_function_header: bool = False
+    pending_class_kind: str | None = None
     control_parenthesis_depth: int = 0
     function_parenthesis_depth: int = 0
+    class_member_parenthesis_depth: int = 0
     block_expected: bool = False
     brace_kinds: list[str] = field(default_factory=list)
 
@@ -97,6 +99,9 @@ class _LexicalGoal:
         self.expression_start = True
         self.statement_start = True
 
+    def _inside_class_body(self) -> bool:
+        return bool(self.brace_kinds and self.brace_kinds[-1] in {"class_declaration", "class_expression"})
+
     def consume(self, token: _Token) -> None:
         if token.kind != "space" and token.value != "{":
             self.block_expected = False
@@ -107,6 +112,14 @@ class _LexicalGoal:
             elif token.value == "function":
                 self.pending_function_header = True
                 self._expect_expression()
+            elif token.value == "class":
+                self.pending_class_kind = "class_declaration" if self.statement_start else "class_expression"
+                self._expect_expression()
+            elif token.value == "static" and self._inside_class_body():
+                self.block_expected = True
+                self._expect_expression()
+            elif token.value in {"default", "export"}:
+                self._start_statement()
             elif token.value in {"do", "else", "finally", "try"}:
                 self.block_expected = True
                 self._expect_expression()
@@ -131,6 +144,10 @@ class _LexicalGoal:
                 self.function_parenthesis_depth = 1
             elif self.function_parenthesis_depth:
                 self.function_parenthesis_depth += 1
+            elif self.class_member_parenthesis_depth:
+                self.class_member_parenthesis_depth += 1
+            elif self._inside_class_body():
+                self.class_member_parenthesis_depth = 1
             self._expect_expression()
         elif token.value == ")":
             if self.control_parenthesis_depth:
@@ -145,18 +162,28 @@ class _LexicalGoal:
                     self.block_expected = True
                     self._start_statement()
                     return
+            elif self.class_member_parenthesis_depth:
+                self.class_member_parenthesis_depth -= 1
+                if self.class_member_parenthesis_depth == 0:
+                    self.block_expected = True
+                    self._start_statement()
+                    return
             self._end_operand()
         elif token.value == "{":
-            kind = "block" if self.block_expected or self.statement_start else "object"
+            if self.pending_class_kind is not None:
+                kind = self.pending_class_kind
+                self.pending_class_kind = None
+            else:
+                kind = "block" if self.block_expected or self.statement_start else "object"
             self.brace_kinds.append(kind)
             self.block_expected = False
-            if kind == "block":
+            if kind in {"block", "class_declaration", "class_expression"}:
                 self._start_statement()
             else:
                 self._expect_expression()
         elif token.value == "}":
             kind = self.brace_kinds.pop() if self.brace_kinds else "object"
-            if kind == "block":
+            if kind in {"block", "class_declaration"}:
                 self._start_statement()
             else:
                 self._end_operand()
@@ -826,7 +853,7 @@ def _skip_template_literal(source: str, opening: int, depth: int = 0) -> int | N
         if source[index] == "`":
             return index + 1
         if source.startswith("${", index):
-            end = _skip_template_expression(source, index + 2, depth + 1)
+            end = _skip_template_expression(source, index + 2, depth)
             if end is None:
                 return None
             index = end + 1
