@@ -303,3 +303,11 @@
 - Relative to v11, v12c reduced elapsed time by about 15 percent and output tokens by about 20 percent while uncached input stayed effectively flat, but it did not improve discovery accuracy. Relative to v10, it consumed substantially more time and tokens without score gain.
 - The workflow receipt independently revalidated as completed with two top-level invocations and Hunt evidence protocol version 1. All eight Canary snapshots retained zero audit violations and exact manifest hashes; 23 retained files contained no bounded authentication value or host path, no reparse entry existed, and no container remained.
 - Ruling: the artifact gate improves reproducibility and makes verifier behavior observable, but prioritization plus a single free-form model review is insufficient. The next material strategy must add deterministic source-to-sensitive-operation semantic guidance while preserving full frontier eligibility and the same two-call ceiling.
+
+### Task 21 semantic-guidance design approval
+
+- The user approved a deterministic source-to-sensitive-operation guidance layer after v12c showed no discovery-quality gain.
+- Regex-only signal expansion was rejected because it cannot connect wrappers or cross-file calls. Language-specific AST frontends were deferred because the repository has no shared parser stack and the current benchmark spans Python, Go, and TypeScript.
+- The selected design adds a bounded lexical graph as investigation-only scratch guidance, preserves the two-call workflow, and leaves candidate acceptance, frontier eligibility, coverage debt, and verification rules unchanged.
+- New runs use Hunt evidence protocol version 2, while version-1 preparation and reconstruction remain available so retained receipts continue to revalidate.
+- The first paid protocol-v2 run must hold every benchmark variable constant except semantic guidance. Mini remains gated on a positive Canary discovery signal.
