@@ -246,6 +246,42 @@ class SemanticGuidanceTests(unittest.TestCase):
                 nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
                 self.assertEqual(len(nested), 1)
 
+    def test_nested_output_does_not_parse_policy_fields_inside_strings_or_comments(self) -> None:
+        fixtures = {
+            "string": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { note: \"allowedTags: ['safe']\" })}</script>`; }\n",
+            "comment": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { /* allowedTags: ['safe'] */ note: 'safe' })}</script>`; }\n",
+        }
+        for name, source in fixtures.items():
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-policy-lexical-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), 1)
+
+    def test_nested_output_keeps_templates_after_division_expressions(self) -> None:
+        fixtures = {
+            "statement": (
+                "export function render(request, total) { const n = total / 2; return `<style>${request.q}</style>`; }\n",
+                1,
+            ),
+            "interpolation": (
+                "export function render(request) { return `<style>${request.q / 2}${request.q}</style>`; }\n",
+                2,
+            ),
+        }
+        for name, (source, expected) in fixtures.items():
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-division-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), expected)
+
     def test_nested_output_lexer_ignores_regex_decoys_and_keeps_later_interpolation(self) -> None:
         decoy = "export function render(request) { const pattern = /`<script>${request.query.q}</script>`/; return 'safe'; }\n"
         actual = "export function render(request) { return `<script>${/}/.test('}') ? `${'safe'}` : 'safe'}${request.query.q}</script>`; }\n"

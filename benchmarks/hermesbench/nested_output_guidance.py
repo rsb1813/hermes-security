@@ -402,10 +402,10 @@ def _policy_excludes_context(source: str, expression: str, context: str, raw_bef
     call = re.fullmatch(rf"{re.escape(imported.group(1))}\s*\([^,]+,\s*\{{(.+)\}}\s*\)", expression.strip(), re.DOTALL)
     if call is None:
         return False
-    tags = re.search(r"\ballowedTags\s*:\s*\[([^\]]*)\]", call.group(1), re.DOTALL)
-    if tags is None:
+    policy = _top_level_object_fields(call.group(1))
+    if policy is None:
         return False
-    allowed_tags = _literal_policy_values(tags.group(1))
+    allowed_tags = _literal_array_values(policy.get("allowedTags"))
     if allowed_tags is None:
         return False
     tag = _static_tag(raw_before)
@@ -414,11 +414,108 @@ def _policy_excludes_context(source: str, expression: str, context: str, raw_bef
     if context in {"script", "style"}:
         return tag not in allowed_tags
     attribute = _static_attribute(raw_before)
-    attributes = re.search(rf"\ballowedAttributes\s*:\s*\{{\s*['\"]?{re.escape(tag)}['\"]?\s*:\s*\[([^\]]*)\]", call.group(1), re.DOTALL)
-    if attribute is None or attributes is None:
+    allowed_attributes = _object_field_array(policy.get("allowedAttributes"), tag)
+    if attribute is None or allowed_attributes is None:
         return False
-    allowed_attributes = _literal_policy_values(attributes.group(1))
-    return allowed_attributes is not None and attribute not in allowed_attributes
+    return attribute not in allowed_attributes
+
+
+def _top_level_object_fields(raw: str) -> dict[str, str] | None:
+    fields: dict[str, str] = {}
+    index = 0
+    while True:
+        index = _skip_space_and_comments(raw, index)
+        if index >= len(raw):
+            return fields
+        key_match = re.match(rf"{_IDENTIFIER}", raw[index:])
+        if key_match is None:
+            return None
+        key = key_match.group()
+        index += len(key)
+        index = _skip_space_and_comments(raw, index)
+        if index >= len(raw) or raw[index] != ":":
+            return None
+        value_start = index = _skip_space_and_comments(raw, index + 1)
+        value_end = _top_level_value_end(raw, index)
+        if value_end is None:
+            return None
+        if key in fields:
+            return None
+        fields[key] = raw[value_start:value_end].strip()
+        index = _skip_space_and_comments(raw, value_end)
+        if index >= len(raw):
+            return fields
+        if raw[index] != ",":
+            return None
+        index += 1
+
+
+def _top_level_value_end(raw: str, start: int) -> int | None:
+    index = start
+    depth = 0
+    while index < len(raw):
+        if raw.startswith("//", index):
+            newline = raw.find("\n", index + 2)
+            index = len(raw) if newline < 0 else newline + 1
+            continue
+        if raw.startswith("/*", index):
+            closing = raw.find("*/", index + 2)
+            if closing < 0:
+                return None
+            index = closing + 2
+            continue
+        if raw[index] in {"'", '"'}:
+            index = _skip_quoted(raw, index)
+            continue
+        if raw[index] == "`":
+            index = _skip_template_literal(raw, index)
+            continue
+        if raw[index] in "[{(":
+            depth += 1
+        elif raw[index] in "]})":
+            if depth == 0:
+                return None
+            depth -= 1
+        elif raw[index] == "," and depth == 0:
+            return index
+        index += 1
+    return len(raw) if depth == 0 else None
+
+
+def _skip_space_and_comments(raw: str, index: int) -> int:
+    while index < len(raw):
+        if raw[index].isspace():
+            index += 1
+            continue
+        if raw.startswith("//", index):
+            newline = raw.find("\n", index + 2)
+            index = len(raw) if newline < 0 else newline + 1
+            continue
+        if raw.startswith("/*", index):
+            closing = raw.find("*/", index + 2)
+            if closing < 0:
+                return len(raw)
+            index = closing + 2
+            continue
+        return index
+    return index
+
+
+def _literal_array_values(value: str | None) -> frozenset[str] | None:
+    if value is None:
+        return None
+    array = re.fullmatch(r"\[([\s\S]*)\]", value)
+    return _literal_policy_values(array.group(1)) if array else None
+
+
+def _object_field_array(value: str | None, key: str) -> frozenset[str] | None:
+    if value is None:
+        return None
+    object_match = re.fullmatch(r"\{([\s\S]*)\}", value)
+    if object_match is None:
+        return None
+    fields = _top_level_object_fields(object_match.group(1))
+    return _literal_array_values(fields.get(key)) if fields is not None else None
 
 
 def _literal_policy_values(raw: str) -> frozenset[str] | None:
@@ -568,8 +665,20 @@ def _skip_quoted(source: str, opening: int) -> int:
 
 
 def _looks_like_regex(source: str, index: int) -> bool:
-    previous = source[index - 1] if index else "="
-    return previous.isspace() or previous in "=(:,[!&|?{};"
+    previous = index - 1
+    while previous >= 0 and source[previous].isspace():
+        previous -= 1
+    if previous < 0:
+        return True
+    character = source[previous]
+    if character.isidentifier():
+        start = previous
+        while start > 0 and source[start - 1].isidentifier():
+            start -= 1
+        return source[start:previous + 1] in {"case", "delete", "do", "else", "return", "throw", "typeof", "void", "yield"}
+    if character.isdigit() or character in ")]}`'\"":
+        return False
+    return True
 
 
 def _skip_regex(source: str, opening: int) -> int:
