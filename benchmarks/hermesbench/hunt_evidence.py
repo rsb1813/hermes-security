@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from benchmarks.hermesbench.semantic_guidance import build_semantic_guidance
+
 
 PLAN_DIRECTORY = "hermesbench-hunt"
 INVENTORY_NAME = "in-scope-files.txt"
@@ -21,7 +23,10 @@ RANK_INPUT_NAME = "rank-input.jsonl"
 FRONTIER_NAME = "frontier.jsonl"
 FRONTIER_RECEIPT_NAME = "frontier-receipt.json"
 PRIORITY_PACKET_NAME = "priority-packet.jsonl"
-HUNT_EVIDENCE_PROTOCOL_VERSION = 1
+SEMANTIC_GUIDANCE_NAME = "semantic-guidance.jsonl"
+LEGACY_HUNT_EVIDENCE_PROTOCOL_VERSION = 1
+HUNT_EVIDENCE_PROTOCOL_VERSION = 2
+SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({1, 2})
 MAX_INVENTORY_ROWS = 100_000
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
 MAX_RANK_INPUT_BYTES = 32 * 1024 * 1024
@@ -29,23 +34,35 @@ MAX_FRONTIER_ROWS = 100_000
 MAX_FRONTIER_BYTES = 32 * 1024 * 1024
 MAX_FRONTIER_RECEIPT_BYTES = 64 * 1024
 MAX_PRIORITY_PACKET_BYTES = 1024 * 1024
+MAX_SEMANTIC_GUIDANCE_BYTES = 1024 * 1024
 PRIORITY_ROW_LIMITS = {"hunt-balanced": 512, "hunt-max": 1024}
 PRIORITY_PREVIEW_BYTES = 384
 _REQUIRED_PACKET_READ = ("cat", "/workspace/scratch/hermesbench-hunt/priority-packet.jsonl")
+_REQUIRED_SEMANTIC_READ = ("cat", "/workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl")
 _PLUGIN_SCRIPTS = Path(__file__).resolve().parents[2] / "sdk" / "typescript" / "_bundled_plugin" / "scripts"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-HUNT_EVIDENCE_FIELDS = frozenset({
+HUNT_EVIDENCE_FIELDS_V1 = frozenset({
     "schema_version", "profile", "inventory_sha256", "inventory_count", "rank_input_sha256",
     "frontier_sha256", "frontier_count", "frontier_pass_count", "priority_packet_sha256",
     "priority_packet_count", "candidate_links_sha256", "candidate_count", "linked_location_count",
     "coverage_debt_sha256", "coverage_debt_count", "validated_closure_count",
 })
+HUNT_EVIDENCE_FIELDS_V2 = HUNT_EVIDENCE_FIELDS_V1 | frozenset({
+    "semantic_guidance_sha256",
+    "semantic_guidance_row_count",
+    "semantic_guidance_edge_count",
+    "semantic_guidance_scanned_file_count",
+    "semantic_guidance_skipped_file_count",
+})
+HUNT_EVIDENCE_FIELDS = HUNT_EVIDENCE_FIELDS_V2
 HUNT_EVIDENCE_FAILURE_CODES = frozenset({
     "hunt_evidence_packet_missing",
     "hunt_evidence_packet_duplicate",
     "hunt_evidence_artifact_integrity",
     "hunt_evidence_candidate_location",
     "hunt_evidence_candidate_search_pass",
+    "hunt_semantic_guidance_missing",
+    "hunt_semantic_guidance_duplicate",
 })
 
 
@@ -73,16 +90,22 @@ class PreparedHuntArtifacts:
 
     plan_directory: Path
     profile: str
+    evidence_protocol_version: int
     inventory: _Artifact
     rank_input: _Artifact
     frontier: _Artifact
     frontier_receipt: _Artifact
     priority_packet: _Artifact
+    semantic_guidance: _Artifact | None
     inventory_count: int
     frontier_count: int
     frontier_pass_count: int
     priority_count: int
     priority_bytes: int
+    semantic_guidance_row_count: int | None
+    semantic_guidance_edge_count: int | None
+    semantic_guidance_scanned_file_count: int | None
+    semantic_guidance_skipped_file_count: int | None
     preparation_fingerprint: str
     preparation_seconds: float
     container_priority_packet_path: str = "/workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
@@ -92,6 +115,7 @@ class PreparedHuntArtifacts:
 class HuntEvidence:
     """Provides only path-free persistent evidence for one discovery prediction."""
 
+    protocol_version: int
     profile: str
     inventory_sha256: str
     inventory_count: int
@@ -106,14 +130,19 @@ class HuntEvidence:
     linked_location_count: int
     coverage_debt_sha256: str
     coverage_debt_count: int
+    semantic_guidance_sha256: str | None
+    semantic_guidance_row_count: int | None
+    semantic_guidance_edge_count: int | None
+    semantic_guidance_scanned_file_count: int | None
+    semantic_guidance_skipped_file_count: int | None
 
     @property
     def validated_closure_count(self) -> int:
         return 0
 
     def to_json(self) -> dict[str, object]:
-        return {
-            "schema_version": HUNT_EVIDENCE_PROTOCOL_VERSION,
+        value = {
+            "schema_version": self.protocol_version,
             "profile": self.profile,
             "inventory_sha256": self.inventory_sha256,
             "inventory_count": self.inventory_count,
@@ -130,26 +159,59 @@ class HuntEvidence:
             "coverage_debt_count": self.coverage_debt_count,
             "validated_closure_count": 0,
         }
+        if self.protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+            value |= {
+                "semantic_guidance_sha256": self.semantic_guidance_sha256,
+                "semantic_guidance_row_count": self.semantic_guidance_row_count,
+                "semantic_guidance_edge_count": self.semantic_guidance_edge_count,
+                "semantic_guidance_scanned_file_count": self.semantic_guidance_scanned_file_count,
+                "semantic_guidance_skipped_file_count": self.semantic_guidance_skipped_file_count,
+            }
+        return value
 
 
-def parse_hunt_evidence(value: object, profile: str | None = None) -> dict[str, object]:
+def parse_hunt_evidence(
+    value: object,
+    profile: str | None = None,
+    *,
+    evidence_protocol_version: int | None = None,
+) -> dict[str, object]:
     """Validates the exact path-free evidence serialization before persistence."""
-    if not isinstance(value, dict) or set(value) != HUNT_EVIDENCE_FIELDS:
+    if not isinstance(value, dict):
         raise HuntEvidenceError("Hunt evidence fields are invalid")
-    if value["schema_version"] != HUNT_EVIDENCE_PROTOCOL_VERSION or isinstance(value["schema_version"], bool):
+    version = value.get("schema_version")
+    if not _supported_protocol_version(version):
         raise HuntEvidenceError("Hunt evidence schema version is invalid")
+    if evidence_protocol_version is not None and (
+        not _supported_protocol_version(evidence_protocol_version) or version != evidence_protocol_version
+    ):
+        raise HuntEvidenceError("Hunt evidence schema version is invalid")
+    fields = HUNT_EVIDENCE_FIELDS_V1 if version == LEGACY_HUNT_EVIDENCE_PROTOCOL_VERSION else HUNT_EVIDENCE_FIELDS_V2
+    if set(value) != fields:
+        raise HuntEvidenceError("Hunt evidence fields are invalid")
     if value["profile"] not in PRIORITY_ROW_LIMITS or (profile is not None and value["profile"] != profile):
         raise HuntEvidenceError("Hunt evidence profile is invalid")
-    for field in (
+    hashes = (
         "inventory_sha256", "rank_input_sha256", "frontier_sha256", "priority_packet_sha256",
         "candidate_links_sha256", "coverage_debt_sha256",
-    ):
+    )
+    if version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+        hashes += ("semantic_guidance_sha256",)
+    for field in hashes:
         if not isinstance(value[field], str) or _SHA256.fullmatch(value[field]) is None:
             raise HuntEvidenceError("Hunt evidence hash is invalid")
-    for field in (
+    counts = (
         "inventory_count", "frontier_count", "frontier_pass_count", "priority_packet_count",
         "candidate_count", "linked_location_count", "coverage_debt_count", "validated_closure_count",
-    ):
+    )
+    if version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+        counts += (
+            "semantic_guidance_row_count",
+            "semantic_guidance_edge_count",
+            "semantic_guidance_scanned_file_count",
+            "semantic_guidance_skipped_file_count",
+        )
+    for field in counts:
         if isinstance(value[field], bool) or not isinstance(value[field], int) or value[field] < 0:
             raise HuntEvidenceError("Hunt evidence count is invalid")
     if value["validated_closure_count"] != 0 or value["linked_location_count"] < value["candidate_count"]:
@@ -157,9 +219,15 @@ def parse_hunt_evidence(value: object, profile: str | None = None) -> dict[str, 
     return dict(value)
 
 
-def prepare_hunt_artifacts(snapshot_path: Path, scratch_path: Path, profile: str) -> PreparedHuntArtifacts:
+def prepare_hunt_artifacts(
+    snapshot_path: Path,
+    scratch_path: Path,
+    profile: str,
+    *,
+    evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
+) -> PreparedHuntArtifacts:
     """Creates and records the complete immutable Hunt plan using bundled helpers."""
-    if profile not in PRIORITY_ROW_LIMITS:
+    if profile not in PRIORITY_ROW_LIMITS or not _supported_protocol_version(evidence_protocol_version):
         raise HuntEvidenceError("Hunt profile is unsupported")
     snapshot = _safe_directory(snapshot_path, "snapshot")
     scratch = _safe_directory(scratch_path, "scratch", create=True)
@@ -173,6 +241,7 @@ def prepare_hunt_artifacts(snapshot_path: Path, scratch_path: Path, profile: str
     frontier = plan / FRONTIER_NAME
     receipt = plan / FRONTIER_RECEIPT_NAME
     priority_packet = plan / PRIORITY_PACKET_NAME
+    semantic_guidance_path = plan / SEMANTIC_GUIDANCE_NAME
     _run_helper("generate_in_scope_files.py", ("--repo", str(snapshot), "--scope", ".", "--out", str(inventory)))
     _run_helper("generate_rank_input.py", ("make-repo-rank-input", "--repo", str(snapshot), "--scope", ".", "--out", str(rank_input)))
     _normalize_lf(inventory, "inventory")
@@ -193,11 +262,25 @@ def prepare_hunt_artifacts(snapshot_path: Path, scratch_path: Path, profile: str
         "frontier_receipt": _record(receipt, "frontier receipt"),
         "priority_packet": _record(priority_packet, "priority packet"),
     }
+    semantic_guidance = None
+    semantic_counts = (None, None, None, None)
+    if evidence_protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+        guidance = build_semantic_guidance(snapshot, tuple(str(row["path"]) for row in frontier_rows), profile)
+        semantic_guidance_path.write_bytes(guidance.canonical_bytes)
+        semantic_guidance = _record(semantic_guidance_path, "semantic guidance")
+        artifacts["semantic_guidance"] = semantic_guidance
+        semantic_counts = (
+            guidance.row_count,
+            guidance.edge_count,
+            guidance.scanned_file_count,
+            guidance.skipped_file_count,
+        )
     passes = {(str(row["work_id"]), value) for row in frontier_rows for value in row["passes"]}
     fingerprint = _canonical_sha256({name: artifact.sha256 for name, artifact in artifacts.items()} | {"profile": profile})
     return PreparedHuntArtifacts(
-        plan, profile, artifacts["inventory"], artifacts["rank_input"], artifacts["frontier"], artifacts["frontier_receipt"], artifacts["priority_packet"],
+        plan, profile, evidence_protocol_version, artifacts["inventory"], artifacts["rank_input"], artifacts["frontier"], artifacts["frontier_receipt"], artifacts["priority_packet"], semantic_guidance,
         len(inventory_paths), len(frontier_rows), len(passes), len(priority_rows), artifacts["priority_packet"].byte_count,
+        *semantic_counts,
         fingerprint, time.monotonic() - started,
     )
 
@@ -210,6 +293,11 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
         raise HuntEvidenceError("priority packet was not read", category="hunt_evidence_packet_missing")
     if observed_argv.count(_REQUIRED_PACKET_READ) != 1:
         raise HuntEvidenceError("priority packet was read more than once", category="hunt_evidence_packet_duplicate")
+    if prepared.evidence_protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+        if observed_argv.count(_REQUIRED_SEMANTIC_READ) == 0:
+            raise HuntEvidenceError("semantic guidance was not read", category="hunt_semantic_guidance_missing")
+        if observed_argv.count(_REQUIRED_SEMANTIC_READ) != 1:
+            raise HuntEvidenceError("semantic guidance was read more than once", category="hunt_semantic_guidance_duplicate")
     try:
         for artifact, label in ((prepared.inventory, "inventory"), (prepared.rank_input, "rank input"), (prepared.frontier, "frontier"), (prepared.frontier_receipt, "frontier receipt"), (prepared.priority_packet, "priority packet")):
             _verify_record(artifact, label)
@@ -219,6 +307,16 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
         rank_by_path = _validate_rank_rows(rank_rows, inventory_paths)
         frontier_by_path = _validate_frontier_rows(frontier_rows, set(rank_by_path))
         _validate_frontier_receipt(_read_pinned_bytes(prepared.frontier_receipt, "frontier receipt", MAX_FRONTIER_RECEIPT_BYTES), prepared.profile, prepared.rank_input.sha256, len(frontier_rows))
+        if prepared.evidence_protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+            if prepared.semantic_guidance is None or any(value is None for value in (
+                prepared.semantic_guidance_row_count,
+                prepared.semantic_guidance_edge_count,
+                prepared.semantic_guidance_scanned_file_count,
+                prepared.semantic_guidance_skipped_file_count,
+            )):
+                raise HuntEvidenceError("semantic guidance is unavailable")
+            _verify_record(prepared.semantic_guidance, "semantic guidance")
+            _read_pinned_bytes(prepared.semantic_guidance, "semantic guidance", MAX_SEMANTIC_GUIDANCE_BYTES)
     except HuntEvidenceError as error:
         raise HuntEvidenceError("prepared Hunt artifacts are invalid", category="hunt_evidence_artifact_integrity") from error
     candidates = getattr(prediction, "candidates", None)
@@ -245,17 +343,38 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
             raise HuntEvidenceError("candidate search pass is absent from linked frontier rows", category="hunt_evidence_candidate_search_pass")
     debt = [{"work_id": row["work_id"], "pass": review_pass} for row in frontier_rows for review_pass in row["passes"]]
     return HuntEvidence(
-        prepared.profile, prepared.inventory.sha256, prepared.inventory_count, prepared.rank_input.sha256,
+        prepared.evidence_protocol_version, prepared.profile, prepared.inventory.sha256, prepared.inventory_count, prepared.rank_input.sha256,
         prepared.frontier.sha256, prepared.frontier_count, prepared.frontier_pass_count, prepared.priority_packet.sha256,
         prepared.priority_count, _canonical_sha256(links), len(candidates), len(links), _canonical_sha256(debt), len(debt),
+        prepared.semantic_guidance.sha256 if prepared.semantic_guidance is not None else None,
+        prepared.semantic_guidance_row_count, prepared.semantic_guidance_edge_count,
+        prepared.semantic_guidance_scanned_file_count, prepared.semantic_guidance_skipped_file_count,
     )
 
 
-def reproduce_hunt_evidence(snapshot_path: Path, profile: str, prediction: object) -> HuntEvidence:
+def reproduce_hunt_evidence(
+    snapshot_path: Path,
+    profile: str,
+    prediction: object,
+    *,
+    evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
+) -> HuntEvidence:
     """Rebuilds canonical Hunt evidence without invoking a model runtime."""
     with tempfile.TemporaryDirectory(prefix="hermesbench-hunt-evidence-") as directory:
-        prepared = prepare_hunt_artifacts(snapshot_path, Path(directory), profile)
-        return attest_hunt_discovery(prepared, prediction, (_REQUIRED_PACKET_READ,))
+        prepared = prepare_hunt_artifacts(
+            snapshot_path,
+            Path(directory),
+            profile,
+            evidence_protocol_version=evidence_protocol_version,
+        )
+        observed = (_REQUIRED_PACKET_READ,)
+        if evidence_protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
+            observed += (_REQUIRED_SEMANTIC_READ,)
+        return attest_hunt_discovery(prepared, prediction, observed)
+
+
+def _supported_protocol_version(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value in SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS
 
 
 def _run_helper(script_name: str, arguments: tuple[str, ...]) -> None:

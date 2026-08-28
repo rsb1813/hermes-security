@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 import os
@@ -20,6 +22,8 @@ from benchmarks.hermesbench.hunt_protocol import parse_hunt_discovery_prediction
 class HuntEvidencePreparationTests(unittest.TestCase):
     """Exercises the real bundled helpers through the public evidence interface."""
 
+    _PACKET_READ = ("cat", "/workspace/scratch/hermesbench-hunt/priority-packet.jsonl")
+
     def _snapshot(self, root: Path) -> Path:
         snapshot = root / "snapshot"
         (snapshot / "src").mkdir(parents=True)
@@ -33,6 +37,30 @@ class HuntEvidencePreparationTests(unittest.TestCase):
         (snapshot / "tests" / "test_ignored.py").write_text("def test_value():\n    assert True\n", encoding="utf-8")
         (snapshot / "asset.bin").write_bytes(b"\x00\x01")
         return snapshot
+
+    def _prediction(self):
+        return parse_hunt_discovery_prediction(
+            {
+                "schema_version": 1,
+                "task_id": "task-1",
+                "candidates": [
+                    {
+                        "finding_id": "candidate-1",
+                        "entry_point": {"file": "src/entry.py", "line": 1},
+                        "critical_operation": {"file": "src/sink.py", "line": 1},
+                        "trace": [{"file": "src/control.py", "line": 1}],
+                        "confidence": 0.5,
+                        "vulnerability_family": "injection",
+                        "search_pass": "forward",
+                        "hypothesis": "bounded hypothesis",
+                        "evidence": "bounded evidence",
+                        "counterevidence": "bounded counterevidence",
+                        "expected_control": "bounded control",
+                    }
+                ],
+            },
+            "task-1",
+        )
 
     def test_preparation_preserves_inventory_and_frontier_deterministically(self) -> None:
         # Removing deterministic preparation would make this test fail.
@@ -57,38 +85,112 @@ class HuntEvidencePreparationTests(unittest.TestCase):
             self.assertLessEqual(prepared.priority_bytes, 1024 * 1024)
             self.assertGreater(prepared.frontier_count, prepared.priority_count)
 
+    def test_protocol_one_preserves_legacy_artifact_set_and_evidence_fields(self) -> None:
+        # A protocol two change must not alter any protocol one artifact or evidence bytes.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = self._snapshot(root)
+            prepared = prepare_hunt_artifacts(
+                snapshot,
+                root / "scratch",
+                "hunt-balanced",
+                evidence_protocol_version=1,
+            )
+            self.assertIsNone(prepared.semantic_guidance)
+            self.assertEqual(
+                sorted(path.name for path in prepared.plan_directory.iterdir()),
+                [
+                    "frontier-receipt.json",
+                    "frontier.jsonl",
+                    "in-scope-files.txt",
+                    "priority-packet.jsonl",
+                    "rank-input.jsonl",
+                ],
+            )
+            self.assertEqual(
+                prepared.preparation_fingerprint,
+                "ebd0afda04ac4dc2b9d72294aff32eb0616f003a66eac892365b58b6c1cebbf5",
+            )
+            self.assertEqual(
+                {
+                    "inventory": prepared.inventory.sha256,
+                    "rank_input": prepared.rank_input.sha256,
+                    "frontier": prepared.frontier.sha256,
+                    "frontier_receipt": prepared.frontier_receipt.sha256,
+                    "priority_packet": prepared.priority_packet.sha256,
+                },
+                {
+                    "inventory": "d974ee18bc2f3c6438d61cbe6925dc76a7f51d5ee7d2f75e23d2ad37f2047863",
+                    "rank_input": "89f7777170042fa6979b6d6f33b593d736a933e2374d89d585123b5fd1a29b93",
+                    "frontier": "a3e2464114f68c620072e327b91628ddfaa99d7655bbe478eaff25eb3c3ed7c8",
+                    "frontier_receipt": "1dae429f9c27156a8fce5ab7d3e8593f24a76d17135564f996da4ab7f858a850",
+                    "priority_packet": "cb047ea29da1af0dc9961a531acf4b518a25770c2daf1cd50f771c7154af6d6a",
+                },
+            )
+            prediction = self._prediction()
+            evidence = attest_hunt_discovery(prepared, prediction, (self._PACKET_READ,))
+        self.assertEqual(evidence.to_json()["schema_version"], 1)
+        self.assertEqual(set(evidence.to_json()), hunt_evidence.HUNT_EVIDENCE_FIELDS_V1)
+        canonical = (json.dumps(evidence.to_json(), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(canonical).hexdigest(),
+            "0771c4297ed1ef8455dc90fa9e9bcdabedbe3be3b44b3ada9a43a4b434ee1ab2",
+        )
+
+    def test_protocol_two_records_deterministic_semantic_guidance(self) -> None:
+        # Protocol two must add only one deterministic semantic artifact.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = self._snapshot(root)
+            first = prepare_hunt_artifacts(
+                snapshot,
+                root / "scratch-one",
+                "hunt-balanced",
+                evidence_protocol_version=2,
+            )
+            second = prepare_hunt_artifacts(
+                snapshot,
+                root / "scratch-two",
+                "hunt-balanced",
+                evidence_protocol_version=2,
+            )
+            self.assertEqual(first.semantic_guidance.sha256, second.semantic_guidance.sha256)
+            self.assertEqual(first.preparation_fingerprint, second.preparation_fingerprint)
+            self.assertEqual(
+                sorted(path.name for path in first.plan_directory.iterdir()),
+                [
+                    "frontier-receipt.json",
+                    "frontier.jsonl",
+                    "in-scope-files.txt",
+                    "priority-packet.jsonl",
+                    "rank-input.jsonl",
+                    "semantic-guidance.jsonl",
+                ],
+            )
+
 
 class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
     """Proves that post-execution artifact and provenance changes fail closed."""
 
-    _PACKET_READ = ("cat", "/workspace/scratch/hermesbench-hunt/priority-packet.jsonl")
-
     def _prepared_prediction(self, root: Path):
         snapshot = self._snapshot(root)
-        prepared = prepare_hunt_artifacts(snapshot, root / "scratch", "hunt-balanced")
-        prediction = parse_hunt_discovery_prediction(
-            {
-                "schema_version": 1,
-                "task_id": "task-1",
-                "candidates": [
-                    {
-                        "finding_id": "candidate-1",
-                        "entry_point": {"file": "src/entry.py", "line": 1},
-                        "critical_operation": {"file": "src/sink.py", "line": 1},
-                        "trace": [{"file": "src/control.py", "line": 1}],
-                        "confidence": 0.5,
-                        "vulnerability_family": "injection",
-                        "search_pass": "forward",
-                        "hypothesis": "bounded hypothesis",
-                        "evidence": "bounded evidence",
-                        "counterevidence": "bounded counterevidence",
-                        "expected_control": "bounded control",
-                    }
-                ],
-            },
-            "task-1",
+        prepared = prepare_hunt_artifacts(
+            snapshot,
+            root / "scratch",
+            "hunt-balanced",
+            evidence_protocol_version=1,
         )
-        return prepared, prediction
+        return prepared, self._prediction()
+
+    def _prepared_prediction_v2(self, root: Path):
+        snapshot = self._snapshot(root)
+        prepared = prepare_hunt_artifacts(
+            snapshot,
+            root / "scratch",
+            "hunt-balanced",
+            evidence_protocol_version=2,
+        )
+        return prepared, self._prediction()
 
     def test_missing_artifact_fails_closed(self) -> None:
         # Removing a trusted artifact after preparation must invalidate attestation.
@@ -223,6 +325,137 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
             with self.assertRaises(HuntEvidenceError) as caught:
                 attest_hunt_discovery(prepared, prediction, ())
         self.assertEqual(caught.exception.category, "hunt_evidence_packet_missing")
+
+    def test_protocol_two_attests_one_semantic_guidance_read(self) -> None:
+        # Removing the required semantic read must reject protocol two attestation.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction_v2(Path(directory))
+            evidence = attest_hunt_discovery(
+                prepared,
+                prediction,
+                (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
+            )
+        self.assertEqual(evidence.protocol_version, 2)
+        self.assertEqual(set(evidence.to_json()), hunt_evidence.HUNT_EVIDENCE_FIELDS_V2)
+
+    def test_protocol_two_missing_semantic_guidance_read_has_its_own_category(self) -> None:
+        # A protocol two receipt without its semantic read must be rejected distinctly.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction_v2(Path(directory))
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(prepared, prediction, (self._PACKET_READ,))
+        self.assertEqual(caught.exception.category, "hunt_semantic_guidance_missing")
+
+    def test_protocol_two_duplicate_semantic_guidance_read_has_its_own_category(self) -> None:
+        # Repeating the semantic read must not satisfy protocol two provenance.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction_v2(Path(directory))
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(
+                    prepared,
+                    prediction,
+                    (
+                        self._PACKET_READ,
+                        hunt_evidence._REQUIRED_SEMANTIC_READ,
+                        hunt_evidence._REQUIRED_SEMANTIC_READ,
+                    ),
+                )
+        self.assertEqual(caught.exception.category, "hunt_semantic_guidance_duplicate")
+
+    def test_protocol_one_does_not_require_semantic_guidance_read(self) -> None:
+        # Adding a protocol two requirement must not alter protocol one receipts.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction(Path(directory))
+            evidence = attest_hunt_discovery(prepared, prediction, (self._PACKET_READ,))
+        self.assertEqual(evidence.protocol_version, 1)
+
+    def test_semantic_guidance_byte_mutation_fails_closed(self) -> None:
+        # Changing semantic bytes after preparation must invalidate protocol two attestation.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction_v2(Path(directory))
+            prepared.semantic_guidance.path.write_bytes(prepared.semantic_guidance.path.read_bytes() + b" ")
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(
+                    prepared,
+                    prediction,
+                    (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
+                )
+        self.assertEqual(caught.exception.category, "hunt_evidence_artifact_integrity")
+
+    def test_oversized_semantic_guidance_replacement_fails_closed(self) -> None:
+        # Exceeding the semantic guidance limit must invalidate protocol two attestation.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction_v2(Path(directory))
+            prepared.semantic_guidance.path.write_bytes(b"x" * (1024 * 1024 + 1))
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(
+                    prepared,
+                    prediction,
+                    (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
+                )
+        self.assertEqual(caught.exception.category, "hunt_evidence_artifact_integrity")
+
+    def test_symbolic_semantic_guidance_replacement_fails_closed_when_supported(self) -> None:
+        # Replacing semantic guidance with a symbolic link must be rejected.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction_v2(Path(directory))
+            target = prepared.plan_directory / "semantic-target.jsonl"
+            target.write_bytes(prepared.semantic_guidance.path.read_bytes())
+            prepared.semantic_guidance.path.unlink()
+            try:
+                prepared.semantic_guidance.path.symlink_to(target)
+            except OSError:
+                self.skipTest("symbolic links are unavailable")
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(
+                    prepared,
+                    prediction,
+                    (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
+                )
+        self.assertEqual(caught.exception.category, "hunt_evidence_artifact_integrity")
+
+    def test_hard_linked_semantic_guidance_fails_closed(self) -> None:
+        # Increasing the semantic guidance link count must be rejected.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction_v2(Path(directory))
+            try:
+                os.link(
+                    prepared.semantic_guidance.path,
+                    prepared.plan_directory / "semantic-guidance-copy.jsonl",
+                )
+            except OSError as error:
+                self.skipTest(f"hard links are unavailable: {error}")
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(
+                    prepared,
+                    prediction,
+                    (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
+                )
+        self.assertEqual(caught.exception.category, "hunt_evidence_artifact_integrity")
+
+    def test_low_level_semantic_guidance_replacement_fails_closed(self) -> None:
+        # Replacing semantic guidance during a low-level read must invalidate identity.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction_v2(Path(directory))
+            original_read = hunt_evidence.os.read
+            replaced = False
+
+            def replace_after_open(descriptor: int, size: int) -> bytes:
+                nonlocal replaced
+                if not replaced:
+                    replaced = True
+                    prepared.semantic_guidance.path.unlink()
+                    prepared.semantic_guidance.path.write_bytes(b"{}\n")
+                return original_read(descriptor, size)
+
+            with patch.object(hunt_evidence.os, "read", side_effect=replace_after_open):
+                with self.assertRaises(HuntEvidenceError) as caught:
+                    attest_hunt_discovery(
+                        prepared,
+                        prediction,
+                        (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
+                    )
+        self.assertEqual(caught.exception.category, "hunt_evidence_artifact_integrity")
 
     def test_frontier_receipt_must_be_bounded_and_match_frontier_inputs(self) -> None:
         # The helper receipt is a bound artifact, not unvalidated metadata.
