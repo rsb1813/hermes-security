@@ -293,3 +293,13 @@
 ### Task 19 command-audit classification
 
 - The command scanner and parser now preserve the same rejection order and semantics while assigning fixed path-free codes for event shape, empty or NUL input, newline, shell composition syntax classes, malformed quoting, parser failure, wrapper depth, and token encoding. The legacy broad code remains allowlisted for unknown command-event failures.
+
+### Task 20 completed artifact-gate diagnostic
+
+- Paid v12c completed both Hunt phases under the immutable schema-3 artifact gate in 584.260 seconds. Discovery used 328.690 seconds and verification used 255.570 seconds.
+- v12c recorded 3,537,152 cached input tokens, 185,505 uncached input tokens, and 12,902 output tokens. Discovery recorded 2,908,672 cached, 128,832 uncached, and 7,730 output tokens; verification recorded 628,480 cached, 56,673 uncached, and 5,172 output tokens.
+- Discovery linked one forward candidate with six locations to the deterministic frontier. Verification marked attacker control, reachability, impact, and guard failure proven and accepted the candidate, producing one public finding.
+- The accepted finding did not match the benchmark advisory, localization pair, or trace. Advisory recall, pair localization F1, and trace-node F1 remained zero; fixed-snapshot specificity remained 1.0 and the composite score remained 0.15.
+- Relative to v11, v12c reduced elapsed time by about 15 percent and output tokens by about 20 percent while uncached input stayed effectively flat, but it did not improve discovery accuracy. Relative to v10, it consumed substantially more time and tokens without score gain.
+- The workflow receipt independently revalidated as completed with two top-level invocations and Hunt evidence protocol version 1. All eight Canary snapshots retained zero audit violations and exact manifest hashes; 23 retained files contained no bounded authentication value or host path, no reparse entry existed, and no container remained.
+- Ruling: the artifact gate improves reproducibility and makes verifier behavior observable, but prioritization plus a single free-form model review is insufficient. The next material strategy must add deterministic source-to-sensitive-operation semantic guidance while preserving full frontier eligibility and the same two-call ceiling.

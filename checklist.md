@@ -98,15 +98,15 @@
 - [x] Bind deterministic inventory, frontier, candidate references, and explicit coverage debt into the Hunt receipts.
 - [x] Make discovery-failure workflow receipts independently revalidatable for completed-task subsets and empty candidate transfer.
 - [x] Replace the broad live Hunt attestation failure with bounded path-free packet, artifact, location, and pass-linkage codes.
-- [ ] Revalidate the failed v12 receipt and run the fixed diagnostic once under a new immutable output root.
+- [x] Revalidate the failed v12 receipt and run the fixed diagnostic once under a new immutable output root.
 - [x] Classify command-event rejection origins with fixed path-free codes without changing any shell-composition rejection.
-- [ ] Revalidate the failed v12b receipt and run one fixed v12c diagnostic under a new immutable output root.
-- [ ] Rerun the fixed single-task diagnostic with one material strategy change at a time.
+- [x] Revalidate the failed v12b receipt and run one fixed v12c diagnostic under a new immutable output root.
+- [x] Rerun the fixed single-task diagnostic with one material strategy change at a time.
 - [ ] Measure `hunt-balanced` and `hunt-max` on Canary.
 - [ ] Tune one material variable at a time on Mini.
 - [ ] Add safe caching and progressive-context reuse.
 - [ ] Add adaptive escalation without reducing coverage floors.
-- [ ] Record cached input, uncached input, output, time, and cache hits separately.
+- [x] Record cached input, uncached input, output, time, and cache hits separately.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
 
