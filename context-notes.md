@@ -343,3 +343,12 @@
 - The runner exposes only the two fixed semantic read-cardinality codes. Failure tasks retain canonical failure-only publication and reconstructible receipt hashes.
 - Task-level review found that the first test revision checked only `failure.json` for forbidden detail. Fix round 1 added concrete failure-origin sentinels and scans every task-level and run-level public JSON/JSONL artifact for leakage and partial-success markers while preserving legitimate request fields.
 - The reviewed adapter and runner suite passed 72 tests, followed by successful compileall and diff checks. Scoped re-review found no new Critical or Important issue.
+
+### Task 26 explicit Hunt evidence protocol flow
+
+- New live Hunt runs explicitly select the current evidence protocol at the CLI. The selected value flows through paired or single workflow execution, discovery suite parsing, task evidence validation, and workflow receipt construction without being inferred from evidence content.
+- Schema-3 Hunt receipts accept only protocols 1 and 2. Standard receipts and every non-discovery suite path reject Hunt evidence protocol values, while Standard keeps no protocol value.
+- Independent receipt validation uses the protocol recorded in the receipt for both strict evidence parsing and deterministic reproduction. Complete, partial, and failed v1/v2 workflows retain their selected version even when no evidence row exists.
+- Comparison output records the Hunt protocol as strategy metadata without treating Standard's absent value as a comparable mismatch.
+- Tests cover v1/v2 completed workflows, partial and failed discovery, protocol mismatch before verification or public publication, field mixing, missing v2 fields, and rehashed receipt tampering. Focused phase/evidence tests passed 63 cases with three skips, and runner/CLI tests passed 47 cases.
+- Task-level review found no Critical, Important, or Minor issue. Workflow receipt schema remains 3, frozen controls remain 2, and Standard, prompts, scoring, candidate verification, frontier, and coverage debt remain unchanged.
