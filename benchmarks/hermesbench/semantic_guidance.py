@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import posixpath
 import re
 import stat
+from typing import Callable
 
 from benchmarks.hermesbench.hunt_protocol import HUNT_SEARCH_PASS_ORDER
 
@@ -178,8 +179,26 @@ def build_semantic_guidance(
         guidance_schema_version,
     )
     snapshot = _safe_snapshot(snapshot_path)
-    declarations, scan = _scan_files(snapshot, paths, limits)
+    nested_scanner = None
+    nested_extensions = frozenset()
+    if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+        from benchmarks.hermesbench.nested_output_guidance import (
+            JAVASCRIPT_TYPESCRIPT_EXTENSIONS,
+            scan_nested_output_contexts,
+        )
+
+        nested_scanner = scan_nested_output_contexts
+        nested_extensions = JAVASCRIPT_TYPESCRIPT_EXTENSIONS
+    declarations, scan, nested_observations = _scan_files(
+        snapshot,
+        paths,
+        limits,
+        nested_scanner,
+        nested_extensions,
+    )
     routes, edge_count = _build_routes(declarations, limits)
+    if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+        routes = (*routes, *_nested_output_routes(nested_observations))
     canonical_bytes, row_count = _canonical_guidance(
         routes,
         limits,
@@ -253,13 +272,16 @@ def _scan_files(
     snapshot: Path,
     paths: tuple[str, ...],
     limits: GuidanceLimits,
-) -> tuple[tuple[_Declaration, ...], _ScanStats]:
+    nested_scanner: Callable[[str], tuple[object, ...]] | None = None,
+    nested_extensions: frozenset[str] = frozenset(),
+) -> tuple[tuple[_Declaration, ...], _ScanStats, tuple[tuple[str, object], ...]]:
     declarations: list[_Declaration] = []
     scanned = 0
     skipped = 0
     total_bytes = 0
     retained_references = 0
     seen_paths: set[str] = set()
+    nested_observations: list[tuple[str, object]] = []
     for raw_path in paths:
         relative_path = _canonical_relative_path(raw_path)
         if relative_path in seen_paths:
@@ -286,6 +308,8 @@ def _scan_files(
             continue
         total_bytes += source_size
         scanned += 1
+        if nested_scanner is not None and PurePosixPath(relative_path).suffix.lower() in nested_extensions:
+            nested_observations.extend((relative_path, item) for item in nested_scanner(source))
         if len(declarations) >= limits.declaration_count:
             continue
         extracted = _extract_declarations(relative_path, source, limits.declaration_count - len(declarations))
@@ -296,7 +320,7 @@ def _scan_files(
             imports = declaration.imports[:remaining_references]
             retained_references += len(calls) + len(imports)
             declarations.append(replace(declaration, calls=calls, imports=imports))
-    return tuple(declarations), _ScanStats(scanned, skipped)
+    return tuple(declarations), _ScanStats(scanned, skipped), tuple(nested_observations)
 
 
 def _read_pinned_source(snapshot: Path, path: Path) -> tuple[bytes, int]:
@@ -787,6 +811,34 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
     return tuple(retained.values()), edge_count
 
 
+def _nested_output_routes(observations: tuple[tuple[str, object], ...]) -> tuple[_Route, ...]:
+    routes: list[_Route] = []
+    for path, observation in observations:
+        declaration_line = getattr(observation, "declaration_line")
+        declaration_symbol = getattr(observation, "declaration_symbol")
+        source_line = getattr(observation, "source_line")
+        source_symbol = getattr(observation, "source_symbol")
+        operation_line = getattr(observation, "operation_line")
+        control_lines = getattr(observation, "control_lines")
+        reason_codes = getattr(observation, "reason_codes")
+        context = getattr(observation, "context")
+        declaration = _Location(path, declaration_line, declaration_symbol)
+        routes.append(
+            _Route(
+                "direct",
+                "output-context",
+                _Location(path, source_line, source_symbol),
+                _Location(path, operation_line, "nested-output-context"),
+                (declaration,),
+                tuple(_Location(path, line, "outer-html-sanitizer") for line in control_lines),
+                reason_codes,
+                "nested-output-context",
+                context,
+            )
+        )
+    return tuple(routes)
+
+
 def _route_direction_quotas(route_count: int) -> tuple[int, int]:
     return ((route_count + 1) // 2, route_count // 2)
 
@@ -1131,7 +1183,13 @@ def _validate_row(row: dict[str, object]) -> None:
         or not isinstance(row["hint_id"], str)
         or not re.fullmatch(r"[0-9a-f]{16}", row["hint_id"])
         or row["strength"] not in {"direct", "import-linked", "name-only"}
-        or row["operation_family"] not in OPERATION_ANCHORS
+        or (
+            row["operation_family"] not in OPERATION_ANCHORS
+            and not (
+                schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION
+                and row["operation_family"] == "output-context"
+            )
+        )
         or row["proof_status"] != "investigation_only"
         or not _valid_location(row["source"])
         or not _valid_location(row["operation"])
@@ -1159,14 +1217,17 @@ def _validate_row(row: dict[str, object]) -> None:
             or eligible != [value for value in HUNT_SEARCH_PASS_ORDER if value in eligible]
         ):
             raise SemanticGuidanceError("semantic guidance row is invalid")
-    if schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION and (
-        row["hint_kind"] != "call-route"
-        or row["output_context"] is not None
-        or not isinstance(row["component"], str)
-        or not row["component"]
-        or "\x00" in row["component"]
-    ):
-        raise SemanticGuidanceError("semantic guidance row is invalid")
+    if schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+        nested = row["hint_kind"] == "nested-output-context"
+        if (
+            row["hint_kind"] not in {"call-route", "nested-output-context"}
+            or (nested and (row["operation_family"] != "output-context" or row["output_context"] not in {"script", "style", "url_attribute", "event_handler"}))
+            or (not nested and (row["operation_family"] not in OPERATION_ANCHORS or row["output_context"] is not None))
+            or not isinstance(row["component"], str)
+            or not row["component"]
+            or "\x00" in row["component"]
+        ):
+            raise SemanticGuidanceError("semantic guidance row is invalid")
 
 
 def _valid_location(value: object) -> bool:

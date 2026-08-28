@@ -155,6 +155,154 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(row["eligible_search_passes"], ["forward"])
         self.assertEqual(row["proof_status"], "investigation_only")
 
+    def test_schema_three_emits_each_nested_output_context(self) -> None:
+        fixtures = {
+            "script": "export function render(request) { return `<script>const value = '${request.query.value}'</script>`; }\n",
+            "style": "export function render(options) { return `<style>.card { color: ${options.color}; }</style>`; }\n",
+            "url_attribute": "export function render(config) { return `<a href=\"/go?next=${config.next}\">go</a>`; }\n",
+            "event_handler": "export function render(params) { return `<button onclick=\"show('${params.name}')\">go</button>`; }\n",
+        }
+        for context, source in fixtures.items():
+            with self.subTest(context=context):
+                result = self._build(
+                    f"nested-{context}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+                nested = [row for row in rows if row["hint_kind"] == "nested-output-context"]
+                self.assertEqual(len(nested), 1)
+                self.assertEqual(nested[0]["output_context"], context)
+                self.assertEqual(nested[0]["operation_family"], "output-context")
+                self.assertEqual(nested[0]["proof_status"], "investigation_only")
+
+    def test_nested_output_records_bounded_observed_provenance(self) -> None:
+        source = (
+            "export function render(options) {\n"
+            "  const selected = options.theme;\n"
+            "  const cleaned = sanitizeHtml(selected);\n"
+            "  return `<style>.card { color: ${cleaned}; }</style>`;\n"
+            "}\n"
+        )
+        result = self._build(
+            "nested-provenance",
+            {"src/render.ts": source},
+            guidance_schema_version=3,
+        )
+        row = next(json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line)
+        self.assertIn("one_hop_alias_provenance", row["reason_codes"])
+        self.assertIn("sanitizer_return_provenance", row["reason_codes"])
+        self.assertIn("outer_html_sanitizer_context_mismatch", row["reason_codes"])
+        self.assertNotIn("options.theme", json.dumps(row))
+
+    def test_nested_output_records_parameter_property_and_configuration_provenance(self) -> None:
+        fixtures = {
+            "parameter_provenance": "export function render(request) { return `<script>${request}</script>`; }\n",
+            "property_provenance": "export function render(request) { return `<style>${request.theme}</style>`; }\n",
+            "config_provenance": "export function render() { return `<style>${process.env.THEME}</style>`; }\n",
+        }
+        for expected, source in fixtures.items():
+            with self.subTest(expected=expected):
+                result = self._build(
+                    f"nested-provenance-{expected}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), 1)
+                row = nested[0]
+                self.assertIn(expected, row["reason_codes"])
+
+    def test_nested_output_suppresses_only_established_transforms_and_policies(self) -> None:
+        fixtures = {
+            "url_component": "export function render(request) { return `<a href=\"/go?next=${encodeURIComponent(request.query.q)}\">go</a>`; }\n",
+            "script_policy": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.query.q, { allowedTags: ['p'] })}</script>`; }\n",
+            "url_policy": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<a href=\"/go?next=${sanitizeHtml(request.query.q, { allowedTags: ['a'], allowedAttributes: { a: ['title'] } })}\">go</a>`; }\n",
+        }
+        for name, source in fixtures.items():
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-suppression-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(nested, [])
+
+    def test_nested_output_ignores_lexical_decoys_and_limit_overflows(self) -> None:
+        templates = "".join("`static`;" for _ in range(256))
+        interpolations = "".join('${"safe"}' for _ in range(512))
+        nested_templates = "request.query.q"
+        for _ in range(17):
+            nested_templates = "`$" + "{" + nested_templates + "}`"
+        fixtures = {
+            "static_markup": "export function render(request) { return `<script>const value = 'safe'</script>`; }\n",
+            "comment": "// `<script>${request.query.q}</script>`\nexport function render(request) { return 'safe'; }\n",
+            "ordinary_string": "export function render(request) { return \"<style>${request.query.q}</style>\"; }\n",
+            "escaped_interpolation": "export function render(request) { return `<script>\\${request.query.q}</script>`; }\n",
+            "type_only": "type Rendered = \"<button onclick=\\\"${request.query.q}\\\">\";\n",
+            "nested_braces": "export function render(request) { return `<script>${({ value: 'safe' }).value}</script>`; }\n",
+            "escaped_backtick": "export function render(request) { return `\\` ${'safe'}`; }\n",
+            "nested_template": "export function render(request) { return `<script>${`<style>${'safe'}</style>`}</script>`; }\n",
+            "malformed": "export function render(request) { return `<script>${`<style>${request.query.q}</style>`}</script>; }\n",
+            "expression_overflow": "export function render(request) { return `<style>${request.query.q + '" + ("a" * 16385) + "'}</style>`; }\n",
+            "template_overflow": "export function render(request) { " + templates + " return `<script>${request.query.q}</script>`; }\n",
+            "interpolation_overflow": "export function render(request) { return `<style>" + interpolations + "${request.query.q}</style>`; }\n",
+            "depth_overflow": "export function render(request) { return `<script>${" + nested_templates + "}</script>`; }\n",
+        }
+        for name, source in fixtures.items():
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-decoy-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(nested, [])
+
+    def test_nested_output_does_not_suppress_unknown_or_retained_context_helpers(self) -> None:
+        fixtures = {
+            "escape": "export function render(request) { return `<script>${escape(request.query.q)}</script>`; }\n",
+            "unknown_sanitizer": "export function render(request) { return `<style>${unknownSanitizer(request.query.q)}</style>`; }\n",
+            "generic_html_escape": "export function render(request) { return `<button onclick=\"show('${escapeHtml(request.query.q)}')\">go</button>`; }\n",
+            "retained_container": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.query.q, { allowedTags: ['script'] })}</script>`; }\n",
+            "commented_import": "/* import sanitizeHtml from 'sanitize-html'; */ export function render(request) { return `<script>${sanitizeHtml(request.query.q, { allowedTags: ['p'] })}</script>`; }\n",
+        }
+        for name, source in fixtures.items():
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-no-suppression-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), 1)
+
+    def test_legacy_schemas_do_not_call_the_nested_output_scanner(self) -> None:
+        source = "export function render(request) { return `<script>${request.query.q}</script>`; }\n"
+        with mock.patch(
+            "benchmarks.hermesbench.nested_output_guidance.scan_nested_output_contexts",
+            side_effect=AssertionError("legacy schema called nested scanner"),
+        ):
+            for schema_version in (1, 2):
+                with self.subTest(schema_version=schema_version):
+                    result = self._build(
+                        f"legacy-no-nested-{schema_version}",
+                        {"src/render.ts": source},
+                        guidance_schema_version=schema_version,
+                    )
+                    self.assertEqual(result.canonical_bytes, b"")
+
+    def test_schema_three_limits_nested_output_scanning_to_javascript_and_typescript_extensions(self) -> None:
+        source = "export function render(request) { return `<script>${request.query.q}</script>`; }\n"
+        result = self._build(
+            "nested-non-javascript",
+            {"src/render.txt": source},
+            guidance_schema_version=3,
+        )
+        nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+        self.assertEqual(nested, [])
+
     def test_schema_two_includes_general_only_from_an_exact_route_location(self) -> None:
         files = {
             "app.py": "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
