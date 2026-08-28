@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import shlex
 import tempfile
@@ -88,6 +89,13 @@ def _stream(*, usage: dict[str, object] | None = None, command: str = "python3 -
     return b"".join(json.dumps(row).encode("utf-8") + b"\n" for row in rows)
 
 
+def _hunt_stream() -> bytes:
+    encode = lambda row: json.dumps(row).encode("utf-8") + b"\n"
+    priority = {"type": "item.completed", "item": {"type": "command_execution", "command": "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"}}
+    semantic = {"type": "item.completed", "item": {"type": "command_execution", "command": "cat /workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl"}}
+    return encode(priority) + _stream(command=semantic["item"]["command"])
+
+
 class CodexExecAdapterTests(unittest.TestCase):
     def _adapter(
         self,
@@ -102,7 +110,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                 {"schema_version": 1, "task_id": "task-001", "candidates": []}
             )
         if workflow == "hunt" and runtime.stdout == _stream():
-            runtime.stdout = _stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl")
+            runtime.stdout = _hunt_stream()
         managed_auth = auth or {
             "auth_mode": "chatgpt",
             "installation_id": "123e4567-e89b-12d3-a456-426614174000",
@@ -132,6 +140,69 @@ class CodexExecAdapterTests(unittest.TestCase):
                 adapter(_request(), Path(directory), 60)
         self.assertEqual(caught.exception.failure_code, "hunt_evidence_packet_missing")
 
+    def test_hunt_discovery_requires_exact_semantic_guidance_reads_and_investigation_only_prompt(self) -> None:
+        # Hunt discovery must attest separate priority and semantic guidance reads.
+        priority = "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
+        semantic = "cat /workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl"
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = _Runtime(_hunt_stream())
+            result = self._adapter("hunt", "hunt-balanced", runtime)(
+                _request(), Path(directory), 60
+            )
+        self.assertEqual(
+            result.observed_argv,
+            (("cat", priority.split(" ", 1)[1]), ("cat", semantic.split(" ", 1)[1])),
+        )
+        prompt = runtime.calls[0]["command_argv"][-1]
+        self.assertIn("investigation guidance only, never proof", prompt)
+        self.assertIn("Open the actual source", prompt)
+        self.assertIn("Do not raise candidate confidence from guidance strength", prompt)
+
+        missing = _Runtime(_stream(command=priority))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter("hunt", "hunt-balanced", missing)(
+                    _request(), Path(directory), 60
+                )
+        self.assertEqual(caught.exception.failure_code, "hunt_semantic_guidance_missing")
+
+        duplicate_read = json.dumps(
+            {"type": "item.completed", "item": {"type": "command_execution", "command": semantic}}
+        ).encode("utf-8") + b"\n"
+        duplicate = _Runtime(duplicate_read + _hunt_stream())
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter("hunt", "hunt-balanced", duplicate)(
+                    _request(), Path(directory), 60
+                )
+        self.assertEqual(caught.exception.failure_code, "hunt_semantic_guidance_duplicate")
+
+    def test_unchanged_discovery_and_verification_prompts_match_golden_hashes(self) -> None:
+        # Changing non-Hunt-discovery prompt bytes would alter their public model contract.
+        expected = {
+            "standard_discovery": "6388f631fd0fc680e63bab85e8acfd800486c3b2932fca71829eca9608edb246",
+            "standard_verification": "716beedcd9c73cf349c6181233d93897ecf8bd04fa2b9496d793506d8ff74127",
+            "hunt_verification": "17695d043651ee5c387170ad7e239512ef6242c4bd6136fc45d6cef974739286",
+        }
+        hunt_verification = json.dumps(
+            {"schema_version": 1, "task_id": "task-001", "findings": [], "decisions": []}
+        )
+        standard_discovery_runtime = _Runtime(_stream())
+        standard_verification_runtime = _Runtime(_stream())
+        hunt_verification_runtime = _Runtime(_stream(), final_message=hunt_verification)
+        cases = (
+            ("standard_discovery", self._adapter("standard", "baseline", standard_discovery_runtime), standard_discovery_runtime),
+            ("standard_verification", self._adapter("standard", "baseline", standard_verification_runtime).for_verification({"task-001": ()}), standard_verification_runtime),
+            ("hunt_verification", self._adapter("hunt", "hunt-balanced", hunt_verification_runtime).for_verification({"task-001": ()}), hunt_verification_runtime),
+        )
+        for name, adapter, runtime in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                adapter(_request(), Path(directory), 60)
+                self.assertEqual(
+                    hashlib.sha256(runtime.calls[0]["command_argv"][-1].encode("utf-8")).hexdigest(),
+                    expected[name],
+                )
+
     def test_hunt_discovery_rejects_mutated_prepared_artifacts(self) -> None:
         # Changing the prepared packet after container return must invalidate the result.
         class MutatingRuntime(_Runtime):
@@ -141,7 +212,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                 packet.write_bytes(packet.read_bytes() + b" ")
                 return result
 
-        runtime = MutatingRuntime(_stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"))
+        runtime = MutatingRuntime(_hunt_stream())
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as caught:
                 self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
@@ -152,7 +223,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         packet_read = json.dumps(
             {"type": "item.completed", "item": {"type": "command_execution", "command": "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"}}
         ).encode("utf-8") + b"\n"
-        runtime = _Runtime(packet_read + _stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"))
+        runtime = _Runtime(packet_read + _hunt_stream())
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as caught:
                 self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
@@ -180,7 +251,7 @@ class CodexExecAdapterTests(unittest.TestCase):
 
     def test_hunt_preparation_consumes_whole_task_timeout(self) -> None:
         # A 17.2 second preparation must leave floor(480 - 17.2) seconds for Docker.
-        runtime = _Runtime(_stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"))
+        runtime = _Runtime(_hunt_stream())
         with tempfile.TemporaryDirectory() as directory:
             with patch("benchmarks.hermesbench.adapters.codex_exec.time.monotonic", side_effect=(10.0, 10.0, 27.2, 27.2)):
                 self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 480)

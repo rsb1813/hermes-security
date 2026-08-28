@@ -478,6 +478,8 @@ class SuiteExecutionTests(unittest.TestCase):
             "hunt_evidence_artifact_integrity",
             "hunt_evidence_candidate_location",
             "hunt_evidence_candidate_search_pass",
+            "hunt_semantic_guidance_missing",
+            "hunt_semantic_guidance_duplicate",
         ):
             with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -491,13 +493,27 @@ class SuiteExecutionTests(unittest.TestCase):
                 def executor(*_: object) -> ExecutorResult:
                     raise ExecutorFailureError("private evidence detail", failure_code=code)
 
-                run_suite(
+                receipt = run_suite(
                     manifest, snapshots, output, "run-001", "hunt", "hunt-balanced",
                     config_for(manifest, policy), policy, executor, "hunt-discovery",
                 )
-                failure_path = next((output / "run-001" / "tasks").rglob("failure.json"))
-                self.assertEqual(json.loads(failure_path.read_text(encoding="utf-8")), {"code": code})
+                run_directory = output / "run-001"
+                task_directory = next((run_directory / "tasks").iterdir())
+                failure_path = task_directory / "failure.json"
+                self.assertEqual({path.name for path in task_directory.iterdir()}, {"request.json", "failure.json"})
+                self.assertEqual(failure_path.read_bytes(), runner._failure_json_bytes(code))
                 self.assertNotIn("private evidence detail", failure_path.read_text(encoding="utf-8"))
+                self.assertEqual((run_directory / "predictions.jsonl").read_text(encoding="utf-8"), "")
+                self.assertEqual((run_directory / "commands.jsonl").read_text(encoding="utf-8"), "")
+                self.assertEqual((run_directory / "evidence.jsonl").read_text(encoding="utf-8"), "")
+                records = tuple(
+                    runner.TaskRunReceipt.from_json(json.loads(line))
+                    for line in (run_directory / "task-receipts.jsonl").read_text(encoding="utf-8").splitlines()
+                )
+                self.assertEqual(
+                    runner.failure_evidence_sha256(run_directory / "tasks", records),
+                    receipt.failure_evidence_sha256,
+                )
 
     def test_reassigned_executor_failure_code_falls_back_and_continues(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

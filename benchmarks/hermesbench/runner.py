@@ -85,6 +85,8 @@ _PUBLIC_FAILURE_CODES = frozenset(
         "hunt_evidence_artifact_integrity",
         "hunt_evidence_candidate_location",
         "hunt_evidence_candidate_search_pass",
+        "hunt_semantic_guidance_missing",
+        "hunt_semantic_guidance_duplicate",
     }
 )
 _SUCCESS_ARTIFACT_NAMES = frozenset({"adapter-response.json", "events.jsonl", "commands.jsonl", "evidence.json"})
