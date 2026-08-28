@@ -120,8 +120,8 @@
 - [x] Run one fixed protocol-v2 paid diagnostic and classify its measurement-blocking pass-linkage failure against v10, v11, and v12c.
 - [x] Obtain approval for deterministic frontier-pass annotations.
 - [x] Write the frontier-pass annotation design specification.
-- [ ] Review and approve the written frontier-pass annotation specification.
-- [ ] Write the frontier-pass annotation implementation plan with RED and GREEN checkpoints.
+- [x] Review and approve the written frontier-pass annotation specification.
+- [x] Write the frontier-pass annotation implementation plan with RED and GREEN checkpoints.
 - [ ] Implement protocol-v3 frontier-pass annotations while preserving protocol-v1 and protocol-v2 receipt reconstruction.
 - [ ] Complete independent review and all protocol-v3 no-model boundary checks.
 - [ ] Run one fixed protocol-v3 paid diagnostic under a new immutable output root.

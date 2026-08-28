@@ -378,3 +378,11 @@
 - Protocol-v3 rows derive a canonical union only from each route's source, trace, and operation frontier rows. Missing, empty, duplicate, or unknown pass inputs fail before runtime; `general` is never a fallback.
 - Protocol-v3 discovery tells the model to copy an eligible pass and to query the immutable frontier by exact submitted path when candidate locations differ or fall outside guidance. The existing candidate-to-frontier attestation remains authoritative and keeps `hunt_evidence_candidate_search_pass` unchanged.
 - The next paid diagnostic must keep the snapshot, manifest, model, effort, profile, candidate protocol, scorer, timeout, pinned runtime, policy, and two-call workflow fixed. Mini remains gated on a completed and positive Canary signal, while full HermesBench remains required when Mini is inconclusive and for the final claim.
+
+### Task 30 frontier-pass annotation implementation planning
+
+- The user approved the written frontier-pass annotation specification on 2026-08-28.
+- The implementation plan separates four connected public changes: canonical pass vocabulary and semantic row schema 2, Hunt evidence protocol version 3, the protocol-v3-only discovery prompt, and public documentation plus full no-model verification. One fixed paid diagnostic follows as a separate main-owned gate.
+- The plan freezes the current synthetic protocol-v2 preparation fingerprint `c6d4283ef55b841fd423400a6fa229e18637e5afc7b0506fb333b0905b75fe7f`, semantic SHA-256 `c7521cf55318dc1cc393c12e39c643fbabdd003d02329160f92861c257549a37`, one-row count, and 394-byte semantic artifact.
+- The plan also freezes protocol-v1 and protocol-v2 Hunt discovery prompt SHA-256 values and defines one exact protocol-v3 suffix and expected hash. Standard discovery, Standard verification, and Hunt verification retain their existing goldens.
+- Public implementation remains sequential because the builder, evidence coordinator, and adapter share explicit versioned interfaces. The main agent owns the connected change through verification; private retained receipts, fixed snapshots, authentication boundaries, and paid output remain main-only.
