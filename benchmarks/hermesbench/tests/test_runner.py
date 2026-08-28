@@ -471,7 +471,15 @@ class SuiteExecutionTests(unittest.TestCase):
             )
 
     def test_runner_persists_typed_hunt_evidence_failure_codes_without_detail(self) -> None:
-        # The runner may retain only the typed public category, never exception detail.
+        # The runner may retain only the typed public category, never failure-origin data.
+        forbidden_markers = (
+            "/private/source-path-sentinel",
+            "private-command-text-sentinel",
+            "private-model-text-sentinel",
+            "private-exception-marker-sentinel",
+            "private-partial-success-sentinel",
+        )
+        private_detail = " ".join(forbidden_markers)
         for code in (
             "hunt_evidence_packet_missing",
             "hunt_evidence_packet_duplicate",
@@ -491,7 +499,7 @@ class SuiteExecutionTests(unittest.TestCase):
                 policy = ExecutionPolicy((("python",),))
 
                 def executor(*_: object) -> ExecutorResult:
-                    raise ExecutorFailureError("private evidence detail", failure_code=code)
+                    raise ExecutorFailureError(private_detail, failure_code=code)
 
                 receipt = run_suite(
                     manifest, snapshots, output, "run-001", "hunt", "hunt-balanced",
@@ -501,11 +509,23 @@ class SuiteExecutionTests(unittest.TestCase):
                 task_directory = next((run_directory / "tasks").iterdir())
                 failure_path = task_directory / "failure.json"
                 self.assertEqual({path.name for path in task_directory.iterdir()}, {"request.json", "failure.json"})
+                self.assertEqual(
+                    {path.name for path in run_directory.iterdir() if path.is_file()},
+                    {"predictions.jsonl", "task-receipts.jsonl", "commands.jsonl", "evidence.jsonl", "receipt.json"},
+                )
                 self.assertEqual(failure_path.read_bytes(), runner._failure_json_bytes(code))
-                self.assertNotIn("private evidence detail", failure_path.read_text(encoding="utf-8"))
                 self.assertEqual((run_directory / "predictions.jsonl").read_text(encoding="utf-8"), "")
                 self.assertEqual((run_directory / "commands.jsonl").read_text(encoding="utf-8"), "")
                 self.assertEqual((run_directory / "evidence.jsonl").read_text(encoding="utf-8"), "")
+                public_artifacts = (
+                    *(path for path in task_directory.iterdir() if path.suffix in {".json", ".jsonl"}),
+                    *(path for path in run_directory.iterdir() if path.is_file() and path.suffix in {".json", ".jsonl"}),
+                )
+                for marker in forbidden_markers:
+                    with self.subTest(code=code, marker=marker):
+                        self.assertTrue(
+                            all(marker not in path.read_text(encoding="utf-8") for path in public_artifacts)
+                        )
                 records = tuple(
                     runner.TaskRunReceipt.from_json(json.loads(line))
                     for line in (run_directory / "task-receipts.jsonl").read_text(encoding="utf-8").splitlines()
