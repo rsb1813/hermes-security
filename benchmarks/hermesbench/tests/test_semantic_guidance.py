@@ -600,6 +600,30 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(result.skipped_file_count, 1)
         self.assertEqual(result.canonical_bytes, b"")
 
+    def test_replaced_snapshot_root_is_skipped_before_external_source_read(self) -> None:
+        snapshot = self._root / "root-replacement"
+        snapshot.mkdir()
+        target = snapshot / "app.py"
+        target.write_text("import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n", encoding="utf-8")
+        outside = self._root / "outside-root"
+        outside.mkdir()
+        original_open = semantic_guidance.os.open
+
+        def replace_root_before_open(path: object, flags: int) -> int:
+            if Path(path) == target:
+                os.replace(snapshot, outside / "snapshot")
+                try:
+                    os.symlink(outside / "snapshot", snapshot, target_is_directory=True)
+                except OSError as error:
+                    self.skipTest(f"directory links are unavailable: {error}")
+            return original_open(path, flags)
+
+        with mock.patch.object(semantic_guidance.os, "open", side_effect=replace_root_before_open):
+            result = build_semantic_guidance(snapshot, ("app.py",), "hunt-balanced")
+        self.assertEqual(result.scanned_file_count, 0)
+        self.assertEqual(result.skipped_file_count, 1)
+        self.assertEqual(result.canonical_bytes, b"")
+
     def test_python_declaration_stops_before_sibling_class_method(self) -> None:
         rows = self._rows(
             {

@@ -264,8 +264,9 @@ def _source_parent_identities(snapshot: Path, path: Path) -> tuple[tuple[int, in
     relative_parent = path.parent.relative_to(snapshot)
     current = snapshot
     identities: list[tuple[int, int]] = []
-    for part in relative_parent.parts:
-        current /= part
+    for part in (None, *relative_parent.parts):
+        if part is not None:
+            current /= part
         metadata = current.lstat()
         mode = getattr(metadata, "st_mode", None)
         attributes = getattr(metadata, "st_file_attributes", None)
