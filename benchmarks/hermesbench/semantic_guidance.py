@@ -207,7 +207,7 @@ def _scan_files(
             skipped += 1
             continue
         try:
-            encoded, source_size = _read_pinned_source(candidate)
+            encoded, source_size = _read_pinned_source(snapshot, candidate)
             if total_bytes + source_size > limits.total_source_bytes:
                 raise ValueError("source budget exceeded")
             source = encoded.decode("utf-8")
@@ -229,7 +229,8 @@ def _scan_files(
     return tuple(declarations), _ScanStats(scanned, skipped)
 
 
-def _read_pinned_source(path: Path) -> tuple[bytes, int]:
+def _read_pinned_source(snapshot: Path, path: Path) -> tuple[bytes, int]:
+    parent_identities = _source_parent_identities(snapshot, path)
     before = path.lstat()
     _validate_source_metadata(before)
     identity = _source_identity(before)
@@ -240,6 +241,8 @@ def _read_pinned_source(path: Path) -> tuple[bytes, int]:
         _validate_source_metadata(opened)
         if _source_identity(opened) != identity:
             raise ValueError("source identity changed before open")
+        if _source_parent_identities(snapshot, path) != parent_identities:
+            raise ValueError("source parent changed before read")
         encoded = bytearray()
         while True:
             chunk = os.read(descriptor, min(16 * 1024, MAX_FILE_BYTES + 1 - len(encoded)))
@@ -255,6 +258,27 @@ def _read_pinned_source(path: Path) -> tuple[bytes, int]:
     if _source_identity(after) != identity:
         raise ValueError("source identity changed after read")
     return bytes(encoded), len(encoded)
+
+
+def _source_parent_identities(snapshot: Path, path: Path) -> tuple[tuple[int, int], ...]:
+    relative_parent = path.parent.relative_to(snapshot)
+    current = snapshot
+    identities: list[tuple[int, int]] = []
+    for part in relative_parent.parts:
+        current /= part
+        metadata = current.lstat()
+        mode = getattr(metadata, "st_mode", None)
+        attributes = getattr(metadata, "st_file_attributes", None)
+        if not isinstance(mode, int) or isinstance(mode, bool) or not stat.S_ISDIR(mode):
+            raise ValueError("source parent is invalid")
+        if attributes is not None and (not isinstance(attributes, int) or isinstance(attributes, bool) or attributes & 0x400):
+            raise ValueError("source parent is invalid")
+        device = getattr(metadata, "st_dev", None)
+        inode = getattr(metadata, "st_ino", None)
+        if not isinstance(device, int) or isinstance(device, bool) or not isinstance(inode, int) or isinstance(inode, bool):
+            raise ValueError("source parent identity is unavailable")
+        identities.append((device, inode))
+    return tuple(identities)
 
 
 def _validate_source_metadata(metadata: object) -> None:
@@ -392,8 +416,16 @@ def _python_declarations(path: str, source: str, matches: list[re.Match[str]], r
             )
             continue
         indent = len(match.group("indent").expandtabs(8))
+        header_end = start_line - 1
+        parentheses = 0
+        for line_number in range(start_line - 1, len(lines)):
+            header = lines[line_number]
+            parentheses += header.count("(") - header.count(")")
+            if parentheses <= 0 and ":" in header:
+                header_end = line_number
+                break
         end_line = len(lines)
-        for line_number in range(start_line, len(lines)):
+        for line_number in range(header_end + 1, len(lines)):
             line = lines[line_number]
             if line.strip() and len(line) - len(line.lstrip(" \t")) <= indent:
                 end_line = line_number

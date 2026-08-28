@@ -574,6 +574,32 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(result.skipped_file_count, 1)
         self.assertEqual(result.canonical_bytes, b"")
 
+    def test_replaced_intermediate_directory_is_skipped_before_external_source_read(self) -> None:
+        snapshot = self._root / "snapshot-replacement"
+        nested = snapshot / "sub"
+        nested.mkdir(parents=True)
+        target = nested / "app.py"
+        target.write_text("import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n", encoding="utf-8")
+        outside = self._root / "outside-replacement"
+        outside.mkdir()
+        original_open = semantic_guidance.os.open
+
+        def replace_parent_before_open(path: object, flags: int) -> int:
+            if Path(path) == target:
+                os.replace(target, outside / "app.py")
+                nested.rmdir()
+                try:
+                    os.symlink(outside, nested, target_is_directory=True)
+                except OSError as error:
+                    self.skipTest(f"directory links are unavailable: {error}")
+            return original_open(path, flags)
+
+        with mock.patch.object(semantic_guidance.os, "open", side_effect=replace_parent_before_open):
+            result = build_semantic_guidance(snapshot, ("sub/app.py",), "hunt-balanced")
+        self.assertEqual(result.scanned_file_count, 0)
+        self.assertEqual(result.skipped_file_count, 1)
+        self.assertEqual(result.canonical_bytes, b"")
+
     def test_python_declaration_stops_before_sibling_class_method(self) -> None:
         rows = self._rows(
             {
@@ -587,6 +613,24 @@ class SemanticGuidanceTests(unittest.TestCase):
             }
         )
         self.assertFalse(any(row["source"]["symbol"] == "handle" for row in rows))
+
+    def test_multiline_python_header_keeps_its_indented_body(self) -> None:
+        row = self._single_row(
+            {
+                "app.py": (
+                    "import subprocess\n"
+                    "def handle(\n"
+                    "    request,\n"
+                    "):\n"
+                    "    return subprocess.run(request.args['q'])\n"
+                    "class Worker:\n"
+                    "    def run(self, value):\n"
+                    "        return subprocess.run(value)\n"
+                )
+            }
+        )
+        self.assertEqual(row["source"]["symbol"], "handle")
+        self.assertEqual(row["strength"], "direct")
 
     def test_escaped_single_quotes_do_not_create_fake_operations(self) -> None:
         fixtures = {
