@@ -294,14 +294,25 @@ The implementation report must record each RED command and expected failure, eac
 
 ---
 
-## Main-owned performance acceptance after Task 1 review
+### Task 2: Main-owned performance acceptance after Task 1 review
+
+**Files:**
+
+- Modify: `checklist.md`
+- Modify: `context-notes.md`
+- Modify only if an image input changed: ignored `benchmarks/hermesbench/private/controls-terra-high.json`
+
+**Interfaces:**
+
+- Consumes: the reviewed Task 1 Hunt evidence gate, the fixed private single-task diagnostic, and the already pinned runtime image.
+- Produces: a receipt-revalidated v12 result, post-run integrity evidence, a v10/v11/v12 comparison, and the next single-variable performance decision.
 
 The main agent keeps the same single-task diagnostic manifest, model, reasoning effort, profile, candidate protocol, verifier semantics, and `480` second per-phase limit. Only the artifact gate, priority packet, evidence channel, and required controls/receipt version change.
 
-1. Reconfirm the immutable Docker image ID still matches ignored private controls; do not rebuild when no image input changed.
-2. Prove the image contains the three unchanged response schemas, prove the host-mounted updated skill is visible read-only, and preserve the named permission boundary.
-3. Run one paid `hunt-balanced` v12 diagnostic.
-4. Revalidate the workflow receipt by regenerating the evidence from the snapshot and discovery predictions.
-5. Re-audit all Canary snapshots and confirm exact pre/post hashes, no retained auth or host-path values, and no remaining container.
-6. Compare v12 with v10 and v11 using advisory recall, localization, trace score, candidate count, terminal decisions, cached input, uncached input, output, and elapsed seconds. Discovery quality decides success; cost is reported separately.
-7. If recall remains zero, retain the gate and move to the next single material strategy, a deterministic source-to-sensitive-operation semantic graph. Do not add a second discovery model call until that graph has been measured.
+- [ ] **Step 1: Reconfirm the immutable Docker image ID still matches ignored private controls; do not rebuild when no image input changed.**
+- [ ] **Step 2: Prove the image contains the three unchanged response schemas, prove the host-mounted updated skill is visible read-only, and preserve the named permission boundary.**
+- [ ] **Step 3: Run one paid `hunt-balanced` v12 diagnostic.**
+- [ ] **Step 4: Revalidate the workflow receipt by regenerating the evidence from the snapshot and discovery predictions.**
+- [ ] **Step 5: Re-audit all Canary snapshots and confirm exact pre/post hashes, no retained auth or host-path values, and no remaining container.**
+- [ ] **Step 6: Compare v12 with v10 and v11 using advisory recall, localization, trace score, candidate count, terminal decisions, cached input, uncached input, output, and elapsed seconds. Discovery quality decides success; cost is reported separately.**
+- [ ] **Step 7: If recall remains zero, retain the gate and move to the next single material strategy, a deterministic source-to-sensitive-operation semantic graph. Do not add a second discovery model call until that graph has been measured.**
