@@ -311,3 +311,10 @@
 - The selected design adds a bounded lexical graph as investigation-only scratch guidance, preserves the two-call workflow, and leaves candidate acceptance, frontier eligibility, coverage debt, and verification rules unchanged.
 - New runs use Hunt evidence protocol version 2, while version-1 preparation and reconstruction remain available so retained receipts continue to revalidate.
 - The first paid protocol-v2 run must hold every benchmark variable constant except semantic guidance. Mini remains gated on a positive Canary discovery signal.
+
+### Task 22 semantic-guidance implementation planning
+
+- The written semantic-guidance specification was approved on 2026-08-28.
+- Implementation is split into five reviewable commits: lexical builder, Hunt evidence v2, discovery prompt and public failures, version-aware workflow reconstruction, and documentation plus fixed diagnostic evidence.
+- The plan records current golden hashes for Standard discovery, Standard verification, and Hunt verification prompts so the semantic strategy cannot change unrelated prompt behavior.
+- New workflows select the expected Hunt evidence protocol explicitly and the runner rejects a mismatched evidence row, preventing silent downgrade. Workflow receipts retain that selected version even when discovery fails before producing an evidence row; retained receipts reconstruct using their recorded version.

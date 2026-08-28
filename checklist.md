@@ -109,8 +109,8 @@
 - [x] Record cached input, uncached input, output, time, and cache hits separately.
 - [x] Compare regex-only, lexical-graph, and language-specific AST guidance approaches.
 - [x] Obtain approval for deterministic lexical semantic guidance.
-- [ ] Review and approve the written semantic-guidance specification.
-- [ ] Write the semantic-guidance implementation plan with RED and GREEN checkpoints.
+- [x] Review and approve the written semantic-guidance specification.
+- [x] Write the semantic-guidance implementation plan with RED and GREEN checkpoints.
 - [ ] Implement protocol-v2 semantic guidance while preserving protocol-v1 receipt reconstruction.
 - [ ] Complete independent review and all no-model boundary checks.
 - [ ] Run one fixed protocol-v2 paid diagnostic and compare it with v10, v11, and v12c.
