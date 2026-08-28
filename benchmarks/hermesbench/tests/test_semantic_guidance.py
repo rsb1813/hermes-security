@@ -261,6 +261,88 @@ class SemanticGuidanceTests(unittest.TestCase):
                 nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
                 self.assertEqual(len(nested), 1)
 
+    def test_nested_output_policy_keys_require_exact_static_tokens(self) -> None:
+        fixtures = {
+            "unquoted_tag": (
+                "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { allowedTags: ['p'] })}</script>`; }\n",
+                0,
+            ),
+            "quoted_attribute": (
+                "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<a href=\"/go?next=${sanitizeHtml(request.q, { allowedTags: ['a'], allowedAttributes: { 'a': ['title'] } })}\">go</a>`; }\n",
+                0,
+            ),
+            "wildcard": (
+                "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { allowedTags: ['*'] })}</script>`; }\n",
+                1,
+            ),
+            "dynamic": (
+                "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { allowedTags: configured })}</script>`; }\n",
+                1,
+            ),
+            "computed": (
+                "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { ['allowedTags']: ['p'] })}</script>`; }\n",
+                1,
+            ),
+            "escaped": (
+                "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { \"allowed\\u0054ags\": ['p'] })}</script>`; }\n",
+                1,
+            ),
+            "duplicate": (
+                "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { allowedTags: ['p'], allowedTags: ['script'] })}</script>`; }\n",
+                1,
+            ),
+            "malformed": (
+                "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.q, { allowedTags: ['p'], malformed: })}</script>`; }\n",
+                1,
+            ),
+        }
+        for name, (source, expected) in fixtures.items():
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-policy-token-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), expected)
+
+    def test_nested_output_lexical_goal_distinguishes_division_and_regex(self) -> None:
+        division = {
+            "identifier": "export function render(request, total) { const n = total / 2; return `<style>${request.q}</style>`; }\n",
+            "numeric": "export function render(request) { const n = 42 / 2; return `<style>${request.q}</style>`; }\n",
+            "closing": "export function render(request, total) { const n = (total) / 2; return `<style>${request.q}</style>`; }\n",
+            "postfix": "export function render(request, total) { const n = total++ / 2; return `<style>${request.q}</style>`; }\n",
+            "interpolation": "export function render(request) { return `<style>${request.q++ / 2}${request.q}</style>`; }\n",
+        }
+        regex = {
+            "expression_start": "export function render(request) { /`<script>${request.q}</script>`/.test('safe'); return 'safe'; }\n",
+            "return": "export function render(request) { return /`<script>${request.q}</script>`/.test('safe'); }\n",
+            "control_header": "export function render(request) { if (true) /`<script>${request.q}</script>`/.test('safe'); return 'safe'; }\n",
+            "block": "export function render(request) { if (true) {} /`<script>${request.q}</script>`/.test('safe'); return 'safe'; }\n",
+        }
+        for name, source in division.items():
+            with self.subTest(kind="division", name=name):
+                result = self._build(f"nested-goal-division-{name}", {"src/render.ts": source}, guidance_schema_version=3)
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), 2 if name == "interpolation" else 1)
+        for name, source in regex.items():
+            with self.subTest(kind="regex", name=name):
+                result = self._build(f"nested-goal-regex-{name}", {"src/render.ts": source}, guidance_schema_version=3)
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(nested, [])
+
+    def test_nested_output_remains_deterministic_for_malformed_and_overflow_inputs(self) -> None:
+        fixtures = {
+            "malformed": "export function render(request) { const safe = `<style>${request.q}</style>`; return `<script>${request.q}</script>; }\n",
+            "overflow": "export function render(request) { const safe = `<style>${request.q}</style>`; return `<script>${request.q + '" + ("x" * 16385) + "'}</script>`; }\n",
+        }
+        for name, source in fixtures.items():
+            with self.subTest(name=name):
+                first = self._build(f"nested-token-bound-{name}-first", {"src/render.ts": source}, guidance_schema_version=3)
+                second = self._build(f"nested-token-bound-{name}-second", {"src/render.ts": source}, guidance_schema_version=3)
+                self.assertEqual(first.canonical_bytes, second.canonical_bytes)
+                self.assertEqual(first.canonical_bytes, b"")
+
     def test_nested_output_keeps_templates_after_division_expressions(self) -> None:
         fixtures = {
             "statement": (

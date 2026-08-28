@@ -66,6 +66,93 @@ class _ScanLimit(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class _Token:
+    kind: str
+    value: str
+    start: int
+    end: int
+
+
+@dataclass
+class _LexicalGoal:
+    expression_start: bool = True
+    pending_control_header: bool = False
+    control_parenthesis_depth: int = 0
+    block_depth: int = 0
+    block_expected: bool = False
+
+    def consume(self, token: _Token) -> None:
+        if token.kind == "identifier":
+            if token.value in {"if", "for", "while", "switch", "catch", "with"}:
+                self.pending_control_header = True
+                self.expression_start = True
+            elif token.value in {"case", "delete", "do", "else", "new", "return", "throw", "typeof", "void", "yield"}:
+                self.block_expected = token.value in {"do", "else"}
+                self.expression_start = True
+            else:
+                self.expression_start = False
+            return
+        if token.kind in {"number", "string", "regex", "template"}:
+            self.expression_start = False
+            return
+        if token.kind != "punctuation":
+            return
+        if token.value == "(":
+            if self.pending_control_header:
+                self.pending_control_header = False
+                self.control_parenthesis_depth = 1
+            elif self.control_parenthesis_depth:
+                self.control_parenthesis_depth += 1
+            self.expression_start = True
+        elif token.value == ")":
+            if self.control_parenthesis_depth:
+                self.control_parenthesis_depth -= 1
+                if self.control_parenthesis_depth == 0:
+                    self.block_expected = True
+                    self.expression_start = True
+                    return
+            self.expression_start = False
+        elif token.value == "{":
+            if self.block_expected or self.block_depth:
+                self.block_depth += 1
+                self.block_expected = False
+            self.expression_start = True
+        elif token.value == "}":
+            if self.block_depth:
+                self.block_depth -= 1
+                self.expression_start = self.block_depth == 0
+            else:
+                self.expression_start = False
+        elif token.value in {"++", "--", "]"}:
+            self.expression_start = False
+        else:
+            self.expression_start = True
+
+
+def _next_token(source: str, index: int) -> _Token:
+    character = source[index]
+    if character.isspace():
+        end = index + 1
+        while end < len(source) and source[end].isspace():
+            end += 1
+        return _Token("space", "", index, end)
+    identifier = re.match(_IDENTIFIER, source[index:])
+    if identifier:
+        return _Token("identifier", identifier.group(), index, index + len(identifier.group()))
+    if character.isdigit():
+        end = index + 1
+        while end < len(source) and (source[end].isalnum() or source[end] in "._"):
+            end += 1
+        return _Token("number", "", index, end)
+    if character in {"'", '"'}:
+        end = _skip_quoted(source, index)
+        return _Token("string", "", index, end)
+    if source.startswith("++", index) or source.startswith("--", index):
+        return _Token("punctuation", source[index:index + 2], index, index + 2)
+    return _Token("punctuation", character, index, index + 1)
+
+
 class _TemplateScanner:
     def __init__(self, source: str) -> None:
         self.source = source
@@ -75,29 +162,43 @@ class _TemplateScanner:
 
     def scan(self) -> tuple[_Interpolation, ...]:
         index = 0
-        while index < len(self.source):
-            if self.source.startswith("//", index):
-                newline = self.source.find("\n", index + 2)
-                index = len(self.source) if newline < 0 else newline + 1
-                continue
-            if self.source.startswith("/*", index):
-                closing = self.source.find("*/", index + 2)
-                index = len(self.source) if closing < 0 else closing + 2
-                continue
-            character = self.source[index]
-            if character in {"'", '"'}:
-                index = _skip_quoted(self.source, index)
-                continue
-            if character == "/" and _looks_like_regex(self.source, index):
-                index = _skip_regex(self.source, index)
-                continue
-            if character == "`":
-                try:
+        goal = _LexicalGoal()
+        try:
+            while index < len(self.source):
+                if self.source.startswith("//", index):
+                    newline = self.source.find("\n", index + 2)
+                    index = len(self.source) if newline < 0 else newline + 1
+                    continue
+                if self.source.startswith("/*", index):
+                    closing = self.source.find("*/", index + 2)
+                    if closing < 0:
+                        raise _ScanLimit()
+                    index = closing + 2
+                    continue
+                character = self.source[index]
+                if character in {"'", '"'}:
+                    end = _skip_quoted(self.source, index)
+                    if end == len(self.source) and self.source[end - 1] != character:
+                        raise _ScanLimit()
+                    goal.consume(_Token("string", "", index, end))
+                    index = end
+                    continue
+                if character == "/" and goal.expression_start:
+                    end = _skip_regex(self.source, index)
+                    if end is None:
+                        raise _ScanLimit()
+                    goal.consume(_Token("regex", "", index, end))
+                    index = end
+                    continue
+                if character == "`":
                     index = self._template(index, 0)
-                except _ScanLimit:
-                    return tuple(self.observations)
-                continue
-            index += 1
+                    goal.consume(_Token("template", "`", index, index))
+                    continue
+                token = _next_token(self.source, index)
+                goal.consume(token)
+                index = token.end
+        except _ScanLimit:
+            return ()
         return tuple(self.observations)
 
     def _template(self, opening: int, depth: int) -> int:
@@ -152,6 +253,7 @@ class _TemplateScanner:
     def _expression(self, start: int, depth: int) -> int:
         braces = 1
         index = start
+        goal = _LexicalGoal()
         while index < len(self.source):
             if self.source.startswith("//", index):
                 newline = self.source.find("\n", index + 2)
@@ -165,21 +267,32 @@ class _TemplateScanner:
                 continue
             character = self.source[index]
             if character in {"'", '"'}:
-                index = _skip_quoted(self.source, index)
+                end = _skip_quoted(self.source, index)
+                if end == len(self.source) and self.source[end - 1] != character:
+                    raise _ScanLimit()
+                goal.consume(_Token("string", "", index, end))
+                index = end
                 continue
             if character == "`":
                 index = self._template(index, depth)
+                goal.consume(_Token("template", "`", index, index))
                 continue
-            if character == "/" and _looks_like_regex(self.source, index):
-                index = _skip_regex(self.source, index)
+            if character == "/" and goal.expression_start:
+                end = _skip_regex(self.source, index)
+                if end is None:
+                    raise _ScanLimit()
+                goal.consume(_Token("regex", "", index, end))
+                index = end
                 continue
-            if character == "{":
+            token = _next_token(self.source, index)
+            if token.value == "{":
                 braces += 1
-            elif character == "}":
+            elif token.value == "}":
                 braces -= 1
                 if braces == 0:
                     return index
-            index += 1
+            goal.consume(token)
+            index = token.end
         raise _ScanLimit()
 
 
@@ -427,21 +540,25 @@ def _top_level_object_fields(raw: str) -> dict[str, str] | None:
         index = _skip_space_and_comments(raw, index)
         if index >= len(raw):
             return fields
-        key_match = re.match(rf"{_IDENTIFIER}", raw[index:])
-        if key_match is None:
+        key_token = _policy_key_token(raw, index)
+        if key_token is None:
             return None
-        key = key_match.group()
-        index += len(key)
+        key, index = key_token
         index = _skip_space_and_comments(raw, index)
         if index >= len(raw) or raw[index] != ":":
             return None
         value_start = index = _skip_space_and_comments(raw, index + 1)
+        if index >= len(raw):
+            return None
         value_end = _top_level_value_end(raw, index)
         if value_end is None:
             return None
         if key in fields:
             return None
-        fields[key] = raw[value_start:value_end].strip()
+        value = raw[value_start:value_end].strip()
+        if not value:
+            return None
+        fields[key] = value
         index = _skip_space_and_comments(raw, value_end)
         if index >= len(raw):
             return fields
@@ -450,9 +567,23 @@ def _top_level_object_fields(raw: str) -> dict[str, str] | None:
         index += 1
 
 
+def _policy_key_token(raw: str, index: int) -> tuple[str, int] | None:
+    token = _next_token(raw, index)
+    if token.kind == "identifier":
+        return token.value, token.end
+    if token.kind != "string" or token.end == len(raw):
+        return None
+    quoted = raw[index:token.end]
+    if "\\" in quoted:
+        return None
+    key = quoted[1:-1]
+    return (key, token.end) if re.fullmatch(_IDENTIFIER, key) else None
+
+
 def _top_level_value_end(raw: str, start: int) -> int | None:
     index = start
     depth = 0
+    goal = _LexicalGoal()
     while index < len(raw):
         if raw.startswith("//", index):
             newline = raw.find("\n", index + 2)
@@ -465,20 +596,37 @@ def _top_level_value_end(raw: str, start: int) -> int | None:
             index = closing + 2
             continue
         if raw[index] in {"'", '"'}:
-            index = _skip_quoted(raw, index)
+            end = _skip_quoted(raw, index)
+            if end == len(raw) and raw[end - 1] != raw[index]:
+                return None
+            goal.consume(_Token("string", "", index, end))
+            index = end
             continue
         if raw[index] == "`":
-            index = _skip_template_literal(raw, index)
+            end = _skip_template_literal(raw, index)
+            if end == len(raw) and raw[end - 1] != "`":
+                return None
+            goal.consume(_Token("template", "`", index, end))
+            index = end
             continue
-        if raw[index] in "[{(":
+        if raw[index] == "/" and goal.expression_start:
+            end = _skip_regex(raw, index)
+            if end is None:
+                return None
+            goal.consume(_Token("regex", "", index, end))
+            index = end
+            continue
+        token = _next_token(raw, index)
+        if token.value in {"[", "{", "("}:
             depth += 1
-        elif raw[index] in "]})":
+        elif token.value in {"]", "}", ")"}:
             if depth == 0:
                 return None
             depth -= 1
-        elif raw[index] == "," and depth == 0:
+        elif token.value == "," and depth == 0:
             return index
-        index += 1
+        goal.consume(token)
+        index = token.end
     return len(raw) if depth == 0 else None
 
 
@@ -535,6 +683,7 @@ def _audited_sanitizer_import(source: str) -> re.Match[str] | None:
 
 def _is_code_position(source: str, position: int) -> bool:
     index = 0
+    goal = _LexicalGoal()
     while index < position:
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
@@ -545,15 +694,25 @@ def _is_code_position(source: str, position: int) -> bool:
             index = len(source) if closing < 0 else closing + 2
             continue
         if source[index] in {"'", '"'}:
-            index = _skip_quoted(source, index)
+            end = _skip_quoted(source, index)
+            goal.consume(_Token("string", "", index, end))
+            index = end
             continue
         if source[index] == "`":
-            index = _skip_template_literal(source, index)
+            end = _skip_template_literal(source, index)
+            goal.consume(_Token("template", "`", index, end))
+            index = end
             continue
-        if source[index] == "/" and _looks_like_regex(source, index):
-            index = _skip_regex(source, index)
+        if source[index] == "/" and goal.expression_start:
+            end = _skip_regex(source, index)
+            if end is None:
+                return False
+            goal.consume(_Token("regex", "", index, end))
+            index = end
             continue
-        index += 1
+        token = _next_token(source, index)
+        goal.consume(token)
+        index = token.end
     return index == position
 
 
@@ -570,6 +729,7 @@ def _static_attribute(raw_before: str) -> str | None:
 def _matching_code_brace(source: str, opening: int) -> int | None:
     depth = 0
     index = opening
+    goal = _LexicalGoal()
     while index < len(source):
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
@@ -582,21 +742,31 @@ def _matching_code_brace(source: str, opening: int) -> int | None:
             index = closing + 2
             continue
         if source[index] in {"'", '"'}:
-            index = _skip_quoted(source, index)
+            end = _skip_quoted(source, index)
+            goal.consume(_Token("string", "", index, end))
+            index = end
             continue
         if source[index] == "`":
-            index = _skip_template_literal(source, index)
+            end = _skip_template_literal(source, index)
+            goal.consume(_Token("template", "`", index, end))
+            index = end
             continue
-        if source[index] == "/" and _looks_like_regex(source, index):
-            index = _skip_regex(source, index)
+        if source[index] == "/" and goal.expression_start:
+            end = _skip_regex(source, index)
+            if end is None:
+                return None
+            goal.consume(_Token("regex", "", index, end))
+            index = end
             continue
-        if source[index] == "{":
+        token = _next_token(source, index)
+        if token.value == "{":
             depth += 1
-        elif source[index] == "}":
+        elif token.value == "}":
             depth -= 1
             if depth == 0:
                 return index
-        index += 1
+        goal.consume(token)
+        index = token.end
     return None
 
 
@@ -621,6 +791,7 @@ def _skip_template_literal(source: str, opening: int) -> int:
 def _skip_template_expression(source: str, start: int) -> int | None:
     depth = 1
     index = start
+    goal = _LexicalGoal()
     while index < len(source):
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
@@ -633,21 +804,31 @@ def _skip_template_expression(source: str, start: int) -> int | None:
             index = closing + 2
             continue
         if source[index] in {"'", '"'}:
-            index = _skip_quoted(source, index)
+            end = _skip_quoted(source, index)
+            goal.consume(_Token("string", "", index, end))
+            index = end
             continue
         if source[index] == "`":
-            index = _skip_template_literal(source, index)
+            end = _skip_template_literal(source, index)
+            goal.consume(_Token("template", "`", index, end))
+            index = end
             continue
-        if source[index] == "/" and _looks_like_regex(source, index):
-            index = _skip_regex(source, index)
+        if source[index] == "/" and goal.expression_start:
+            end = _skip_regex(source, index)
+            if end is None:
+                return None
+            goal.consume(_Token("regex", "", index, end))
+            index = end
             continue
-        if source[index] == "{":
+        token = _next_token(source, index)
+        if token.value == "{":
             depth += 1
-        elif source[index] == "}":
+        elif token.value == "}":
             depth -= 1
             if depth == 0:
                 return index
-        index += 1
+        goal.consume(token)
+        index = token.end
     return None
 
 
@@ -664,24 +845,7 @@ def _skip_quoted(source: str, opening: int) -> int:
     return len(source)
 
 
-def _looks_like_regex(source: str, index: int) -> bool:
-    previous = index - 1
-    while previous >= 0 and source[previous].isspace():
-        previous -= 1
-    if previous < 0:
-        return True
-    character = source[previous]
-    if character.isidentifier():
-        start = previous
-        while start > 0 and source[start - 1].isidentifier():
-            start -= 1
-        return source[start:previous + 1] in {"case", "delete", "do", "else", "return", "throw", "typeof", "void", "yield"}
-    if character.isdigit() or character in ")]}`'\"":
-        return False
-    return True
-
-
-def _skip_regex(source: str, opening: int) -> int:
+def _skip_regex(source: str, opening: int) -> int | None:
     index = opening + 1
     in_class = False
     while index < len(source):
@@ -698,7 +862,7 @@ def _skip_regex(source: str, opening: int) -> int:
                 index += 1
             return index
         index += 1
-    return len(source)
+    return None
 
 
 def _line_number(source: str, position: int) -> int:
