@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -42,6 +43,15 @@ class SemanticGuidanceTests(unittest.TestCase):
         result = self._build(f"case-{len(tuple(self._root.iterdir()))}", files)
         return [json.loads(line) for line in result.canonical_bytes.decode("utf-8").splitlines()]
 
+    def _build_with_limits(
+        self,
+        name: str,
+        files: dict[str, str | bytes],
+        limits: GuidanceLimits,
+    ) -> SemanticGuidance:
+        with mock.patch.dict(PROFILE_LIMITS, {"test-limits": limits}):
+            return self._build(name, files, "test-limits")
+
     def _single_row(self, files: dict[str, str | bytes]) -> dict[str, object]:
         rows = self._rows(files)
         self.assertEqual(len(rows), 1)
@@ -57,6 +67,11 @@ class SemanticGuidanceTests(unittest.TestCase):
             {"app.py": "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n"},
         )
         self.assertEqual(first.canonical_bytes, second.canonical_bytes)
+        self.assertEqual(
+            first.canonical_bytes,
+            b'{"controls":[],"hint_id":"f51a8b5b354cdafd","operation":{"line":3,"path":"app.py","symbol":"subprocess.run"},"operation_family":"command","proof_status":"investigation_only","reason_codes":["source_anchor","operation_anchor","same_declaration"],"schema_version":1,"source":{"line":2,"path":"app.py","symbol":"handle"},"strength":"direct","trace":[{"line":2,"path":"app.py","symbol":"handle"}]}\n',
+        )
+        self.assertTrue(first.canonical_bytes)
         self.assertEqual(first.row_count, 1)
         row = json.loads(first.canonical_bytes.decode("utf-8").splitlines()[0])
         self.assertEqual(
@@ -154,6 +169,53 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(result.scanned_file_count, 1)
         self.assertEqual(result.row_count, 1)
 
+    def test_equivalent_frontier_paths_are_canonicalized_before_deduplication(self) -> None:
+        snapshot = self._root / "canonical"
+        snapshot.mkdir()
+        (snapshot / "app.py").write_text(
+            "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
+            encoding="utf-8",
+        )
+        result = build_semantic_guidance(snapshot, ("./app.py", "app.py"), "hunt-balanced")
+        self.assertEqual(result.scanned_file_count, 1)
+        self.assertEqual(result.skipped_file_count, 0)
+        self.assertEqual(result.row_count, 1)
+
+    def test_intermediate_directory_link_is_skipped(self) -> None:
+        snapshot = self._root / "snapshot"
+        snapshot.mkdir()
+        outside = self._root / "outside"
+        outside.mkdir()
+        (outside / "external.py").write_text(
+            "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
+            encoding="utf-8",
+        )
+        link = snapshot / "linked"
+        try:
+            os.symlink(outside, link, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"directory links are unavailable: {error}")
+        result = build_semantic_guidance(snapshot, ("linked/external.py",), "hunt-balanced")
+        self.assertEqual(result.scanned_file_count, 0)
+        self.assertEqual(result.skipped_file_count, 1)
+        self.assertEqual(result.canonical_bytes, b"")
+
+    def test_multiple_operation_families_produce_multiple_direct_routes(self) -> None:
+        result = self._build(
+            "multiple-operations",
+            {
+                "app.py": (
+                    "import subprocess\ndef handle(request):\n"
+                    "    subprocess.run(request.args['q'])\n"
+                    "    return open(request.args['path'])\n"
+                )
+            },
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.decode("utf-8").splitlines()]
+        self.assertEqual(result.row_count, 2)
+        self.assertEqual([row["operation_family"] for row in rows], ["command", "file"])
+        self.assertTrue(all(row["strength"] == "direct" for row in rows))
+
     def test_tiny_limits_truncate_output_before_partial_row(self) -> None:
         limits = GuidanceLimits(1024, 10, 10, 10, 10, 1, 1)
         with mock.patch.dict(PROFILE_LIMITS, {"test-tiny": limits}):
@@ -177,3 +239,66 @@ class SemanticGuidanceTests(unittest.TestCase):
             }
         )
         self.assertEqual(len(row["controls"]), 8)
+
+    def test_patched_limits_bound_declarations_edges_routes_rows_and_total_bytes(self) -> None:
+        source = "import subprocess\ndef first(request):\n    return subprocess.run(request.args['q'])\ndef second(request):\n    return subprocess.run(request.args['q'])\n"
+        declaration_result = self._build_with_limits(
+            "declarations",
+            {"app.py": source},
+            GuidanceLimits(4096, 1, 10, 10, 10, 4096, 4),
+        )
+        self.assertEqual(declaration_result.row_count, 1)
+        self.assertEqual([row["source"]["symbol"] for row in [json.loads(line) for line in declaration_result.canonical_bytes.splitlines()]], ["first"])
+
+        edge_result = self._build_with_limits(
+            "edges",
+            {
+                "api.py": "from store import run\ndef handle(request):\n    return run(request.args['q'])\n",
+                "store.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            },
+            GuidanceLimits(4096, 10, 0, 10, 10, 4096, 4),
+        )
+        self.assertEqual(edge_result.edge_count, 0)
+        self.assertEqual(edge_result.canonical_bytes, b"")
+
+        route_result = self._build_with_limits(
+            "routes",
+            {
+                "app.py": (
+                    "import subprocess\ndef handle(request):\n"
+                    "    subprocess.run(request.args['q'])\n"
+                    "    return open(request.args['path'])\n"
+                )
+            },
+            GuidanceLimits(4096, 10, 10, 1, 10, 4096, 4),
+        )
+        self.assertEqual(route_result.row_count, 1)
+
+        row_result = self._build_with_limits(
+            "rows",
+            {"app.py": source},
+            GuidanceLimits(4096, 10, 10, 10, 1, 4096, 4),
+        )
+        self.assertEqual(row_result.row_count, 1)
+
+        first_file = b"import subprocess\ndef first(request):\n    return subprocess.run(request.args['q'])\n"
+        total_bytes_result = self._build_with_limits(
+            "total-bytes",
+            {"first.py": first_file, "second.py": first_file},
+            GuidanceLimits(len(first_file), 10, 10, 10, 10, 4096, 4),
+        )
+        self.assertEqual(total_bytes_result.scanned_file_count, 1)
+        self.assertEqual(total_bytes_result.skipped_file_count, 1)
+
+    def test_patched_graph_depth_stops_before_distant_operation(self) -> None:
+        result = self._build_with_limits(
+            "depth",
+            {
+                "api.py": "from middle import relay\ndef handle(request):\n    return relay(request.args['q'])\n",
+                "middle.py": "from store import run\ndef relay(value):\n    return run(value)\n",
+                "store.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            },
+            GuidanceLimits(4096, 10, 10, 10, 10, 4096, 1),
+        )
+        self.assertEqual(result.edge_count, 2)
+        self.assertEqual(result.canonical_bytes, b"")

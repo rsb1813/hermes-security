@@ -189,8 +189,13 @@ def _scan_files(
         seen_paths.add(relative_path)
         candidate = snapshot / Path(relative_path)
         try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(snapshot)
             file_stat = candidate.lstat()
         except OSError:
+            skipped += 1
+            continue
+        except ValueError:
             skipped += 1
             continue
         if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
@@ -226,9 +231,10 @@ def _canonical_relative_path(raw_path: str) -> str:
     ):
         raise SemanticGuidanceError("semantic guidance path is not relative")
     normalized = raw_path.replace("\\", "/")
-    if normalized in {"", "."} or normalized.startswith("/"):
+    canonical = PurePosixPath(normalized)
+    if canonical.is_absolute() or normalized in {"", "."} or normalized.startswith("/"):
         raise SemanticGuidanceError("semantic guidance path is invalid")
-    return normalized
+    return canonical.as_posix()
 
 
 def _extract_declarations(path: str, source: str, remaining: int) -> tuple[_Declaration, ...]:
@@ -312,12 +318,8 @@ def _declaration_from_block(path: str, language: str, symbol: str, line: int, li
     operations: list[tuple[str, _Location]] = []
     for family, anchors in OPERATION_ANCHORS.items():
         for offset, line_text in enumerate(lines):
-            callee = _operation_callee(line_text, anchors)
-            if callee is not None:
+            for callee in _operation_callees(line_text, anchors):
                 operations.append((family, _Location(path, line + offset, callee)))
-                break
-        if operations:
-            break
     return _Declaration(location, language, source_locations, tuple(operations), controls, (), _calls(lines, line))
 
 
@@ -355,6 +357,9 @@ def _calls(lines: list[str], start_line: int) -> tuple[_Call, ...]:
     calls: list[_Call] = []
     for offset, line in enumerate(lines):
         for match in re.finditer(r"\b((?:[A-Za-z_$][\w$]*\s*\.\s*)*[A-Za-z_$][\w$]*)\s*\(", line):
+            declaration_prefix = line[: match.start()].rstrip()
+            if re.search(r"(?:^|\s)(?:def|func|function)\s*$", declaration_prefix):
+                continue
             parts = [part.strip().lower() for part in match.group(1).split(".")]
             if parts[-1] in {"def", "func", "function", "if", "for", "while", "switch", "catch"}:
                 continue
@@ -378,14 +383,15 @@ def _anchor_locations(
     return tuple(locations)
 
 
-def _operation_callee(line: str, anchors: set[str]) -> str | None:
+def _operation_callees(line: str, anchors: set[str]) -> tuple[str, ...]:
+    callees: list[str] = []
     for candidate in re.finditer(r"(?:[A-Za-z_$][\w$]*(?:\s*/\s*[A-Za-z_$][\w$]*)?\s*\.\s*)*[A-Za-z_$][\w$]*", line):
         normalized = re.sub(r"\s+", "", candidate.group()).lower()
         segments = normalized.replace("/", ".").split(".")
         preserved = ".".join(segments[-2:])
-        if normalized in anchors or preserved in anchors or segments[-1] in anchors:
-            return preserved
-    return None
+        if normalized in anchors or preserved in anchors:
+            callees.append(preserved)
+    return tuple(dict.fromkeys(callees))
 
 
 def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits) -> tuple[tuple[_Route, ...], int]:
@@ -440,6 +446,10 @@ def _traverse_routes(
             current = retained.get(endpoint)
             if current is None or _route_sort_key(candidate) < _route_sort_key(current):
                 retained[endpoint] = candidate
+            if len(retained) >= limits.route_count:
+                break
+        if len(retained) >= limits.route_count:
+            continue
         if depth >= limits.graph_depth or len(trace) >= 12:
             continue
         for target_identity, edge_strength in outgoing[identity]:
@@ -456,7 +466,13 @@ def _resolve_calls(
 ) -> tuple[tuple[tuple[str, int, str], str], ...]:
     resolved: list[tuple[tuple[str, int, str], str]] = []
     for call in declaration.calls:
-        same_file = [item for item in declarations if item.location.path == declaration.location.path and item.location.symbol.lower() == call.name]
+        same_file = [
+            item
+            for item in declarations
+            if call.qualifier is None
+            and item.location.path == declaration.location.path
+            and item.location.symbol.lower() == call.name
+        ]
         if len(same_file) == 1:
             resolved.append((_location_identity(same_file[0].location), "name-only"))
             continue
@@ -469,7 +485,7 @@ def _resolve_calls(
         if len(imported) == 1:
             resolved.append((_location_identity(imported[0].location), "import-linked"))
             continue
-        global_matches = [item for item in declarations if item.location.symbol.lower() == call.name]
+        global_matches = [item for item in declarations if call.qualifier is None and item.location.symbol.lower() == call.name]
         for target in global_matches:
             resolved.append((_location_identity(target.location), "name-only"))
     return tuple(dict.fromkeys(resolved))
