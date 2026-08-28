@@ -55,7 +55,6 @@
 - Modify: `benchmarks/hermesbench/tests/test_hunt_evidence.py:100-278,414-535`
 - Modify: `benchmarks/hermesbench/tests/test_codex_exec_adapter.py:139-325`
 - Modify: `benchmarks/hermesbench/tests/test_phase_runner.py:250-360,660-725`
-- Modify: `benchmarks/hermesbench/tests/test_cli.py:145-210`
 
 **Interfaces:**
 - Consumes: `frontier_contexts: tuple[tuple[str, str, tuple[str, ...]], ...]`, where each row is exact canonical path, exact validated component, and exact validated pass tuple.
@@ -190,14 +189,14 @@ def test_protocol_four_records_schema_three_guidance_without_changing_legacy_has
     self.assertEqual(protocol_two.semantic_guidance.sha256, "c7521cf55318dc1cc393c12e39c643fbabdd003d02329160f92861c257549a37")
 ```
 
-Update supported-version loops to `(1, 2, 3, 4)` and unsupported values to `(0, 5)`. Add an explicit v4 discovery prompt hash slot and assert that v4 retains v3 pass-selection instructions plus the terms `nested-output-context`, `output_context`, and `investigation only`.
+Update supported-version loops to `(1, 2, 3, 4)` and unsupported values to `(0, 5)`. Add an explicit v4 discovery prompt hash slot and assert that v4 retains v3 pass-selection instructions plus the terms `nested-output-context`, `output_context`, and `investigation only`. Keep the live default at protocol 3 until Task 4 completes the blind verifier boundary.
 
 - [ ] **Step 6: Run protocol tests and confirm RED**
 
 Run:
 
 ```powershell
-rtk python -m unittest benchmarks.hermesbench.tests.test_hunt_evidence benchmarks.hermesbench.tests.test_codex_exec_adapter benchmarks.hermesbench.tests.test_phase_runner benchmarks.hermesbench.tests.test_cli -v
+rtk python -m unittest benchmarks.hermesbench.tests.test_hunt_evidence benchmarks.hermesbench.tests.test_codex_exec_adapter benchmarks.hermesbench.tests.test_phase_runner -v
 ```
 
 Expected: protocol 4 is unsupported and the adapter has no explicit v4 discovery branch.
@@ -210,7 +209,8 @@ Define fixed semantic protocol names.
 LEGACY_HUNT_EVIDENCE_PROTOCOL_VERSION = 1
 SEMANTIC_GUIDANCE_HUNT_EVIDENCE_PROTOCOL_VERSION = 2
 PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION = 3
-HUNT_EVIDENCE_PROTOCOL_VERSION = 4
+NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION = 4
+HUNT_EVIDENCE_PROTOCOL_VERSION = PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION
 SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({1, 2, 3, 4})
 _SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({2, 3, 4})
 ```
@@ -508,10 +508,12 @@ rtk git commit -m "perf: allocate Hunt semantic guidance fairly"
 ### Task 4: Blind Protocol-v4 Hunt Verification Projection
 
 **Files:**
+- Modify: `benchmarks/hermesbench/hunt_evidence.py:31-37`
 - Modify: `benchmarks/hermesbench/phase_runner.py:175-210,940-975`
 - Modify: `benchmarks/hermesbench/adapters/codex_exec.py:195-230,454-525`
 - Modify: `benchmarks/hermesbench/tests/test_codex_exec_adapter.py:301-350,627-670`
 - Modify: `benchmarks/hermesbench/tests/test_phase_runner.py:695-805`
+- Modify: `benchmarks/hermesbench/tests/test_cli.py:145-210`
 
 **Interfaces:**
 - Produces: `CanonicalCandidate.to_verification_projection() -> dict[str, object]` with exactly four top-level fields.
@@ -572,9 +574,9 @@ def to_verification_projection(self) -> dict[str, object]:
 
 In `_prompt`, serialize this projection only for v4 Hunt verification. Standard and Hunt v1-v3 continue to serialize `to_json()`. Add independent inspection language requiring the verifier to reconstruct attacker control, reachability, impact, guard failure, evidence, counterevidence, and proof gaps from source.
 
-- [ ] **Step 4: Write and pass exact legacy/default golden prompt tests**
+- [ ] **Step 4: Promote protocol 4 to the live default and pass exact legacy/default golden prompt tests**
 
-Freeze explicit Hunt verification hashes for versions 1, 2, and 3 at the current rich-prompt digest. Add a separate literal digest for v4. Keep Standard discovery and Standard verification hashes unchanged. Assert the default Hunt adapter equals explicit protocol 4 after Task 1's default bump.
+Set `HUNT_EVIDENCE_PROTOCOL_VERSION = NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION` only after the blind projection is green. Freeze explicit Hunt verification hashes for versions 1, 2, and 3 at the current rich-prompt digest. Add a separate literal digest for v4. Keep Standard discovery and Standard verification hashes unchanged. Assert the default Hunt adapter and CLI propagation now equal explicit protocol 4.
 
 - [ ] **Step 5: Prove rich candidate-transfer preservation**
 
