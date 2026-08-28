@@ -127,9 +127,14 @@
 - [x] Run one fixed protocol-v3 paid diagnostic under a new immutable output root.
   - [x] Revalidate the two-invocation incomplete receipt, completed discovery evidence, three-candidate pass distribution, fixed verification failure code, and post-run integrity boundaries.
   - [x] Keep Mini and score claims blocked because verification produced no public prediction.
-- [ ] Obtain approval for the bounded Hunt verification command-compliance prompt change.
-- [ ] Add verification-only quoted-metacharacter guidance without relaxing the scanner or execution policy.
-- [ ] Re-run one fixed diagnostic after that single reviewed variable changes.
+- [x] Obtain approval for the bounded Hunt verification command-compliance prompt change.
+- [x] Add verification-only quoted-metacharacter guidance without relaxing the scanner or execution policy.
+  - [x] Preserve the Standard and Hunt discovery prompt contracts and every fail-closed command rejection.
+  - [x] Cover quoted and unquoted `<` and `>` behavior at the live adapter boundary.
+- [x] Re-run one fixed diagnostic after that single reviewed variable changes.
+  - [x] Revalidate the completed two-invocation receipt, separated token usage, candidate decisions, public projection, and score.
+  - [x] Confirm the command-compliance change restores workflow completion without claiming an accuracy gain.
+  - [x] Audit all Canary snapshots, retained artifacts, public projections, and container cleanup after the run.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
 
