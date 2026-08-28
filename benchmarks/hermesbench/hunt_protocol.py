@@ -11,9 +11,15 @@ from .contracts import Finding, Location, TaskPrediction, parse_prediction
 HUNT_CANDIDATE_PROTOCOL_VERSION = 1
 HUNT_DISCOVERY_MAX_CANDIDATES = 12
 HUNT_FINAL_MAX_FINDINGS = 5
-HUNT_SEARCH_PASSES = frozenset(
-    {"forward", "backward", "guard", "parser", "state", "general"}
+HUNT_SEARCH_PASS_ORDER = (
+    "forward",
+    "backward",
+    "guard",
+    "parser",
+    "state",
+    "general",
 )
+HUNT_SEARCH_PASSES = frozenset(HUNT_SEARCH_PASS_ORDER)
 _PROOF_STATES = frozenset({"proven", "disproven", "unknown"})
 _DISPOSITIONS = frozenset({"accepted", "rejected", "inconclusive"})
 _MAX_IDENTIFIER_BYTES = 128

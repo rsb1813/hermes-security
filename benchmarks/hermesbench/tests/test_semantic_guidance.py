@@ -15,6 +15,14 @@ from benchmarks.hermesbench.semantic_guidance import (
 )
 
 
+def _frontier_passes(
+    files: dict[str, str | bytes],
+    overrides: dict[str, tuple[str, ...]] | None = None,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    selected = overrides or {}
+    return tuple((path, selected.get(path, ("forward",))) for path in files)
+
+
 class SemanticGuidanceTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
@@ -28,17 +36,22 @@ class SemanticGuidanceTests(unittest.TestCase):
         name: str,
         files: dict[str, str | bytes],
         profile: str = "hunt-balanced",
+        *,
+        guidance_schema_version: int = 1,
+        passes: dict[str, tuple[str, ...]] | None = None,
     ) -> SemanticGuidance:
         snapshot = self._root / name
         snapshot.mkdir()
         for relative, value in files.items():
             path = snapshot / relative
             path.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(value, bytes):
-                path.write_bytes(value)
-            else:
-                path.write_text(value, encoding="utf-8")
-        return build_semantic_guidance(snapshot, tuple(files), profile)
+            path.write_bytes(value if isinstance(value, bytes) else value.encode("utf-8"))
+        return build_semantic_guidance(
+            snapshot,
+            _frontier_passes(files, passes),
+            profile,
+            guidance_schema_version=guidance_schema_version,
+        )
 
     def _rows(self, files: dict[str, str | bytes]) -> list[dict[str, object]]:
         result = self._build(f"case-{len(tuple(self._root.iterdir()))}", files)
@@ -91,6 +104,95 @@ class SemanticGuidanceTests(unittest.TestCase):
             },
         )
         self.assertEqual(row["proof_status"], "investigation_only")
+
+    def test_schema_two_adds_canonical_route_pass_union_without_changing_hint_id(self) -> None:
+        source = semantic_guidance._Location("entry.py", 2, "handle")
+        operation = semantic_guidance._Location("sink.py", 3, "subprocess.run")
+        control = semantic_guidance._Location("control.py", 1, "validate")
+        route = semantic_guidance._Route(
+            "import-linked",
+            "command",
+            source,
+            operation,
+            (source, operation),
+            (control,),
+            ("source_anchor", "operation_anchor"),
+        )
+        passes = {
+            "entry.py": ("state", "forward"),
+            "sink.py": ("guard", "backward"),
+            "control.py": ("parser",),
+        }
+        legacy = semantic_guidance._canonical_row(route, 1, passes)
+        annotated = semantic_guidance._canonical_row(route, 2, passes)
+        self.assertEqual(annotated["eligible_search_passes"], ["forward", "backward", "guard", "state"])
+        self.assertNotIn("parser", annotated["eligible_search_passes"])
+        self.assertEqual(legacy["hint_id"], annotated["hint_id"])
+        self.assertNotIn("eligible_search_passes", legacy)
+
+    def test_schema_two_includes_general_only_from_an_exact_route_location(self) -> None:
+        files = {
+            "app.py": "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
+        }
+        without_general = self._build(
+            "without-general",
+            files,
+            guidance_schema_version=2,
+            passes={"app.py": ("forward",)},
+        )
+        with_general = self._build(
+            "with-general",
+            files,
+            guidance_schema_version=2,
+            passes={"app.py": ("general", "forward")},
+        )
+        self.assertEqual(json.loads(without_general.canonical_bytes)["eligible_search_passes"], ["forward"])
+        self.assertEqual(json.loads(with_general.canonical_bytes)["eligible_search_passes"], ["forward", "general"])
+
+    def test_frontier_pass_inputs_fail_closed_before_source_scanning(self) -> None:
+        snapshot = self._root / "invalid-passes"
+        snapshot.mkdir()
+        (snapshot / "app.py").write_text("value = 1\n", encoding="utf-8")
+        invalid = (
+            (),
+            [("app.py", ("forward",))],
+            (("app.py", ()),),
+            (("app.py", ("forward", "forward")),),
+            (("app.py", ("invented",)),),
+            (("./app.py", ("forward",)), ("app.py", ("guard",))),
+        )
+        for frontier_passes in invalid:
+            with self.subTest(frontier_passes=frontier_passes):
+                with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+                    build_semantic_guidance(
+                        snapshot,
+                        frontier_passes,
+                        "hunt-balanced",
+                        guidance_schema_version=2,
+                    )
+
+    def test_frontier_schema_inputs_fail_closed_before_source_scanning(self) -> None:
+        snapshot = self._root / "invalid-schema"
+        snapshot.mkdir()
+        (snapshot / "app.py").write_text("value = 1\n", encoding="utf-8")
+        for guidance_schema_version in (0, 3, True):
+            with self.subTest(guidance_schema_version=guidance_schema_version):
+                with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+                    build_semantic_guidance(
+                        snapshot,
+                        (("app.py", ("forward",)),),
+                        "hunt-balanced",
+                        guidance_schema_version=guidance_schema_version,
+                    )
+
+    def test_schema_two_rejects_a_route_path_missing_from_frontier_passes(self) -> None:
+        source = semantic_guidance._Location("entry.py", 1, "handle")
+        operation = semantic_guidance._Location("sink.py", 1, "run")
+        route = semantic_guidance._Route(
+            "import-linked", "command", source, operation, (source, operation), (), ("source_anchor",)
+        )
+        with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+            semantic_guidance._canonical_row(route, 2, {"entry.py": ("forward",)})
 
     def test_python_go_and_typescript_direct_routes(self) -> None:
         fixtures = {
@@ -569,7 +671,12 @@ class SemanticGuidanceTests(unittest.TestCase):
             return original_open(path, flags)
 
         with mock.patch.object(semantic_guidance.os, "open", side_effect=replace_before_open):
-            result = build_semantic_guidance(snapshot, ("app.py",), "hunt-balanced")
+            result = build_semantic_guidance(
+                snapshot,
+                (("app.py", ("forward",)),),
+                "hunt-balanced",
+                guidance_schema_version=1,
+            )
         self.assertEqual(result.scanned_file_count, 0)
         self.assertEqual(result.skipped_file_count, 1)
         self.assertEqual(result.canonical_bytes, b"")
@@ -595,7 +702,12 @@ class SemanticGuidanceTests(unittest.TestCase):
             return original_open(path, flags)
 
         with mock.patch.object(semantic_guidance.os, "open", side_effect=replace_parent_before_open):
-            result = build_semantic_guidance(snapshot, ("sub/app.py",), "hunt-balanced")
+            result = build_semantic_guidance(
+                snapshot,
+                (("sub/app.py", ("forward",)),),
+                "hunt-balanced",
+                guidance_schema_version=1,
+            )
         self.assertEqual(result.scanned_file_count, 0)
         self.assertEqual(result.skipped_file_count, 1)
         self.assertEqual(result.canonical_bytes, b"")
@@ -619,7 +731,12 @@ class SemanticGuidanceTests(unittest.TestCase):
             return original_open(path, flags)
 
         with mock.patch.object(semantic_guidance.os, "open", side_effect=replace_root_before_open):
-            result = build_semantic_guidance(snapshot, ("app.py",), "hunt-balanced")
+            result = build_semantic_guidance(
+                snapshot,
+                (("app.py", ("forward",)),),
+                "hunt-balanced",
+                guidance_schema_version=1,
+            )
         self.assertEqual(result.scanned_file_count, 0)
         self.assertEqual(result.skipped_file_count, 1)
         self.assertEqual(result.canonical_bytes, b"")
@@ -672,7 +789,12 @@ class SemanticGuidanceTests(unittest.TestCase):
             "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
             encoding="utf-8",
         )
-        result = build_semantic_guidance(snapshot, ("app.py", "app.py"), "hunt-balanced")
+        result = build_semantic_guidance(
+            snapshot,
+            (("app.py", ("forward",)), ("app.py", ("forward",))),
+            "hunt-balanced",
+            guidance_schema_version=1,
+        )
         self.assertEqual(result.scanned_file_count, 1)
         self.assertEqual(result.row_count, 1)
 
@@ -683,7 +805,12 @@ class SemanticGuidanceTests(unittest.TestCase):
             "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
             encoding="utf-8",
         )
-        result = build_semantic_guidance(snapshot, ("./app.py", "app.py"), "hunt-balanced")
+        result = build_semantic_guidance(
+            snapshot,
+            (("./app.py", ("forward",)), ("app.py", ("forward",))),
+            "hunt-balanced",
+            guidance_schema_version=1,
+        )
         self.assertEqual(result.scanned_file_count, 1)
         self.assertEqual(result.skipped_file_count, 0)
         self.assertEqual(result.row_count, 1)
@@ -702,7 +829,12 @@ class SemanticGuidanceTests(unittest.TestCase):
             os.symlink(outside, link, target_is_directory=True)
         except OSError as error:
             self.skipTest(f"directory links are unavailable: {error}")
-        result = build_semantic_guidance(snapshot, ("linked/external.py",), "hunt-balanced")
+        result = build_semantic_guidance(
+            snapshot,
+            (("linked/external.py", ("forward",)),),
+            "hunt-balanced",
+            guidance_schema_version=1,
+        )
         self.assertEqual(result.scanned_file_count, 0)
         self.assertEqual(result.skipped_file_count, 1)
         self.assertEqual(result.canonical_bytes, b"")

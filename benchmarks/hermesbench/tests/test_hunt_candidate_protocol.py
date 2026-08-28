@@ -6,10 +6,13 @@ import unittest
 
 from benchmarks.hermesbench.hunt_protocol import (
     HUNT_DISCOVERY_MAX_CANDIDATES,
+    HUNT_SEARCH_PASS_ORDER,
+    HUNT_SEARCH_PASSES,
     HuntProtocolError,
     parse_hunt_discovery_prediction,
     parse_hunt_verification_prediction,
 )
+from sdk.typescript._bundled_plugin.scripts.hunt_workflow import FRONTIER_PASSES
 
 
 def _candidate(number: int = 1) -> dict[str, object]:
@@ -53,6 +56,14 @@ def _decision(candidate_id: str, disposition: str = "accepted") -> dict[str, obj
 
 
 class HuntCandidateProtocolTests(unittest.TestCase):
+    def test_host_and_frontier_generator_share_exact_pass_order(self) -> None:
+        self.assertEqual(HUNT_SEARCH_PASS_ORDER, FRONTIER_PASSES)
+        self.assertEqual(HUNT_SEARCH_PASSES, frozenset(HUNT_SEARCH_PASS_ORDER))
+        self.assertEqual(
+            HUNT_SEARCH_PASS_ORDER,
+            ("forward", "backward", "guard", "parser", "state", "general"),
+        )
+
     def test_discovery_preserves_six_rich_candidates(self) -> None:
         prediction = parse_hunt_discovery_prediction(
             {
