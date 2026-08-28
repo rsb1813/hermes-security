@@ -229,6 +229,79 @@ class SemanticGuidanceTests(unittest.TestCase):
                 nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
                 self.assertEqual(nested, [])
 
+    def test_nested_output_does_not_suppress_wildcard_or_dynamic_policies(self) -> None:
+        fixtures = {
+            "wildcard_tag": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.query.q, { allowedTags: ['*'] })}</script>`; }\n",
+            "wildcard_attribute": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<a href=\"/go?next=${sanitizeHtml(request.query.q, { allowedTags: ['a'], allowedAttributes: { a: ['*'] } })}\">go</a>`; }\n",
+            "dynamic_tag": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<script>${sanitizeHtml(request.query.q, { allowedTags: tags })}</script>`; }\n",
+            "dynamic_attribute": "import sanitizeHtml from 'sanitize-html'; export function render(request) { return `<a href=\"/go?next=${sanitizeHtml(request.query.q, { allowedTags: ['a'], allowedAttributes: { a: attrs } })}\">go</a>`; }\n",
+        }
+        for name, source in fixtures.items():
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-policy-open-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), 1)
+
+    def test_nested_output_lexer_ignores_regex_decoys_and_keeps_later_interpolation(self) -> None:
+        decoy = "export function render(request) { const pattern = /`<script>${request.query.q}</script>`/; return 'safe'; }\n"
+        actual = "export function render(request) { return `<script>${/}/.test('}') ? `${'safe'}` : 'safe'}${request.query.q}</script>`; }\n"
+        for name, source, expected in (("regex-decoy", decoy, 0), ("regex-nested-later", actual, 1)):
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-lexer-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(len(nested), expected)
+
+    def test_nested_output_skips_ambiguous_unclosed_html_attribute_quotes(self) -> None:
+        result = self._build(
+            "nested-ambiguous-quote",
+            {"src/render.ts": "export function render(request) { return `<style data-x=\">${request.query.q}</style>`; }\n"},
+            guidance_schema_version=3,
+        )
+        nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+        self.assertEqual(nested, [])
+
+    def test_nested_output_controls_ignore_strings_and_remain_bounded(self) -> None:
+        string_decoy = "export function render(request) { const note = 'sanitizeFake('; return `<style>${request.query.q}</style>`; }\n"
+        controls = "\n".join(f"  sanitizeControl{index}();" for index in range(9))
+        bounded = f"export function render(request) {{\n{controls}\n  return `<style>${{request.query.q}}</style>`;\n}}\n"
+        for name, source, expected_controls in (("string-decoy", string_decoy, 0), ("nine-controls", bounded, 8)):
+            with self.subTest(name=name):
+                result = self._build(
+                    f"nested-controls-{name}",
+                    {"src/render.ts": source},
+                    guidance_schema_version=3,
+                )
+                row = next(json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line)
+                self.assertEqual(len(row["controls"]), expected_controls)
+                self.assertEqual(
+                    "outer_html_sanitizer_context_mismatch" in row["reason_codes"],
+                    bool(expected_controls),
+                )
+
+    def test_nested_output_does_not_infer_two_hop_alias_provenance(self) -> None:
+        source = (
+            "export function render(request) {\n"
+            "  const first = request.q;\n"
+            "  const second = first;\n"
+            "  return `<style>${second}</style>`;\n"
+            "}\n"
+        )
+        result = self._build(
+            "nested-two-hop-alias",
+            {"src/render.ts": source},
+            guidance_schema_version=3,
+        )
+        nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+        self.assertEqual(nested, [])
+
     def test_nested_output_ignores_lexical_decoys_and_limit_overflows(self) -> None:
         templates = "".join("`static`;" for _ in range(256))
         interpolations = "".join('${"safe"}' for _ in range(512))

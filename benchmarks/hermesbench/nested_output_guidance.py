@@ -88,6 +88,9 @@ class _TemplateScanner:
             if character in {"'", '"'}:
                 index = _skip_quoted(self.source, index)
                 continue
+            if character == "/" and _looks_like_regex(self.source, index):
+                index = _skip_regex(self.source, index)
+                continue
             if character == "`":
                 try:
                     index = self._template(index, 0)
@@ -125,8 +128,8 @@ class _TemplateScanner:
                         _Interpolation(
                             expression_start,
                             expression_end,
-                            chunks[position],
-                            chunks[position + 1],
+                            "\x00".join(chunks[: position + 1]),
+                            "\x00".join(chunks[position + 1:]),
                         )
                     )
                 return index + 1
@@ -219,11 +222,9 @@ def scan_nested_output_contexts(source: str) -> tuple[NestedOutputObservation, .
 
 
 def _classify_context(raw_before: str, raw_after: str) -> str | None:
-    script = re.search(r"<script(?:\s+[^<>]*)?>[^<>]*$", raw_before, re.IGNORECASE)
-    if script and re.match(r"[^<>]*</script\s*>", raw_after, re.IGNORECASE):
+    if _active_static_element(raw_before, "script") and _static_closing_element(raw_after, "script"):
         return "script"
-    style = re.search(r"<style(?:\s+[^<>]*)?>[^<>]*$", raw_before, re.IGNORECASE)
-    if style and re.match(r"[^<>]*</style\s*>", raw_after, re.IGNORECASE):
+    if _active_static_element(raw_before, "style") and _static_closing_element(raw_after, "style"):
         return "style"
     attribute = re.search(
         rf"<({_IDENTIFIER}(?:\s+[^<>]*)?)\s+({_IDENTIFIER}(?::{_IDENTIFIER})?)\s*=\s*(['\"])[^<>]*$",
@@ -236,6 +237,47 @@ def _classify_context(raw_before: str, raw_after: str) -> str | None:
             return "url_attribute"
         if name.startswith("on") and len(name) > 2:
             return "event_handler"
+    return None
+
+
+def _active_static_element(raw_before: str, name: str) -> bool:
+    for segment in raw_before.split("\x00"):
+        matches = list(re.finditer(rf"<{re.escape(name)}\b", segment, re.IGNORECASE))
+        if not matches:
+            continue
+        end = _static_tag_end(segment, matches[-1].start() + 1)
+        if end is not None and "<" not in segment[end + 1:] and ">" not in segment[end + 1:]:
+            return True
+    return False
+
+
+def _static_closing_element(raw_after: str, name: str) -> bool:
+    return any(
+        re.match(rf"[^<>]*</{re.escape(name)}\s*>", segment, re.IGNORECASE)
+        for segment in raw_after.split("\x00")
+    )
+
+
+def _static_tag_end(raw: str, start: int) -> int | None:
+    quote: str | None = None
+    index = start
+    while index < len(raw):
+        character = raw[index]
+        if quote is not None:
+            if character == "\\":
+                index += 2
+                continue
+            if character == quote:
+                quote = None
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+        elif character == ">":
+            return index
+        elif character == "<":
+            return None
+        index += 1
     return None
 
 
@@ -295,7 +337,7 @@ def _direct_origin(source: str, declaration: _Declaration, position: int, expres
         if assignment is not None:
             line, value = assignment
             nested = _direct_origin(source, declaration, position, value)
-            if nested is not None:
+            if nested is not None and "one_hop_alias_provenance" not in nested.reason_codes:
                 return _Origin(line, name, (*nested.reason_codes, "one_hop_alias_provenance"))
             sanitizer = _sanitizer_call(value)
             if sanitizer is not None:
@@ -334,12 +376,17 @@ def _sanitizer_call(expression: str) -> str | None:
 
 def _outer_sanitizer_lines(source: str, declaration: _Declaration) -> tuple[int, ...]:
     block = source[declaration.start:declaration.end]
-    lines = [
-        _line_number(source, declaration.start + match.start())
-        for match in re.finditer(rf"\b{_IDENTIFIER}\s*\(", block)
-        if match.group().split("(", 1)[0].strip().lower().startswith("sanitize")
-    ]
-    return tuple(dict.fromkeys(lines))
+    lines: list[int] = []
+    for match in re.finditer(rf"\b{_IDENTIFIER}\s*\(", block):
+        if not _is_code_position(block, match.start()):
+            continue
+        if match.group().split("(", 1)[0].strip().lower().startswith("sanitize"):
+            line = _line_number(source, declaration.start + match.start())
+            if line not in lines:
+                lines.append(line)
+            if len(lines) == 8:
+                break
+    return tuple(lines)
 
 
 def _is_suppressed(source: str, expression: str, context: str, raw_before: str, raw_after: str) -> bool:
@@ -358,7 +405,9 @@ def _policy_excludes_context(source: str, expression: str, context: str, raw_bef
     tags = re.search(r"\ballowedTags\s*:\s*\[([^\]]*)\]", call.group(1), re.DOTALL)
     if tags is None:
         return False
-    allowed_tags = frozenset(re.findall(r"['\"]([A-Za-z0-9:-]+)['\"]", tags.group(1)))
+    allowed_tags = _literal_policy_values(tags.group(1))
+    if allowed_tags is None:
+        return False
     tag = _static_tag(raw_before)
     if tag is None:
         return False
@@ -368,7 +417,15 @@ def _policy_excludes_context(source: str, expression: str, context: str, raw_bef
     attributes = re.search(rf"\ballowedAttributes\s*:\s*\{{\s*['\"]?{re.escape(tag)}['\"]?\s*:\s*\[([^\]]*)\]", call.group(1), re.DOTALL)
     if attribute is None or attributes is None:
         return False
-    return attribute not in frozenset(re.findall(r"['\"]([A-Za-z0-9:-]+)['\"]", attributes.group(1)))
+    allowed_attributes = _literal_policy_values(attributes.group(1))
+    return allowed_attributes is not None and attribute not in allowed_attributes
+
+
+def _literal_policy_values(raw: str) -> frozenset[str] | None:
+    if not re.fullmatch(r"\s*(?:['\"][A-Za-z0-9:-]+['\"]\s*(?:,\s*['\"][A-Za-z0-9:-]+['\"]\s*)*)?", raw):
+        return None
+    values = frozenset(re.findall(r"['\"]([A-Za-z0-9:-]+)['\"]", raw))
+    return None if "*" in raw or "*" in values else values
 
 
 def _audited_sanitizer_import(source: str) -> re.Match[str] | None:
@@ -390,8 +447,14 @@ def _is_code_position(source: str, position: int) -> bool:
             closing = source.find("*/", index + 2)
             index = len(source) if closing < 0 else closing + 2
             continue
-        if source[index] in {"'", '"', "`"}:
+        if source[index] in {"'", '"'}:
             index = _skip_quoted(source, index)
+            continue
+        if source[index] == "`":
+            index = _skip_template_literal(source, index)
+            continue
+        if source[index] == "/" and _looks_like_regex(source, index):
+            index = _skip_regex(source, index)
             continue
         index += 1
     return index == position
@@ -421,8 +484,65 @@ def _matching_code_brace(source: str, opening: int) -> int | None:
                 return None
             index = closing + 2
             continue
-        if source[index] in {"'", '"', "`"}:
+        if source[index] in {"'", '"'}:
             index = _skip_quoted(source, index)
+            continue
+        if source[index] == "`":
+            index = _skip_template_literal(source, index)
+            continue
+        if source[index] == "/" and _looks_like_regex(source, index):
+            index = _skip_regex(source, index)
+            continue
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _skip_template_literal(source: str, opening: int) -> int:
+    index = opening + 1
+    while index < len(source):
+        if source[index] == "\\":
+            index += 2
+            continue
+        if source[index] == "`":
+            return index + 1
+        if source.startswith("${", index):
+            end = _skip_template_expression(source, index + 2)
+            if end is None:
+                return len(source)
+            index = end + 1
+            continue
+        index += 1
+    return len(source)
+
+
+def _skip_template_expression(source: str, start: int) -> int | None:
+    depth = 1
+    index = start
+    while index < len(source):
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            index = len(source) if newline < 0 else newline + 1
+            continue
+        if source.startswith("/*", index):
+            closing = source.find("*/", index + 2)
+            if closing < 0:
+                return None
+            index = closing + 2
+            continue
+        if source[index] in {"'", '"'}:
+            index = _skip_quoted(source, index)
+            continue
+        if source[index] == "`":
+            index = _skip_template_literal(source, index)
+            continue
+        if source[index] == "/" and _looks_like_regex(source, index):
+            index = _skip_regex(source, index)
             continue
         if source[index] == "{":
             depth += 1
