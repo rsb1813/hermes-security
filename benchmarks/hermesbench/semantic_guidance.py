@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from collections import deque
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import posixpath
 import re
@@ -186,6 +188,7 @@ def _scan_files(
     scanned = 0
     skipped = 0
     total_bytes = 0
+    retained_references = 0
     seen_paths: set[str] = set()
     for raw_path in paths:
         relative_path = _canonical_relative_path(raw_path)
@@ -196,30 +199,84 @@ def _scan_files(
         try:
             resolved = candidate.resolve(strict=True)
             resolved.relative_to(snapshot)
-            file_stat = candidate.lstat()
+            candidate.lstat()
         except OSError:
             skipped += 1
             continue
         except ValueError:
             skipped += 1
             continue
-        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
-            skipped += 1
-            continue
-        if file_stat.st_size > MAX_FILE_BYTES or total_bytes + file_stat.st_size > limits.total_source_bytes:
-            skipped += 1
-            continue
         try:
-            source = candidate.read_bytes().decode("utf-8")
-        except (OSError, UnicodeDecodeError):
+            encoded, source_size = _read_pinned_source(candidate)
+            if total_bytes + source_size > limits.total_source_bytes:
+                raise ValueError("source budget exceeded")
+            source = encoded.decode("utf-8")
+        except (OSError, UnicodeDecodeError, ValueError):
             skipped += 1
             continue
-        total_bytes += file_stat.st_size
+        total_bytes += source_size
         scanned += 1
         if len(declarations) >= limits.declaration_count:
             continue
-        declarations.extend(_extract_declarations(relative_path, source, limits.declaration_count - len(declarations)))
+        extracted = _extract_declarations(relative_path, source, limits.declaration_count - len(declarations))
+        for declaration in extracted:
+            remaining_references = max(0, limits.edge_count - retained_references)
+            calls = declaration.calls[:remaining_references]
+            remaining_references -= len(calls)
+            imports = declaration.imports[:remaining_references]
+            retained_references += len(calls) + len(imports)
+            declarations.append(replace(declaration, calls=calls, imports=imports))
     return tuple(declarations), _ScanStats(scanned, skipped)
+
+
+def _read_pinned_source(path: Path) -> tuple[bytes, int]:
+    before = path.lstat()
+    _validate_source_metadata(before)
+    identity = _source_identity(before)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        _validate_source_metadata(opened)
+        if _source_identity(opened) != identity:
+            raise ValueError("source identity changed before open")
+        encoded = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(16 * 1024, MAX_FILE_BYTES + 1 - len(encoded)))
+            if not chunk:
+                break
+            encoded.extend(chunk)
+            if len(encoded) > MAX_FILE_BYTES:
+                raise ValueError("source exceeds maximum size")
+    finally:
+        os.close(descriptor)
+    after = path.lstat()
+    _validate_source_metadata(after)
+    if _source_identity(after) != identity:
+        raise ValueError("source identity changed after read")
+    return bytes(encoded), len(encoded)
+
+
+def _validate_source_metadata(metadata: object) -> None:
+    mode = getattr(metadata, "st_mode", None)
+    links = getattr(metadata, "st_nlink", None)
+    size = getattr(metadata, "st_size", None)
+    attributes = getattr(metadata, "st_file_attributes", None)
+    if not isinstance(mode, int) or isinstance(mode, bool) or not stat.S_ISREG(mode):
+        raise ValueError("source is not regular")
+    if not isinstance(links, int) or isinstance(links, bool) or links != 1:
+        raise ValueError("source link count is invalid")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0 or size > MAX_FILE_BYTES:
+        raise ValueError("source size is invalid")
+    if attributes is not None and (not isinstance(attributes, int) or isinstance(attributes, bool) or attributes & 0x400):
+        raise ValueError("source attributes are invalid")
+
+
+def _source_identity(metadata: object) -> tuple[int, int, int, int]:
+    values = (getattr(metadata, "st_dev", None), getattr(metadata, "st_ino", None), getattr(metadata, "st_size", None), getattr(metadata, "st_mtime_ns", None))
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in values):
+        raise ValueError("source identity is unavailable")
+    return values  # type: ignore[return-value]
 
 
 def _canonical_relative_path(raw_path: str) -> str:
@@ -338,7 +395,7 @@ def _python_declarations(path: str, source: str, matches: list[re.Match[str]], r
         end_line = len(lines)
         for line_number in range(start_line, len(lines)):
             line = lines[line_number]
-            if line.strip() and len(line) - len(line.lstrip(" \t")) <= indent and re.match(r"(?:async\s+)?def\s+", line.lstrip()):
+            if line.strip() and len(line) - len(line.lstrip(" \t")) <= indent:
                 end_line = line_number
                 break
         declarations.append(_declaration_from_block(path, "python", match.group("name"), start_line, lines[start_line - 1 : end_line]))
@@ -431,7 +488,7 @@ def _lexical_state_map(source: str, language: str) -> str:
                 triple_quote = False
                 index += 3
                 continue
-            if character == "\\" and not triple_quote and quote != "'" and index + 1 < len(source):
+            if character == "\\" and not triple_quote and index + 1 < len(source):
                 states[index] = _STRING
                 index += 1
                 states[index] = _STRING
@@ -569,10 +626,17 @@ def _operation_callees(line: str, anchors: set[str]) -> tuple[str, ...]:
 
 def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits) -> tuple[tuple[_Route, ...], int]:
     by_identity = {(item.location.path, item.location.line, item.location.symbol): item for item in declarations}
+    by_file_symbol: dict[tuple[str, str], list[_Declaration]] = {}
+    by_language_symbol: dict[tuple[str, str], list[_Declaration]] = {}
+    for item in declarations:
+        by_file_symbol.setdefault((item.location.path, item.location.symbol.lower()), []).append(item)
+        by_language_symbol.setdefault((item.language, item.location.symbol.lower()), []).append(item)
     outgoing: dict[tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]] = {}
     edge_count = 0
     for identity, declaration in by_identity.items():
-        resolved = _resolve_calls(declaration, declarations)
+        if edge_count >= limits.edge_count:
+            break
+        resolved = _resolve_calls(declaration, by_file_symbol, by_language_symbol)
         retained_edges = resolved[: max(0, limits.edge_count - edge_count)]
         outgoing[identity] = retained_edges
         edge_count += len(retained_edges)
@@ -584,26 +648,31 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
             incoming[target].append((caller, strength))
     retained: dict[tuple[_Location, _Location], _Route] = {}
     forward_limit, reverse_quota = _route_direction_quotas(limits.route_count)
+    forward_work = [forward_limit]
     for declaration in declarations:
         if not declaration.sources:
             continue
         identity = _location_identity(declaration.location)
         for source in declaration.sources:
-            _traverse_routes(source, identity, by_identity, outgoing, limits, retained, forward_limit)
+            _traverse_routes(source, identity, by_identity, outgoing, limits, retained, forward_limit, forward_work)
             if len(retained) >= forward_limit:
                 break
         if len(retained) >= forward_limit:
             break
     if reverse_quota:
+        reverse_work = [reverse_quota]
         for declaration in declarations:
             identity = _location_identity(declaration.location)
             for family, operation in declaration.operations:
+                if declaration.sources and all((source, operation) in retained for source in declaration.sources):
+                    continue
                 _traverse_reverse_routes(
                     family,
                     operation,
                     identity,
                     by_identity,
                     incoming,
+                    reverse_work,
                     limits,
                     retained,
                     limits.route_count,
@@ -627,12 +696,14 @@ def _traverse_routes(
     limits: GuidanceLimits,
     retained: dict[tuple[_Location, _Location], _Route],
     route_limit: int,
+    work_budget: list[int],
 ) -> None:
-    queue: list[tuple[tuple[str, int, str], tuple[_Location, ...], str, int]] = [
+    queue = deque([
         (root_identity, (declarations[root_identity].location,), "direct", 0)
-    ]
-    while queue and len(retained) < route_limit:
-        identity, trace, strength, depth = queue.pop(0)
+    ])
+    while queue and len(retained) < route_limit and work_budget[0] > 0:
+        identity, trace, strength, depth = queue.popleft()
+        work_budget[0] -= 1
         declaration = declarations[identity]
         for family, operation in declaration.operations:
             route_strength = "name-only" if declaration.language == "generic" else strength
@@ -655,7 +726,9 @@ def _traverse_routes(
             continue
         if depth >= limits.graph_depth or len(trace) >= 12:
             continue
-        for target_identity, edge_strength in outgoing[identity]:
+        for target_identity, edge_strength in outgoing.get(identity, ()):
+            if work_budget[0] <= len(queue):
+                break
             target = declarations[target_identity]
             if target.location in trace:
                 continue
@@ -669,15 +742,17 @@ def _traverse_reverse_routes(
     root_identity: tuple[str, int, str],
     declarations: dict[tuple[str, int, str], _Declaration],
     incoming: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]],
+    work_budget: list[int],
     limits: GuidanceLimits,
     retained: dict[tuple[_Location, _Location], _Route],
     route_limit: int,
 ) -> None:
-    queue: list[tuple[tuple[str, int, str], tuple[_Location, ...], str, int]] = [
+    queue = deque([
         (root_identity, (declarations[root_identity].location,), "direct", 0)
-    ]
-    while queue and len(retained) < route_limit:
-        identity, reverse_trace, strength, depth = queue.pop(0)
+    ])
+    while queue and len(retained) < route_limit and work_budget[0] > 0:
+        identity, reverse_trace, strength, depth = queue.popleft()
+        work_budget[0] -= 1
         declaration = declarations[identity]
         trace = tuple(reversed(reverse_trace))
         for source in declaration.sources:
@@ -698,6 +773,8 @@ def _traverse_reverse_routes(
         if depth >= limits.graph_depth or len(reverse_trace) >= 12:
             continue
         for caller_identity, edge_strength in incoming[identity]:
+            if work_budget[0] <= len(queue):
+                break
             caller = declarations[caller_identity]
             if caller.location in reverse_trace:
                 continue
@@ -713,17 +790,12 @@ def _traverse_reverse_routes(
 
 def _resolve_calls(
     declaration: _Declaration,
-    declarations: tuple[_Declaration, ...],
+    by_file_symbol: dict[tuple[str, str], list[_Declaration]],
+    by_language_symbol: dict[tuple[str, str], list[_Declaration]],
 ) -> tuple[tuple[tuple[str, int, str], str], ...]:
     resolved: list[tuple[tuple[str, int, str], str]] = []
     for call in declaration.calls:
-        same_file = [
-            item
-            for item in declarations
-            if _same_file_call_target(declaration, call, item)
-            and item.location.path == declaration.location.path
-            and item.location.symbol.lower() == call.name
-        ]
+        same_file = [item for item in by_file_symbol.get((declaration.location.path, call.name), ()) if _same_file_call_target(declaration, call, item)]
         if len(same_file) == 1:
             resolved.append((_location_identity(same_file[0].location), "direct"))
             continue
@@ -732,11 +804,11 @@ def _resolve_calls(
             for item in declaration.imports
             if (call.qualifier == item.local_name.lower()) or (call.qualifier is None and call.name == item.local_name.lower())
         ]
-        imported = _resolve_import_targets(declaration, call, imports, declarations)
+        imported = _resolve_import_targets(declaration, call, imports, by_language_symbol)
         if len(imported) == 1:
             resolved.append((_location_identity(imported[0].location), "import-linked"))
             continue
-        global_matches = [item for item in declarations if call.qualifier is None and item.location.symbol.lower() == call.name]
+        global_matches = by_language_symbol.get((declaration.language, call.name), ()) if call.qualifier is None else ()
         for target in global_matches:
             resolved.append((_location_identity(target.location), "name-only"))
     return tuple(dict.fromkeys(resolved))
@@ -752,17 +824,15 @@ def _resolve_import_targets(
     declaration: _Declaration,
     call: _Call,
     imports: list[_Import],
-    declarations: tuple[_Declaration, ...],
+    by_language_symbol: dict[tuple[str, str], list[_Declaration]],
 ) -> list[_Declaration]:
     targets: list[_Declaration] = []
     for imported in imports:
         symbol = imported.symbol or call.name
         targets.extend(
             item
-            for item in declarations
-            if item.language == declaration.language
-            and item.location.symbol.lower() == symbol
-            and _module_matches(declaration.location.path, imported.module, item.location.path, declaration.language, imported.symbol)
+            for item in by_language_symbol.get((declaration.language, symbol), ())
+            if _module_matches(declaration.location.path, imported.module, item.location.path, declaration.language, imported.symbol)
         )
     return list(dict.fromkeys(targets))
 

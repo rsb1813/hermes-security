@@ -104,6 +104,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         runtime: _Runtime,
         auth: dict[str, object] | None = None,
         allowed_command_prefixes: tuple[tuple[str, ...], ...] = (),
+        hunt_evidence_protocol_version: int | None = None,
     ) -> CodexExecAdapter:
         if workflow == "hunt" and runtime.final_message == _FINAL_PREDICTION:
             runtime.final_message = json.dumps(
@@ -120,6 +121,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                 "refresh_token": "host-refresh-token-must-not-cross",
             },
         }
+        kwargs = {} if hunt_evidence_protocol_version is None else {"hunt_evidence_protocol_version": hunt_evidence_protocol_version}
         return CodexExecAdapter(
             runtime=runtime,
             auth_supplier=lambda: managed_auth,
@@ -128,6 +130,7 @@ class CodexExecAdapterTests(unittest.TestCase):
             model="gpt-5.6-terra",
             reasoning_effort="high",
             allowed_command_prefixes=allowed_command_prefixes,
+            **kwargs,
         )
 
     def test_hunt_discovery_requires_the_exact_priority_packet_read(self) -> None:
@@ -139,6 +142,26 @@ class CodexExecAdapterTests(unittest.TestCase):
             with self.assertRaises(CodexExecError) as caught:
                 adapter(_request(), Path(directory), 60)
         self.assertEqual(caught.exception.failure_code, "hunt_evidence_packet_missing")
+
+    def test_hunt_discovery_v1_uses_priority_only_artifacts_and_prompt(self) -> None:
+        priority = "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
+        runtime = _Runtime(_stream(command=priority))
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._adapter("hunt", "hunt-balanced", runtime, hunt_evidence_protocol_version=1)(
+                _request(), Path(directory), 60
+            )
+        self.assertIsNotNone(result.hunt_evidence)
+        prompt = runtime.calls[0]["command_argv"][-1]
+        self.assertIn("priority-packet.jsonl", prompt)
+        self.assertNotIn("semantic-guidance.jsonl", prompt)
+
+    def test_hunt_discovery_default_protocol_keeps_current_prompt_bytes(self) -> None:
+        first = _Runtime(_hunt_stream())
+        second = _Runtime(_hunt_stream())
+        with tempfile.TemporaryDirectory() as directory:
+            self._adapter("hunt", "hunt-balanced", first)(_request(), Path(directory) / "one", 60)
+            self._adapter("hunt", "hunt-balanced", second, hunt_evidence_protocol_version=2)(_request(), Path(directory) / "two", 60)
+        self.assertEqual(first.calls[0]["command_argv"][-1], second.calls[0]["command_argv"][-1])
 
     def test_hunt_discovery_requires_exact_semantic_guidance_reads_and_investigation_only_prompt(self) -> None:
         # Hunt discovery must attest separate priority and semantic guidance reads.

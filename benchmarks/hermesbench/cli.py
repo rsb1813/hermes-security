@@ -236,6 +236,7 @@ def _codex_adapter(
     profile: str,
     *,
     allowed_command_prefixes: tuple[tuple[str, ...], ...],
+    hunt_evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
 ) -> CodexExecAdapter:
     return CodexExecAdapter(
         runtime=ContainerRuntime(controls.image_digest),
@@ -245,6 +246,7 @@ def _codex_adapter(
         model=controls.model,
         reasoning_effort=controls.reasoning_effort,
         allowed_command_prefixes=allowed_command_prefixes,
+        hunt_evidence_protocol_version=hunt_evidence_protocol_version,
     )
 
 

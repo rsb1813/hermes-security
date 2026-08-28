@@ -554,6 +554,49 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(result.skipped_file_count, 2)
         self.assertEqual(result.row_count, 1)
 
+    def test_replaced_source_after_lstat_is_skipped_without_reading_replacement(self) -> None:
+        snapshot = self._root / "replacement"
+        snapshot.mkdir()
+        target = snapshot / "app.py"
+        target.write_text("import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n", encoding="utf-8")
+        replacement = snapshot / "replacement.py"
+        replacement.write_text("import subprocess\ndef replaced(request):\n    return subprocess.run(request.args['q'])\n", encoding="utf-8")
+        original_open = semantic_guidance.os.open
+
+        def replace_before_open(path: object, flags: int) -> int:
+            if Path(path) == target:
+                os.replace(replacement, target)
+            return original_open(path, flags)
+
+        with mock.patch.object(semantic_guidance.os, "open", side_effect=replace_before_open):
+            result = build_semantic_guidance(snapshot, ("app.py",), "hunt-balanced")
+        self.assertEqual(result.scanned_file_count, 0)
+        self.assertEqual(result.skipped_file_count, 1)
+        self.assertEqual(result.canonical_bytes, b"")
+
+    def test_python_declaration_stops_before_sibling_class_method(self) -> None:
+        rows = self._rows(
+            {
+                "app.py": (
+                    "def handle(request):\n"
+                    "    return request.args['q']\n"
+                    "class Worker:\n"
+                    "    def run(self, value):\n"
+                    "        return subprocess.run(value)\n"
+                )
+            }
+        )
+        self.assertFalse(any(row["source"]["symbol"] == "handle" for row in rows))
+
+    def test_escaped_single_quotes_do_not_create_fake_operations(self) -> None:
+        fixtures = {
+            "app.py": "def handle(request):\n    note = 'escaped \\\' subprocess.run(request.args[\\\'q\\\'])'\n    return request.args['q']\n",
+            "app.js": "function handle(request) { const note = 'escaped \\\' child_process.exec(request.query.q)'; return request.query.q; }\n",
+        }
+        for path, source in fixtures.items():
+            with self.subTest(path=path):
+                self.assertEqual(self._rows({path: source}), [])
+
     def test_duplicate_frontier_path_does_not_duplicate_endpoint(self) -> None:
         snapshot = self._root / "duplicate"
         snapshot.mkdir()
