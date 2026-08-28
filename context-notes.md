@@ -243,3 +243,21 @@
 
 - RED: `test_incomplete_hunt_receipt_has_no_public_predictions_and_revalidates` produced a normal incomplete Hunt workflow after fixed `final_response_invalid` verification failures, but `validate_workflow_receipt` incorrectly required a nonexistent public-projection hash and raised `workflow receipt public predictions hash does not match`.
 - GREEN: public projections and hashes are now mandatory only for completed Hunt workflows. Incomplete Hunt and every Standard workflow must have neither a public hash nor a public-predictions artifact; receipt validation rejects an unexpected artifact fail-closed. The full suite passed 231 tests with four platform skips, and compileall plus diff checks passed without Docker, model, network, or private/auth-path access.
+
+### Task 13 paid diagnostic v11
+
+- The rebuilt rich-protocol runtime image passed direct schema mode checks and the existing named-permission smoke before the paid run. Its immutable image ID is held only in the ignored private controls.
+- Paid single-task diagnostic v11 completed two top-level Hunt invocations in approximately 687 seconds. Discovery used approximately 466 seconds and verification used approximately 221 seconds.
+- v11 recorded 2,760,960 cached input tokens, 184,782 uncached input tokens, and 16,183 output tokens. The discovery phase recorded 2,007,808 cached, 106,615 uncached, and 9,684 output tokens; verification recorded 753,152 cached, 78,167 uncached, and 6,499 output tokens.
+- The rich protocol increased the internal pool from one candidate to three and produced one terminal verifier decision for every candidate. All three candidates were rejected, leaving zero public findings, zero advisory recall, zero localization credit, and the unchanged 0.15 composite score from fixed-snapshot specificity.
+- Relative to v10, elapsed time increased by about 2.16 times and uncached input increased by about 1.72 times without any discovery gain. Candidate-count expansion alone is therefore rejected as a sufficient performance strategy.
+- The v11 workflow receipt revalidated at schema version 2. All eight Canary snapshots retained zero audit violations and exact manifest hashes; 21 retained artifacts contained no bounded host-auth value or host path, and no container remained.
+- Discovery invoked the deterministic frontier helper once, but the workflow did not retain or receipt-bind the resulting inventory, frontier, candidate references, or unreviewed debt. The next material change is an adapter-enforced artifact gate, not an additional model call.
+
+### Task 14 artifact-gate design
+
+- A read-only architecture review selected host-precomputed artifacts over model-authored closure files or model-authored coverage summaries. The host can reproduce and validate the evidence while the model cannot inflate reviewed coverage.
+- A no-model probe over the fixed diagnostic generated a 15,027-row full inventory in 0.112 seconds, an 11,277-row rank input in 16.607 seconds, and an 11,277-row frontier in 0.614 seconds. Their raw sizes were approximately 1.08 MB, 4.43 MB, and 3.34 MB, so bounded host preparation is practical relative to the 480-second task budget.
+- Ruling: Standard keeps exact workflow-receipt schema version 2 and unchanged artifacts, while Hunt alone advances to receipt schema version 3 with evidence hash and protocol fields. Frozen controls remain schema version 2 because the existing paired controls are shared by Standard and Hunt. If this ruling is wrong, receipt parsing will need separate public types rather than conditional exact fields.
+- The bounded priority packet presents at most 512 rows for `hunt-balanced` and 1,024 for `hunt-max`, with at most 384 UTF-8 preview bytes per row and a one-MiB total cap. It changes initial review order only; the full inventory and frontier remain eligible and every unvalidated frontier pass stays debt.
+- Candidate linkage never counts as reviewed closure. The host links every candidate location and search pass to the precomputed frontier, but `validated_closure_count` remains zero until a later independently verified closure protocol is added.
