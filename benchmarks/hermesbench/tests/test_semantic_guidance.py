@@ -852,6 +852,48 @@ class SemanticGuidanceTests(unittest.TestCase):
                 else:
                     self.assertEqual(row["eligible_search_passes"], ["forward"])
 
+    def test_schema_three_rejects_component_conflicts_for_exact_duplicate_frontier_paths(self) -> None:
+        snapshot = self._root / "duplicate-schema-three-components"
+        snapshot.mkdir()
+        (snapshot / "app.py").write_text(
+            "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+            build_semantic_guidance(
+                snapshot,
+                (
+                    ("app.py", "component-first", ("forward",)),
+                    ("app.py", "component-conflict", ("forward",)),
+                ),
+                "hunt-balanced",
+                guidance_schema_version=3,
+            )
+
+    def test_schema_two_component_contexts_preserve_legacy_canonical_bytes(self) -> None:
+        snapshot = self._root / "schema-two-component-contexts"
+        snapshot.mkdir()
+        (snapshot / "app.py").write_text(
+            "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
+            encoding="utf-8",
+        )
+        baseline = build_semantic_guidance(
+            snapshot,
+            (("app.py", ("forward",)),),
+            "hunt-balanced",
+            guidance_schema_version=2,
+        )
+        component_contexts = build_semantic_guidance(
+            snapshot,
+            (
+                ("app.py", "component-first", ("forward",)),
+                ("app.py", "component-conflict", ("forward",)),
+            ),
+            "hunt-balanced",
+            guidance_schema_version=2,
+        )
+        self.assertEqual(component_contexts.canonical_bytes, baseline.canonical_bytes)
+
     def test_equivalent_frontier_paths_are_canonicalized_before_deduplication(self) -> None:
         snapshot = self._root / "canonical"
         snapshot.mkdir()
