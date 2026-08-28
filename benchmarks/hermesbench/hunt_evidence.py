@@ -298,6 +298,8 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
             raise HuntEvidenceError("semantic guidance was not read", category="hunt_semantic_guidance_missing")
         if observed_argv.count(_REQUIRED_SEMANTIC_READ) != 1:
             raise HuntEvidenceError("semantic guidance was read more than once", category="hunt_semantic_guidance_duplicate")
+        if observed_argv.index(_REQUIRED_PACKET_READ) > observed_argv.index(_REQUIRED_SEMANTIC_READ):
+            raise HuntEvidenceError("Hunt packet reads are out of order")
     try:
         for artifact, label in ((prepared.inventory, "inventory"), (prepared.rank_input, "rank input"), (prepared.frontier, "frontier"), (prepared.frontier_receipt, "frontier receipt"), (prepared.priority_packet, "priority packet")):
             _verify_record(artifact, label)

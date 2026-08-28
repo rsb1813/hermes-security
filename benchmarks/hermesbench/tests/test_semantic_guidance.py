@@ -115,6 +115,168 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(row["strength"], "import-linked")
         self.assertEqual([item["path"] for item in row["trace"]], ["api.py", "store.py"])
 
+    def test_unique_same_file_call_produces_direct_route(self) -> None:
+        row = self._single_row(
+            {
+                "app.py": (
+                    "import subprocess\n"
+                    "def handle(request):\n"
+                    "    return run(request.args['q'])\n"
+                    "def run(value):\n"
+                    "    return subprocess.run(value)\n"
+                )
+            }
+        )
+        self.assertEqual(row["strength"], "direct")
+        self.assertEqual([item["symbol"] for item in row["trace"]], ["handle", "run"])
+
+    def test_language_methods_and_assigned_callables_produce_direct_routes(self) -> None:
+        fixtures = {
+            "python": (
+                "app.py",
+                "import subprocess\n"
+                "class Handler:\n"
+                "    def handle(self, request):\n"
+                "        return self.run(request.args['q'])\n"
+                "    def run(self, value):\n"
+                "        return subprocess.run(value)\n",
+            ),
+            "go": (
+                "app.go",
+                "type Handler struct{}\n"
+                "func (handler Handler) Handle(request *http.Request) { handler.Run(request.URL.Query().Get(\"q\")) }\n"
+                "func (handler Handler) Run(value string) { exec.Command(value) }\n",
+            ),
+            "typescript": (
+                "app.ts",
+                "class Handler {\n"
+                "  handle(request: Request) { return this.run(request.query.q); }\n"
+                "  run(value: string) { return child_process.exec(value); }\n"
+                "}\n",
+            ),
+            "javascript": (
+                "app.js",
+                "const run = (value) => child_process.exec(value);\n"
+                "const handle = function (request) { return run(request.query.q); };\n",
+            ),
+        }
+        for language, (path, source) in fixtures.items():
+            with self.subTest(language=language):
+                row = self._single_row({path: source})
+                self.assertEqual(row["strength"], "direct")
+
+    def test_python_go_and_typescript_assigned_callables_produce_direct_routes(self) -> None:
+        fixtures = {
+            "python": (
+                "app.py",
+                "import subprocess\n"
+                "run = lambda value: subprocess.run(value)\n"
+                "handle = lambda request: run(request.args['q'])\n",
+            ),
+            "go": (
+                "app.go",
+                "var run = func(value string) { exec.Command(value) }\n"
+                "var handle = func(request *http.Request) { run(request.URL.Query().Get(\"q\")) }\n",
+            ),
+            "typescript": (
+                "app.ts",
+                "class Handler {\n"
+                "  run: (value: string) => void = (value) => child_process.exec(value);\n"
+                "  handle: (request: Request) => void = (request) => this.run(request.query.q);\n"
+                "}\n",
+            ),
+        }
+        for language, (path, source) in fixtures.items():
+            with self.subTest(language=language):
+                row = self._single_row({path: source})
+                self.assertEqual(row["strength"], "direct")
+
+    def test_source_scanner_ignores_comments_and_strings_without_losing_call_name(self) -> None:
+        row = self._single_row(
+            {
+                "app.ts": (
+                    "// function fake(request) { child_process.exec(request.query.q); }\n"
+                    "const note = \"child_process.exec(request.query.q)\";\n"
+                    "const run = (value) => child_process.exec(value, \"safe\");\n"
+                    "const handle = (request) => run(request.query.q);\n"
+                )
+            }
+        )
+        self.assertEqual(row["strength"], "direct")
+        self.assertEqual(row["operation"]["symbol"], "child_process.exec")
+        self.assertEqual([item["symbol"] for item in row["trace"]], ["handle", "run"])
+
+    def test_language_scanners_ignore_multiline_string_anchors(self) -> None:
+        fixtures = {
+            "python": (
+                "app.py",
+                "\"\"\"\ndef fake(request):\n    subprocess.run(request.args['q'])\n\"\"\"\n"
+                "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
+            ),
+            "go": (
+                "app.go",
+                "var note = `func fake(request *http.Request) { exec.Command(request.URL.Query().Get(\"q\")) }`\n"
+                "func handle(request *http.Request) { exec.Command(request.URL.Query().Get(\"q\")) }\n",
+            ),
+            "typescript": (
+                "app.ts",
+                "const note = `function fake(request) { child_process.exec(request.query.q); }`;\n"
+                "const handle = (request: Request) => child_process.exec(request.query.q);\n",
+            ),
+            "javascript": (
+                "app.js",
+                "const note = `function fake(request) { child_process.exec(request.query.q); }`;\n"
+                "const handle = (request) => child_process.exec(request.query.q);\n",
+            ),
+        }
+        for language, (path, source) in fixtures.items():
+            with self.subTest(language=language):
+                row = self._single_row({path: source})
+                self.assertEqual(row["source"]["symbol"], "handle")
+
+    def test_import_link_requires_exact_module_path_and_unique_declaration(self) -> None:
+        rows = self._rows(
+            {
+                "api.py": "from pkg.store import run\ndef handle(request):\n    return run(request.args['q'])\n",
+                "other/store.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            }
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["strength"], "name-only")
+
+    def test_relative_python_and_typescript_modules_remain_import_linked(self) -> None:
+        fixtures = {
+            "python": {
+                "api.py": "from .services.store import run\ndef handle(request):\n    return run(request.args['q'])\n",
+                "services/store.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            },
+            "typescript": {
+                "src/api.ts": "import { run } from './services/store';\nexport function handle(request: Request) { return run(request.query.q); }\n",
+                "src/services/store.ts": "export function run(value: string) { return child_process.exec(value); }\n",
+            },
+        }
+        for language, files in fixtures.items():
+            with self.subTest(language=language):
+                row = self._single_row(files)
+                self.assertEqual(row["strength"], "import-linked")
+
+    def test_reverse_route_search_preserves_the_strongest_shortest_route(self) -> None:
+        row = self._single_row(
+            {
+                "app.py": (
+                    "import subprocess\n"
+                    "def handle(request):\n"
+                    "    return relay(request.args['q'])\n"
+                    "def relay(value):\n"
+                    "    return run(value)\n"
+                    "def run(value):\n"
+                    "    return subprocess.run(value)\n"
+                )
+            }
+        )
+        self.assertEqual(row["strength"], "direct")
+        self.assertEqual([item["symbol"] for item in row["trace"]], ["handle", "relay", "run"])
+
     def test_ambiguous_name_never_becomes_a_strong_route(self) -> None:
         rows = self._rows(
             {

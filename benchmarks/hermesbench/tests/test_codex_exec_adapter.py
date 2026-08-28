@@ -177,6 +177,19 @@ class CodexExecAdapterTests(unittest.TestCase):
                 )
         self.assertEqual(caught.exception.failure_code, "hunt_semantic_guidance_duplicate")
 
+    def test_hunt_discovery_rejects_semantic_guidance_read_before_priority_with_legacy_code(self) -> None:
+        priority = "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
+        semantic = "cat /workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl"
+        reverse = json.dumps(
+            {"type": "item.completed", "item": {"type": "command_execution", "command": semantic}}
+        ).encode("utf-8") + b"\n" + _stream(command=priority)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter("hunt", "hunt-balanced", _Runtime(reverse))(
+                    _request(), Path(directory), 60
+                )
+        self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
+
     def test_unchanged_discovery_and_verification_prompts_match_golden_hashes(self) -> None:
         # Changing non-Hunt-discovery prompt bytes would alter their public model contract.
         expected = {

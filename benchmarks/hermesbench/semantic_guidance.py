@@ -105,6 +105,7 @@ class _Location:
 class _Declaration:
     location: _Location
     language: str
+    receiver: str | None
     sources: tuple[_Location, ...]
     operations: tuple[tuple[str, _Location], ...]
     controls: tuple[_Location, ...]
@@ -240,19 +241,33 @@ def _canonical_relative_path(raw_path: str) -> str:
 def _extract_declarations(path: str, source: str, remaining: int) -> tuple[_Declaration, ...]:
     suffix = PurePosixPath(path).suffix.lower()
     if suffix == ".py":
-        matches = list(re.finditer(r"(?m)^(?P<indent>[ \t]*)(?:async[ \t]+)?def[ \t]+(?P<name>[A-Za-z_]\w*)\s*\(", source))
-        declarations = _python_declarations(path, source, matches, remaining)
+        masked = _mask_non_code(source, "python")
+        matches = list(re.finditer(
+            r"(?m)^(?P<indent>[ \t]*)(?:(?:async[ \t]+)?def[ \t]+(?P<name>[A-Za-z_]\w*)\s*\(|(?P<assigned>[A-Za-z_]\w*)\s*=\s*(?:async[ \t]+)?lambda\b)",
+            masked,
+        ))
+        declarations = _python_declarations(path, masked, matches, remaining)
         imports = _python_imports(source)
     elif suffix == ".go":
-        matches = list(re.finditer(r"\bfunc\s+(?:\([^\n)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(", source))
-        declarations = _brace_declarations(path, source, matches, remaining, "go")
+        masked = _mask_non_code(source, "go")
+        matches = list(re.finditer(
+            r"\bfunc\s+(?:\((?P<receiver>[A-Za-z_]\w*)\s+[^\n)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(|\b(?P<assigned>[A-Za-z_]\w*)\s*(?::=|=)\s*func\s*\(",
+            masked,
+        ))
+        declarations = _brace_declarations(path, masked, matches, remaining, "go")
         imports = _go_imports(source)
     elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
-        matches = list(re.finditer(r"\b(?:async\s+)?function\s+(?P<name>[A-Za-z_$][\w$]*)\s*\(", source))
-        declarations = _brace_declarations(path, source, matches, remaining, "typescript")
+        masked = _mask_non_code(source, "typescript")
+        matches = list(re.finditer(
+            r"(?m)\b(?:async\s+)?function\s+(?P<name>[A-Za-z_$][\w$]*)\s*\(|"
+            r"^[ \t]*(?!(?:if|for|while|switch|catch)\b)(?:public\s+|private\s+|protected\s+|static\s+|async\s+)*(?P<method>[A-Za-z_$][\w$]*)\s*\(|"
+            r"(?:\b(?:const|let|var)\s+|^[ \t]*(?:public\s+|private\s+|protected\s+|static\s+)*)?(?P<assigned>[A-Za-z_$][\w$]*)(?:\s*:(?:(?!\s=\s)[^\n])*)?\s*=\s*(?:async\s+)?(?:function\s*)?(?:\([^\n)]*\)|[A-Za-z_$][\w$]*)\s*(?:=>|\{)",
+            masked,
+        ))
+        declarations = _brace_declarations(path, masked, matches, remaining, "typescript")
         imports = _typescript_imports(source)
     else:
-        declarations = _generic_declarations(path, source, remaining)
+        declarations = _generic_declarations(path, _mask_non_code(source, "generic"), remaining)
         imports = ()
     return tuple(replace(declaration, imports=imports) for declaration in declarations)
 
@@ -262,6 +277,17 @@ def _python_declarations(path: str, source: str, matches: list[re.Match[str]], r
     lines = source.splitlines()
     for index, match in enumerate(matches[:remaining]):
         start_line = source.count("\n", 0, match.start()) + 1
+        if match.group("assigned"):
+            declarations.append(
+                _declaration_from_block(
+                    path,
+                    "python",
+                    match.group("assigned"),
+                    start_line,
+                    [lines[start_line - 1]],
+                )
+            )
+            continue
         indent = len(match.group("indent").expandtabs(8))
         end_line = len(lines)
         for line_number in range(start_line, len(lines)):
@@ -284,10 +310,24 @@ def _brace_declarations(
     for match in matches[:remaining]:
         start_line = source.count("\n", 0, match.start()) + 1
         opening = source.find("{", match.end())
-        closing = _matching_brace(source, opening)
-        block_end = len(source) if closing is None else closing + 1
+        line_end = source.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(source)
+        closing = _matching_brace(source, opening) if 0 <= opening <= line_end else None
+        block_end = line_end if closing is None else closing + 1
         block = source[match.start() : block_end].splitlines()
-        declarations.append(_declaration_from_block(path, language, match.group("name"), start_line, block))
+        groups = match.groupdict()
+        symbol = groups.get("name") or groups.get("method") or groups.get("assigned")
+        declarations.append(
+            _declaration_from_block(
+                path,
+                language,
+                symbol,
+                start_line,
+                block,
+                match.groupdict().get("receiver"),
+            )
+        )
     return tuple(declarations)
 
 
@@ -311,7 +351,14 @@ def _generic_declarations(path: str, source: str, remaining: int) -> tuple[_Decl
     return (_declaration_from_block(path, "generic", "file", 1, source.splitlines()),)
 
 
-def _declaration_from_block(path: str, language: str, symbol: str, line: int, lines: list[str]) -> _Declaration:
+def _declaration_from_block(
+    path: str,
+    language: str,
+    symbol: str,
+    line: int,
+    lines: list[str],
+    receiver: str | None = None,
+) -> _Declaration:
     location = _Location(path, line, symbol)
     source_locations = _anchor_locations(path, symbol, line, lines, SOURCE_ANCHORS)[:1]
     controls = _anchor_locations(path, symbol, line, lines, CONTROL_ANCHORS)
@@ -320,7 +367,68 @@ def _declaration_from_block(path: str, language: str, symbol: str, line: int, li
         for offset, line_text in enumerate(lines):
             for callee in _operation_callees(line_text, anchors):
                 operations.append((family, _Location(path, line + offset, callee)))
-    return _Declaration(location, language, source_locations, tuple(operations), controls, (), _calls(lines, line))
+    return _Declaration(location, language, receiver.lower() if receiver else None, source_locations, tuple(operations), controls, (), _calls(lines, line))
+
+
+def _mask_non_code(source: str, language: str) -> str:
+    masked = list(source)
+    quote: str | None = None
+    triple_quote = False
+    index = 0
+    while index < len(source):
+        character = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if quote is not None:
+            if triple_quote and source.startswith(quote * 3, index):
+                masked[index : index + 3] = [" ", " ", " "]
+                quote = None
+                triple_quote = False
+                index += 3
+                continue
+            if character == "\\" and not triple_quote and quote != "'" and index + 1 < len(source):
+                masked[index] = " "
+                index += 1
+                if masked[index] != "\n":
+                    masked[index] = " "
+            elif character == quote and not triple_quote:
+                masked[index] = " "
+                quote = None
+            elif character != "\n":
+                masked[index] = " "
+            index += 1
+            continue
+        if language == "python" and character == "#":
+            while index < len(source) and source[index] != "\n":
+                masked[index] = " "
+                index += 1
+            continue
+        if language != "python" and character == "/" and following == "/":
+            while index < len(source) and source[index] != "\n":
+                masked[index] = " "
+                index += 1
+            continue
+        if language != "python" and character == "/" and following == "*":
+            masked[index] = masked[index + 1] = " "
+            index += 2
+            while index < len(source) and not (source[index] == "*" and index + 1 < len(source) and source[index + 1] == "/"):
+                if source[index] != "\n":
+                    masked[index] = " "
+                index += 1
+            if index + 1 < len(source):
+                masked[index] = masked[index + 1] = " "
+                index += 2
+            continue
+        if language == "python" and character in {"'", '"'} and source.startswith(character * 3, index):
+            quote = character
+            triple_quote = True
+            masked[index : index + 3] = [" ", " ", " "]
+            index += 3
+            continue
+        if character in {"'", '"'} or (language != "python" and character == "`"):
+            quote = character
+            masked[index] = " "
+        index += 1
+    return "".join(masked)
 
 
 def _python_imports(source: str) -> tuple[_Import, ...]:
@@ -403,6 +511,12 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
         retained_edges = resolved[: max(0, limits.edge_count - edge_count)]
         outgoing[identity] = retained_edges
         edge_count += len(retained_edges)
+    incoming: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {
+        identity: [] for identity in by_identity
+    }
+    for caller, edges in outgoing.items():
+        for target, strength in edges:
+            incoming[target].append((caller, strength))
     retained: dict[tuple[_Location, _Location], _Route] = {}
     for declaration in declarations:
         if not declaration.sources:
@@ -410,6 +524,22 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
         identity = _location_identity(declaration.location)
         for source in declaration.sources:
             _traverse_routes(source, identity, by_identity, outgoing, limits, retained)
+            if len(retained) >= limits.route_count:
+                break
+        if len(retained) >= limits.route_count:
+            break
+    for declaration in declarations:
+        identity = _location_identity(declaration.location)
+        for family, operation in declaration.operations:
+            _traverse_reverse_routes(
+                family,
+                operation,
+                identity,
+                by_identity,
+                incoming,
+                limits,
+                retained,
+            )
             if len(retained) >= limits.route_count:
                 break
         if len(retained) >= limits.route_count:
@@ -460,6 +590,53 @@ def _traverse_routes(
             queue.append((target_identity, (*trace, target.location), next_strength, depth + 1))
 
 
+def _traverse_reverse_routes(
+    family: str,
+    operation: _Location,
+    root_identity: tuple[str, int, str],
+    declarations: dict[tuple[str, int, str], _Declaration],
+    incoming: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]],
+    limits: GuidanceLimits,
+    retained: dict[tuple[_Location, _Location], _Route],
+) -> None:
+    queue: list[tuple[tuple[str, int, str], tuple[_Location, ...], str, int]] = [
+        (root_identity, (declarations[root_identity].location,), "direct", 0)
+    ]
+    while queue and len(retained) < limits.route_count:
+        identity, reverse_trace, strength, depth = queue.pop(0)
+        declaration = declarations[identity]
+        trace = tuple(reversed(reverse_trace))
+        for source in declaration.sources:
+            route_strength = "name-only" if declaration.language == "generic" else strength
+            candidate = _Route(
+                route_strength,
+                family,
+                source,
+                operation,
+                trace,
+                _trace_controls(trace, declarations),
+                _reason_codes(route_strength, len(trace)),
+            )
+            endpoint = (source, operation)
+            current = retained.get(endpoint)
+            if current is None or _route_sort_key(candidate) < _route_sort_key(current):
+                retained[endpoint] = candidate
+        if depth >= limits.graph_depth or len(reverse_trace) >= 12:
+            continue
+        for caller_identity, edge_strength in incoming[identity]:
+            caller = declarations[caller_identity]
+            if caller.location in reverse_trace:
+                continue
+            queue.append(
+                (
+                    caller_identity,
+                    (*reverse_trace, caller.location),
+                    _combined_strength(strength, edge_strength),
+                    depth + 1,
+                )
+            )
+
+
 def _resolve_calls(
     declaration: _Declaration,
     declarations: tuple[_Declaration, ...],
@@ -469,12 +646,12 @@ def _resolve_calls(
         same_file = [
             item
             for item in declarations
-            if call.qualifier is None
+            if _same_file_call_target(declaration, call, item)
             and item.location.path == declaration.location.path
             and item.location.symbol.lower() == call.name
         ]
         if len(same_file) == 1:
-            resolved.append((_location_identity(same_file[0].location), "name-only"))
+            resolved.append((_location_identity(same_file[0].location), "direct"))
             continue
         imports = [
             item
@@ -491,6 +668,12 @@ def _resolve_calls(
     return tuple(dict.fromkeys(resolved))
 
 
+def _same_file_call_target(caller: _Declaration, call: _Call, target: _Declaration) -> bool:
+    if call.qualifier is None or call.qualifier in {"self", "this"}:
+        return True
+    return caller.language == "go" and target.language == "go" and target.receiver == call.qualifier
+
+
 def _resolve_import_targets(
     declaration: _Declaration,
     call: _Call,
@@ -505,17 +688,31 @@ def _resolve_import_targets(
             for item in declarations
             if item.location.symbol.lower() == symbol and _module_matches(declaration.location.path, imported.module, item.location.path)
         )
-    return targets
+    return list(dict.fromkeys(targets))
 
 
 def _module_matches(caller_path: str, module: str, target_path: str) -> bool:
     caller_parent = PurePosixPath(caller_path).parent
-    normalized_module = module.lstrip(".")
-    if module.startswith("."):
-        normalized_module = str((caller_parent / normalized_module).as_posix())
-    module_stem = normalized_module.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
-    target = PurePosixPath(target_path)
-    return target.stem == module_stem or target.with_suffix("").as_posix().replace("/", ".") == normalized_module
+    normalized = module.replace("\\", "/")
+    leading_dots = len(normalized) - len(normalized.lstrip("."))
+    if leading_dots:
+        base = caller_parent
+        for _ in range(leading_dots - 1):
+            base = base.parent
+        remainder = normalized[leading_dots:]
+        if remainder.startswith("/"):
+            remainder = remainder[1:]
+        else:
+            remainder = remainder.replace(".", "/")
+        normalized = (base / remainder).as_posix()
+    elif "/" not in normalized:
+        normalized = normalized.replace(".", "/")
+    target = PurePosixPath(target_path).as_posix()
+    if target.endswith(".d.ts"):
+        target = target[: -len(".d.ts")]
+    else:
+        target = PurePosixPath(target).with_suffix("").as_posix()
+    return target == normalized
 
 
 def _trace_controls(
