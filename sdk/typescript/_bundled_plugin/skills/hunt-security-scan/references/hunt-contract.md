@@ -48,19 +48,31 @@ The required state progression is `discovered -> evidence_built -> challenged ->
 
 ## HermesBench Host Guidance
 
-When HermesBench wraps this workflow, the trusted host prepares two immutable
-discovery packets from the snapshot before the container starts. Read the
-priority packet exactly once, then read `semantic-guidance.jsonl` exactly once.
-Do not author, rewrite, or treat either packet as closure evidence.
+When HermesBench wraps this workflow, evidence protocol version `1` prepares
+only the immutable priority packet. Versions `2` and `3` prepare that packet
+plus immutable `semantic-guidance.jsonl` from the snapshot before the container
+starts. For versions `2` and `3`, read the priority packet exactly once, then
+read semantic guidance exactly once. Do not author, rewrite, or treat either
+packet as closure evidence.
 
 Semantic guidance contains bounded lexical source-to-operation routes with
 `direct`, `import-linked`, or `name-only` strength. Every row is
-`investigation_only`. Strength orders investigation; it never raises candidate
-confidence or proves attacker control, reachability, impact, or guard failure.
-Open the actual source, trace the route, and check reachable controls and
-counterevidence before producing a candidate. Continue beyond guidance when
-source inspection identifies a better route because the complete frontier
-remains eligible.
+`investigation_only`. Strength and guidance passes order investigation; neither
+raises candidate confidence, proves attacker control, reachability, impact, or
+guard failure, nor changes candidate-to-frontier attestation. Open the actual
+source, trace the route, and check reachable controls and counterevidence before
+producing a candidate. Continue beyond guidance when source inspection
+identifies a better route because the complete frontier remains eligible.
+
+For evidence protocol version `3`, semantic guidance row schema `2` adds
+`eligible_search_passes`, derived only from the exact source, trace, and
+operation frontier paths in that row. For a guidance candidate, copy one listed
+pass supported by a submitted entry point, critical operation, or trace
+location. If submitted locations differ from the guidance row, or a candidate
+falls outside guidance or the priority packet, query `frontier.jsonl` by each
+exact submitted path and use only a listed pass on a submitted location. Do not
+invent, generalize, substitute, default, or repair a pass. In particular, there
+is no `general` fallback.
 
 The host scans each source file only up to 1 MiB. `hunt-balanced` scans at most
 64 MiB, retains at most 50,000 declarations, 200,000 call/import references,
@@ -71,10 +83,17 @@ edges, and 2,048 route work items or candidates at depth 6, then emits at most
 512 rows or 1 MiB. Empty or truncated guidance is valid and never removes
 frontier work or coverage debt.
 
-Retained evidence protocol version 1 has only the legacy priority packet. New
-version-2 runs bind the semantic packet hash and path-free counts. Both versions
-retain the same fresh discovery and independent validation actors; no extra
-model invocation or command prefix is introduced.
+Retained evidence protocol version `1` has the five legacy artifacts and the
+priority-only discovery prompt. Version `2` binds the semantic packet hash and
+path-free counts, retains semantic guidance row schema `1`, and uses the
+existing semantic discovery prompt. Version `3` uses semantic guidance row
+schema `2` with `eligible_search_passes`. All versions reconstruct from the
+receipt's recorded protocol, including incomplete discovery; workflow receipt
+schema remains `3` and frozen controls schema remains `2`. The two-call ceiling,
+480-second phase timeout, resource bounds, complete frontier, coverage debt,
+independent verifier, scorer, sandbox, authentication boundary, network
+isolation, and public-data boundary are unchanged. No version introduces an
+extra model invocation or command prefix.
 
 ## Ranking and Frontier Contracts
 

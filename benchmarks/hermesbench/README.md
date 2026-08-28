@@ -174,12 +174,25 @@ identity-free score artifact produced after verification.
 
 Hunt discovery prepares a host-side inventory, rank input, full frontier, and
 bounded priority packet before the container starts. Evidence protocol version
-`2` also prepares an immutable `semantic-guidance.jsonl` packet from snapshot
-bytes. Discovery reads the priority packet exactly once, then reads semantic
-guidance exactly once. The second packet is an investigation queue only: route
-strength never proves attacker control, reachability, impact, or a missing
-guard, and discovery must inspect the actual source plus reachable controls and
-counterevidence before producing a candidate.
+`1` has the legacy five-artifact contract and its priority-only discovery
+prompt. Version `2` adds the immutable `semantic-guidance.jsonl` packet from
+snapshot bytes while retaining semantic guidance row schema `1` and the
+existing semantic discovery prompt. Version `3` uses semantic guidance row
+schema `2`, which adds `eligible_search_passes` derived only from the exact
+source, trace, and operation frontier paths of that row. Versions `2` and `3`
+read the priority packet exactly once, then read semantic guidance exactly once.
+
+Semantic guidance is an investigation queue only. Its strength and eligible
+passes order investigation; neither proves attacker control, reachability,
+impact, or a missing guard, and neither changes candidate-to-frontier
+attestation. Discovery must inspect the actual source plus reachable controls
+and counterevidence before producing a candidate. For a version-3 guidance
+candidate, choose an eligible pass supported by a submitted entry point,
+critical operation, or trace location. If submitted locations differ from the
+guidance row, or a candidate falls outside guidance or the priority packet,
+look up `frontier.jsonl` by each exact submitted path and use only a pass listed
+for a submitted location. There is no `general` fallback: the host never
+invents, generalizes, substitutes, defaults, or repairs a model response.
 
 Semantic preparation is deterministic and bounded. Every source file is
 limited to 1 MiB. `hunt-balanced` scans at most 64 MiB, retains at most 50,000
@@ -193,22 +206,23 @@ guidance strength never make a frontier path ineligible and never count as
 reviewed closure.
 
 Each successful Hunt discovery task stores path-free `evidence.json`, and the
-phase stores ordered `evidence.jsonl` rows. Protocol version `2` adds only the
-semantic packet hash and row, edge, scanned-file, and skipped-file counts to the
-existing inventory, rank-input, frontier, priority-packet, candidate-link, and
-coverage-debt evidence. Relative paths remain inside the immutable scratch
-packet; persistent evidence contains hashes and counts rather than source paths,
-previews, candidate prose, or work IDs.
+phase stores ordered `evidence.jsonl` rows. Protocol versions `2` and `3` add
+only the semantic packet hash and row, edge, scanned-file, and skipped-file
+counts to the existing inventory, rank-input, frontier, priority-packet,
+candidate-link, and coverage-debt evidence. Relative paths remain inside the
+immutable scratch packet; persistent evidence contains hashes and counts rather
+than source paths, previews, candidate prose, or work IDs.
 
 Standard workflow receipts remain schema version `2` with their unchanged
 field set. Hunt receipts remain schema version `3` and explicitly bind evidence
-protocol version `1` or `2`. Version `1` reproduces the legacy five-artifact and
-evidence byte contract; version `2` reproduces the additional semantic packet
-and fields. Receipt validation always uses the recorded protocol, including for
-incomplete discovery, rather than inferring it from current defaults or
-evidence rows. Discovery preparation time remains inside the task budget, the
-container receives only the positive whole-second remainder, and a completed
-Hunt task still uses exactly two independent model invocations.
+protocol version `1`, `2`, or `3`. Every receipt reconstructs using its recorded
+protocol, including incomplete discovery, rather than current defaults or
+evidence rows. The Hunt workflow receipt schema remains `3`, and frozen controls
+schema remains `2`. The two-call ceiling, 480-second phase timeout, resource bounds,
+complete frontier, coverage debt, independent verifier, scorer, sandbox,
+authentication boundary, network isolation, and public-data boundary are
+unchanged. Discovery preparation remains inside the task budget, and the
+container receives only the positive whole-second remainder.
 
 ## Run paired repeats
 

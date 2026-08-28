@@ -122,8 +122,8 @@
 - [x] Write the frontier-pass annotation design specification.
 - [x] Review and approve the written frontier-pass annotation specification.
 - [x] Write the frontier-pass annotation implementation plan with RED and GREEN checkpoints.
-- [ ] Implement protocol-v3 frontier-pass annotations while preserving protocol-v1 and protocol-v2 receipt reconstruction.
-- [ ] Complete independent review and all protocol-v3 no-model boundary checks.
+- [x] Implement protocol-v3 frontier-pass annotations while preserving protocol-v1 and protocol-v2 receipt reconstruction.
+- [x] Complete independent review and all protocol-v3 no-model boundary checks.
 - [ ] Run one fixed protocol-v3 paid diagnostic under a new immutable output root.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
