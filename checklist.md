@@ -141,6 +141,7 @@
 - [x] Write and self-review the nested-output guidance Protocol-v4 design specification.
 - [x] Receive approval for the written Protocol-v4 design specification.
 - [x] Write the file-by-file Protocol-v4 implementation plan with RED and GREEN checkpoints.
+- [x] Add the explicit Protocol-v4 and semantic-schema-3 compatibility spine while retaining the Protocol-v3 live default.
 - [ ] Implement schema-3 nested-output guidance with vulnerable, guarded, and decoy tests first.
 - [ ] Implement deterministic strong-edge and family/component row allocation with budget tests first.
 - [ ] Implement the v4 blind verifier projection and prompt golden test first.

@@ -425,3 +425,10 @@
 - Relative to the immediately preceding failed diagnostic, observed workflow elapsed time fell 38.1 percent. Discovery alone used 37.7 percent less time, 44.7 percent fewer cached input tokens, 12.9 percent fewer uncached input tokens, and 40.2 percent fewer output tokens. The discovery prompt was unchanged, so these observed reductions are run variance rather than an attributable effect of the verification prompt change.
 - Ruling: the command-compliance change restored end-to-end measurement and reduced no security boundary, but it did not improve vulnerability-finding accuracy. A broader paid suite is not justified until the next strategy produces a positive discovery-quality signal on Canary; no Mini or full HermesBench escalation was started from this zero-recall result.
 - Independent post-run checks found zero audit violations, hash mismatches, or reparse entries across all eight Canary snapshots; zero authentication, host-path, private-identity, raw-output, or reparse matches across 23 retained files; zero private markers across four public artifacts; and no named or pinned HermesBench container remained.
+
+### Task 34 Protocol-v4 compatibility spine
+
+- Commits `368f20a8`, `8aa11956`, and `638644d8` add explicit Hunt evidence Protocol 4 and semantic schema 3 without promoting the live default beyond Protocol 3. Protocols 1 through 3 retain their explicit version mapping and canonical legacy behavior.
+- The first independent review reproduced a schema-1 and schema-2 duplicate-frontier compatibility regression caused by component-aware conflict handling. The implementation now applies component conflict checks only to schema 3.
+- Two subsequent boundary tests prove that differing components do not change schema-2 canonical bytes and that schema 3 still rejects a same-path, same-pass component conflict. The final independent re-review reported no Critical, Important, or Minor finding.
+- Focused verification passed 169 tests with six documented Windows or opt-in skips. `git diff --check` passed and the worktree was clean before Task 2.
