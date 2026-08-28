@@ -150,55 +150,133 @@ class CodexExecAdapterTests(unittest.TestCase):
             result = self._adapter("hunt", "hunt-balanced", runtime, hunt_evidence_protocol_version=1)(
                 _request(), Path(directory), 60
             )
+            semantic_guidance = (
+                Path(directory)
+                / "hermesbench-hunt"
+                / "semantic-guidance.jsonl"
+            )
         self.assertIsNotNone(result.hunt_evidence)
+        self.assertFalse(semantic_guidance.exists())
+        self.assertEqual(
+            result.observed_argv,
+            (("cat", priority.split(" ", 1)[1]),),
+        )
         prompt = runtime.calls[0]["command_argv"][-1]
         self.assertIn("priority-packet.jsonl", prompt)
         self.assertNotIn("semantic-guidance.jsonl", prompt)
 
-    def test_hunt_discovery_default_protocol_keeps_current_prompt_bytes(self) -> None:
-        first = _Runtime(_hunt_stream())
-        second = _Runtime(_hunt_stream())
+    def test_hunt_discovery_prompt_bytes_are_explicit_for_all_evidence_protocols(self) -> None:
+        expected = {
+            1: "4713cf562c5efa5bf504b909bac0bf8f18673aca5991fd00b5e89b211d5f2c47",
+            2: "8563f2276a113797a5896f1b500198afe519bf5cb497a98a526abbdbcef01dca",
+            3: "98906c398f5e15319266983ce30d1b18cf4a45b100f4123956220a2eb447b006",
+        }
+        for version, digest in expected.items():
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                runtime = _Runtime(_hunt_stream())
+                self._adapter(
+                    "hunt",
+                    "hunt-balanced",
+                    runtime,
+                    hunt_evidence_protocol_version=version,
+                )(_request(), Path(directory), 60)
+                prompt = runtime.calls[0]["command_argv"][-1]
+                self.assertEqual(
+                    hashlib.sha256(prompt.encode("utf-8")).hexdigest(), digest
+                )
+
+    def test_hunt_discovery_default_protocol_equals_explicit_protocol_three(self) -> None:
+        default = _Runtime(_hunt_stream())
+        explicit = _Runtime(_hunt_stream())
         with tempfile.TemporaryDirectory() as directory:
-            self._adapter("hunt", "hunt-balanced", first)(_request(), Path(directory) / "one", 60)
-            self._adapter("hunt", "hunt-balanced", second, hunt_evidence_protocol_version=2)(_request(), Path(directory) / "two", 60)
-        self.assertEqual(first.calls[0]["command_argv"][-1], second.calls[0]["command_argv"][-1])
+            self._adapter("hunt", "hunt-balanced", default)(
+                _request(), Path(directory) / "default", 60
+            )
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                explicit,
+                hunt_evidence_protocol_version=3,
+            )(_request(), Path(directory) / "explicit", 60)
+        self.assertEqual(
+            default.calls[0]["command_argv"][-1],
+            explicit.calls[0]["command_argv"][-1],
+        )
+
+    def test_hunt_discovery_protocol_three_adds_pass_selection_instructions(self) -> None:
+        protocol_two = _Runtime(_hunt_stream())
+        protocol_three = _Runtime(_hunt_stream())
+        with tempfile.TemporaryDirectory() as directory:
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                protocol_two,
+                hunt_evidence_protocol_version=2,
+            )(_request(), Path(directory) / "two", 60)
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                protocol_three,
+                hunt_evidence_protocol_version=3,
+            )(_request(), Path(directory) / "three", 60)
+        v2_prompt = protocol_two.calls[0]["command_argv"][-1]
+        v3_prompt = protocol_three.calls[0]["command_argv"][-1]
+        for instruction in (
+            "eligible_search_passes",
+            "frontier.jsonl",
+            "exact submitted path",
+            "Never invent, generalize, substitute, or default a search pass",
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertNotIn(instruction, v2_prompt)
+                self.assertIn(instruction, v3_prompt)
 
     def test_hunt_discovery_requires_exact_semantic_guidance_reads_and_investigation_only_prompt(self) -> None:
         # Hunt discovery must attest separate priority and semantic guidance reads.
         priority = "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
         semantic = "cat /workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl"
-        with tempfile.TemporaryDirectory() as directory:
-            runtime = _Runtime(_hunt_stream())
-            result = self._adapter("hunt", "hunt-balanced", runtime)(
-                _request(), Path(directory), 60
-            )
-        self.assertEqual(
-            result.observed_argv,
-            (("cat", priority.split(" ", 1)[1]), ("cat", semantic.split(" ", 1)[1])),
-        )
-        prompt = runtime.calls[0]["command_argv"][-1]
-        self.assertIn("investigation guidance only, never proof", prompt)
-        self.assertIn("Open the actual source", prompt)
-        self.assertIn("Do not raise candidate confidence from guidance strength", prompt)
-
-        missing = _Runtime(_stream(command=priority))
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(CodexExecError) as caught:
-                self._adapter("hunt", "hunt-balanced", missing)(
-                    _request(), Path(directory), 60
+        for version in (2, 3):
+            with self.subTest(version=version, read="one"), tempfile.TemporaryDirectory() as directory:
+                runtime = _Runtime(_hunt_stream())
+                result = self._adapter(
+                    "hunt",
+                    "hunt-balanced",
+                    runtime,
+                    hunt_evidence_protocol_version=version,
+                )(_request(), Path(directory), 60)
+                self.assertEqual(
+                    result.observed_argv,
+                    (("cat", priority.split(" ", 1)[1]), ("cat", semantic.split(" ", 1)[1])),
                 )
-        self.assertEqual(caught.exception.failure_code, "hunt_semantic_guidance_missing")
+                prompt = runtime.calls[0]["command_argv"][-1]
+                self.assertIn("investigation guidance only, never proof", prompt)
+                self.assertIn("Open the actual source", prompt)
+                self.assertIn("Do not raise candidate confidence from guidance strength", prompt)
 
-        duplicate_read = json.dumps(
-            {"type": "item.completed", "item": {"type": "command_execution", "command": semantic}}
-        ).encode("utf-8") + b"\n"
-        duplicate = _Runtime(duplicate_read + _hunt_stream())
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(CodexExecError) as caught:
-                self._adapter("hunt", "hunt-balanced", duplicate)(
-                    _request(), Path(directory), 60
-                )
-        self.assertEqual(caught.exception.failure_code, "hunt_semantic_guidance_duplicate")
+            missing = _Runtime(_stream(command=priority))
+            with self.subTest(version=version, read="missing"), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(CodexExecError) as caught:
+                    self._adapter(
+                        "hunt",
+                        "hunt-balanced",
+                        missing,
+                        hunt_evidence_protocol_version=version,
+                    )(_request(), Path(directory), 60)
+            self.assertEqual(caught.exception.failure_code, "hunt_semantic_guidance_missing")
+
+            duplicate_read = json.dumps(
+                {"type": "item.completed", "item": {"type": "command_execution", "command": semantic}}
+            ).encode("utf-8") + b"\n"
+            duplicate = _Runtime(duplicate_read + _hunt_stream())
+            with self.subTest(version=version, read="duplicate"), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(CodexExecError) as caught:
+                    self._adapter(
+                        "hunt",
+                        "hunt-balanced",
+                        duplicate,
+                        hunt_evidence_protocol_version=version,
+                    )(_request(), Path(directory), 60)
+            self.assertEqual(caught.exception.failure_code, "hunt_semantic_guidance_duplicate")
 
     def test_hunt_discovery_rejects_semantic_guidance_read_before_priority_with_legacy_code(self) -> None:
         priority = "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
@@ -206,12 +284,16 @@ class CodexExecAdapterTests(unittest.TestCase):
         reverse = json.dumps(
             {"type": "item.completed", "item": {"type": "command_execution", "command": semantic}}
         ).encode("utf-8") + b"\n" + _stream(command=priority)
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(CodexExecError) as caught:
-                self._adapter("hunt", "hunt-balanced", _Runtime(reverse))(
-                    _request(), Path(directory), 60
-                )
-        self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
+        for version in (2, 3):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(CodexExecError) as caught:
+                    self._adapter(
+                        "hunt",
+                        "hunt-balanced",
+                        _Runtime(reverse),
+                        hunt_evidence_protocol_version=version,
+                    )(_request(), Path(directory), 60)
+            self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
 
     def test_unchanged_discovery_and_verification_prompts_match_golden_hashes(self) -> None:
         # Changing non-Hunt-discovery prompt bytes would alter their public model contract.
