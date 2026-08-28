@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 
 
@@ -77,24 +77,46 @@ class _Token:
 @dataclass
 class _LexicalGoal:
     expression_start: bool = True
+    statement_start: bool = True
     pending_control_header: bool = False
+    pending_function_header: bool = False
     control_parenthesis_depth: int = 0
-    block_depth: int = 0
+    function_parenthesis_depth: int = 0
     block_expected: bool = False
+    brace_kinds: list[str] = field(default_factory=list)
+
+    def _expect_expression(self) -> None:
+        self.expression_start = True
+        self.statement_start = False
+
+    def _end_operand(self) -> None:
+        self.expression_start = False
+        self.statement_start = False
+
+    def _start_statement(self) -> None:
+        self.expression_start = True
+        self.statement_start = True
 
     def consume(self, token: _Token) -> None:
+        if token.kind != "space" and token.value != "{":
+            self.block_expected = False
         if token.kind == "identifier":
             if token.value in {"if", "for", "while", "switch", "catch", "with"}:
                 self.pending_control_header = True
-                self.expression_start = True
-            elif token.value in {"case", "delete", "do", "else", "new", "return", "throw", "typeof", "void", "yield"}:
-                self.block_expected = token.value in {"do", "else"}
-                self.expression_start = True
+                self._expect_expression()
+            elif token.value == "function":
+                self.pending_function_header = True
+                self._expect_expression()
+            elif token.value in {"do", "else", "finally", "try"}:
+                self.block_expected = True
+                self._expect_expression()
+            elif token.value in {"case", "delete", "new", "return", "throw", "typeof", "void", "yield"}:
+                self._expect_expression()
             else:
-                self.expression_start = False
+                self._end_operand()
             return
         if token.kind in {"number", "string", "regex", "template"}:
-            self.expression_start = False
+            self._end_operand()
             return
         if token.kind != "punctuation":
             return
@@ -104,30 +126,49 @@ class _LexicalGoal:
                 self.control_parenthesis_depth = 1
             elif self.control_parenthesis_depth:
                 self.control_parenthesis_depth += 1
-            self.expression_start = True
+            elif self.pending_function_header:
+                self.pending_function_header = False
+                self.function_parenthesis_depth = 1
+            elif self.function_parenthesis_depth:
+                self.function_parenthesis_depth += 1
+            self._expect_expression()
         elif token.value == ")":
             if self.control_parenthesis_depth:
                 self.control_parenthesis_depth -= 1
                 if self.control_parenthesis_depth == 0:
                     self.block_expected = True
-                    self.expression_start = True
+                    self._start_statement()
                     return
-            self.expression_start = False
+            elif self.function_parenthesis_depth:
+                self.function_parenthesis_depth -= 1
+                if self.function_parenthesis_depth == 0:
+                    self.block_expected = True
+                    self._start_statement()
+                    return
+            self._end_operand()
         elif token.value == "{":
-            if self.block_expected or self.block_depth:
-                self.block_depth += 1
-                self.block_expected = False
-            self.expression_start = True
-        elif token.value == "}":
-            if self.block_depth:
-                self.block_depth -= 1
-                self.expression_start = self.block_depth == 0
+            kind = "block" if self.block_expected or self.statement_start else "object"
+            self.brace_kinds.append(kind)
+            self.block_expected = False
+            if kind == "block":
+                self._start_statement()
             else:
-                self.expression_start = False
+                self._expect_expression()
+        elif token.value == "}":
+            kind = self.brace_kinds.pop() if self.brace_kinds else "object"
+            if kind == "block":
+                self._start_statement()
+            else:
+                self._end_operand()
+        elif token.value == "=>":
+            self.block_expected = True
+            self._expect_expression()
         elif token.value in {"++", "--", "]"}:
-            self.expression_start = False
+            self._end_operand()
+        elif token.value == ";":
+            self._start_statement()
         else:
-            self.expression_start = True
+            self._expect_expression()
 
 
 def _next_token(source: str, index: int) -> _Token:
@@ -148,7 +189,7 @@ def _next_token(source: str, index: int) -> _Token:
     if character in {"'", '"'}:
         end = _skip_quoted(source, index)
         return _Token("string", "", index, end)
-    if source.startswith("++", index) or source.startswith("--", index):
+    if source.startswith("++", index) or source.startswith("--", index) or source.startswith("=>", index):
         return _Token("punctuation", source[index:index + 2], index, index + 2)
     return _Token("punctuation", character, index, index + 1)
 
@@ -604,7 +645,7 @@ def _top_level_value_end(raw: str, start: int) -> int | None:
             continue
         if raw[index] == "`":
             end = _skip_template_literal(raw, index)
-            if end == len(raw) and raw[end - 1] != "`":
+            if end is None or (end == len(raw) and raw[end - 1] != "`"):
                 return None
             goal.consume(_Token("template", "`", index, end))
             index = end
@@ -700,6 +741,8 @@ def _is_code_position(source: str, position: int) -> bool:
             continue
         if source[index] == "`":
             end = _skip_template_literal(source, index)
+            if end is None:
+                return False
             goal.consume(_Token("template", "`", index, end))
             index = end
             continue
@@ -748,6 +791,8 @@ def _matching_code_brace(source: str, opening: int) -> int | None:
             continue
         if source[index] == "`":
             end = _skip_template_literal(source, index)
+            if end is None:
+                return None
             goal.consume(_Token("template", "`", index, end))
             index = end
             continue
@@ -770,7 +815,9 @@ def _matching_code_brace(source: str, opening: int) -> int | None:
     return None
 
 
-def _skip_template_literal(source: str, opening: int) -> int:
+def _skip_template_literal(source: str, opening: int, depth: int = 0) -> int | None:
+    if depth > MAX_INTERPOLATION_DEPTH:
+        return None
     index = opening + 1
     while index < len(source):
         if source[index] == "\\":
@@ -779,17 +826,19 @@ def _skip_template_literal(source: str, opening: int) -> int:
         if source[index] == "`":
             return index + 1
         if source.startswith("${", index):
-            end = _skip_template_expression(source, index + 2)
+            end = _skip_template_expression(source, index + 2, depth + 1)
             if end is None:
-                return len(source)
+                return None
             index = end + 1
             continue
         index += 1
-    return len(source)
+    return None
 
 
-def _skip_template_expression(source: str, start: int) -> int | None:
-    depth = 1
+def _skip_template_expression(source: str, start: int, depth: int = 0) -> int | None:
+    if depth > MAX_INTERPOLATION_DEPTH:
+        return None
+    braces = 1
     index = start
     goal = _LexicalGoal()
     while index < len(source):
@@ -809,7 +858,9 @@ def _skip_template_expression(source: str, start: int) -> int | None:
             index = end
             continue
         if source[index] == "`":
-            end = _skip_template_literal(source, index)
+            end = _skip_template_literal(source, index, depth + 1)
+            if end is None:
+                return None
             goal.consume(_Token("template", "`", index, end))
             index = end
             continue
@@ -822,10 +873,10 @@ def _skip_template_expression(source: str, start: int) -> int | None:
             continue
         token = _next_token(source, index)
         if token.value == "{":
-            depth += 1
+            braces += 1
         elif token.value == "}":
-            depth -= 1
-            if depth == 0:
+            braces -= 1
+            if braces == 0:
                 return index
         goal.consume(token)
         index = token.end

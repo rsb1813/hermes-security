@@ -331,6 +331,35 @@ class SemanticGuidanceTests(unittest.TestCase):
                 nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
                 self.assertEqual(nested, [])
 
+    def test_nested_output_lexical_goal_tracks_block_kinds_before_regex(self) -> None:
+        regex = {
+            "general_block": "export function render(request) { {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "function_body": "export function render(request) { function helper() {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "arrow_body": "export function render(request) { const helper = () => {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "try_body": "export function render(request) { try {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "finally_body": "export function render(request) { try {} finally {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+        }
+        division = "export function render(request) { const value = ({ total: 2 } / 2); return `<style>${request.q}</style>`; }\n"
+        for name, source in regex.items():
+            with self.subTest(kind="regex", name=name):
+                result = self._build(f"nested-goal-block-{name}", {"src/render.ts": source}, guidance_schema_version=3)
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(nested, [])
+        result = self._build("nested-goal-object-division", {"src/render.ts": division}, guidance_schema_version=3)
+        nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+        self.assertEqual(len(nested), 1)
+
+    def test_nested_output_depth_budget_bounds_declaration_template_skipping(self) -> None:
+        nested_template = "request.q"
+        for _ in range(600):
+            nested_template = "`${" + nested_template + "}`"
+        source = "export function render(request) { return `<style>${" + nested_template + "}</style>`; }\n"
+        first = self._build("nested-depth-budget-first", {"src/render.ts": source}, guidance_schema_version=3)
+        second = self._build("nested-depth-budget-second", {"src/render.ts": source}, guidance_schema_version=3)
+        self.assertEqual(first.canonical_bytes, b"")
+        self.assertEqual(second.canonical_bytes, b"")
+        self.assertEqual(first.canonical_bytes, second.canonical_bytes)
+
     def test_nested_output_remains_deterministic_for_malformed_and_overflow_inputs(self) -> None:
         fixtures = {
             "malformed": "export function render(request) { const safe = `<style>${request.q}</style>`; return `<script>${request.q}</script>; }\n",
