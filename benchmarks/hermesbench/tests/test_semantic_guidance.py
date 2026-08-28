@@ -279,6 +279,111 @@ class SemanticGuidanceTests(unittest.TestCase):
                 row = self._single_row(files)
                 self.assertEqual(row["strength"], "import-linked")
 
+    def test_go_import_block_ignores_comment_literals_and_keeps_adjacent_import(self) -> None:
+        rows = self._rows(
+            {
+                "api.go": (
+                    "import (\n"
+                    "  /* \"fake/path\" */\n"
+                    "  /*\n"
+                    "  \"fake/path\"\n"
+                    "  */\n"
+                    "  // \"fake/path\"\n"
+                    "  \"pkg/store\"\n"
+                    ")\n"
+                    "func handle(request *http.Request) { path.Run(request.URL.Query().Get(\"q\")); store.Run(request.URL.Query().Get(\"q\")) }\n"
+                ),
+                "fake/path.go": "func Run(value string) { exec.Command(value) }\n",
+                "pkg/store.go": "func Run(value string) { exec.Command(value) }\n",
+            }
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["strength"], "import-linked")
+        self.assertEqual(rows[0]["operation"]["path"], "pkg/store.go")
+
+    def test_import_links_never_cross_language_families(self) -> None:
+        fixtures = {
+            "python-to-typescript": {
+                "pkg/api.py": "from .store import run\ndef handle(request):\n    return run(request.args['q'])\n",
+                "pkg/store/index.ts": "export function run(value: string) { return child_process.exec(value); }\n",
+            },
+            "typescript-to-python": {
+                "src/api.ts": "import { run } from './pkg';\nexport function handle(request: Request) { return run(request.query.q); }\n",
+                "src/pkg/__init__.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            },
+        }
+        for direction, files in fixtures.items():
+            with self.subTest(direction=direction):
+                rows = self._rows(files)
+                self.assertFalse(any(row["strength"] == "import-linked" for row in rows))
+
+    def test_relative_python_package_import_requires_one_exact_target(self) -> None:
+        unique = self._single_row(
+            {
+                "pkg/api.py": "from . import run\ndef handle(request):\n    return run(request.args['q'])\n",
+                "pkg/run.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            }
+        )
+        self.assertEqual(unique["strength"], "import-linked")
+
+        ambiguous = self._rows(
+            {
+                "pkg/api.py": "from . import run\ndef handle(request):\n    return run(request.args['q'])\n",
+                "pkg/__init__.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+                "pkg/run.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            }
+        )
+        self.assertFalse(any(row["strength"] == "import-linked" for row in ambiguous))
+
+    def test_go_import_targets_only_exact_same_language_package_files(self) -> None:
+        rows = self._rows(
+            {
+                "api.go": "import \"pkg/store\"\nfunc handle(request *http.Request) { store.Run(request.URL.Query().Get(\"q\")) }\n",
+                "pkg/store.go": "func Run(value string) { exec.Command(value) }\n",
+                "pkg/store/child.go": "func Run(value string) { exec.Command(value) }\n",
+                "pkg/store.ts": "export function Run(value: string) { return child_process.exec(value); }\n",
+            }
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["strength"], "import-linked")
+        self.assertEqual(rows[0]["operation"]["path"], "pkg/store.go")
+
+    def test_parent_typescript_relative_module_remains_exact(self) -> None:
+        row = self._single_row(
+            {
+                "src/nested/api.ts": "import { run } from '../store';\nexport function handle(request: Request) { return run(request.query.q); }\n",
+                "src/store.ts": "export function run(value: string) { return child_process.exec(value); }\n",
+            }
+        )
+        self.assertEqual(row["strength"], "import-linked")
+        self.assertEqual(row["operation"]["path"], "src/store.ts")
+
+    def test_route_direction_quotas_preserve_profile_and_single_route_bounds(self) -> None:
+        self.assertEqual(semantic_guidance._route_direction_quotas(PROFILE_LIMITS["hunt-balanced"].route_count), (512, 512))
+        self.assertEqual(semantic_guidance._route_direction_quotas(PROFILE_LIMITS["hunt-max"].route_count), (1024, 1024))
+        limits = GuidanceLimits(4096, 10, 10, 1, 10, 4096, 4)
+        original_reverse = semantic_guidance._traverse_reverse_routes
+        with mock.patch.object(
+            semantic_guidance,
+            "_traverse_reverse_routes",
+            wraps=original_reverse,
+        ) as reverse:
+            result = self._build_with_limits(
+                "single-route",
+                {
+                    "app.py": (
+                        "import subprocess\n"
+                        "def first(request):\n"
+                        "    return subprocess.run(request.args['q'])\n"
+                        "def second(request):\n"
+                        "    return open(request.args['path'])\n"
+                    )
+                },
+                limits,
+            )
+        self.assertLessEqual(result.row_count, 1)
+        self.assertEqual(reverse.call_count, 0)
+
     def test_source_scanner_ignores_comments_and_strings_without_losing_call_name(self) -> None:
         row = self._single_row(
             {

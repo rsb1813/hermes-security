@@ -4,12 +4,16 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import posixpath
 import re
 import stat
 
 
 SEMANTIC_GUIDANCE_SCHEMA_VERSION = 1
 MAX_FILE_BYTES = 1024 * 1024
+_CODE = "C"
+_STRING = "S"
+_COMMENT = "M"
 
 SOURCE_ANCHORS = {
     "request",
@@ -241,7 +245,8 @@ def _canonical_relative_path(raw_path: str) -> str:
 def _extract_declarations(path: str, source: str, remaining: int) -> tuple[_Declaration, ...]:
     suffix = PurePosixPath(path).suffix.lower()
     if suffix == ".py":
-        masked = _mask_non_code(source, "python")
+        states = _lexical_state_map(source, "python")
+        masked = _mask_non_code(source, states)
         classes = _class_declarations(
             path,
             "python",
@@ -254,9 +259,10 @@ def _extract_declarations(path: str, source: str, remaining: int) -> tuple[_Decl
             masked,
         ))
         declarations = _python_declarations(path, masked, matches, remaining - len(classes))
-        imports = _python_imports(source, masked)
+        imports = _scan_imports(source, states, "python")
     elif suffix == ".go":
-        masked = _mask_non_code(source, "go")
+        states = _lexical_state_map(source, "go")
+        masked = _mask_non_code(source, states)
         classes = _class_declarations(
             path,
             "go",
@@ -269,9 +275,10 @@ def _extract_declarations(path: str, source: str, remaining: int) -> tuple[_Decl
             masked,
         ))
         declarations = _brace_declarations(path, masked, matches, remaining - len(classes), "go")
-        imports = _go_imports(source, masked)
+        imports = _scan_imports(source, states, "go")
     elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
-        masked = _mask_non_code(source, "typescript")
+        states = _lexical_state_map(source, "typescript")
+        masked = _mask_non_code(source, states)
         classes = _class_declarations(
             path,
             "typescript",
@@ -286,10 +293,11 @@ def _extract_declarations(path: str, source: str, remaining: int) -> tuple[_Decl
             masked,
         ))
         declarations = _brace_declarations(path, masked, matches, remaining - len(classes), "typescript")
-        imports = _typescript_imports(source, masked)
+        imports = _scan_imports(source, states, "typescript")
     else:
         classes = ()
-        declarations = _generic_declarations(path, _mask_non_code(source, "generic"), remaining)
+        states = _lexical_state_map(source, "generic")
+        declarations = _generic_declarations(path, _mask_non_code(source, states), remaining)
         imports = ()
     return tuple(replace(declaration, imports=imports) for declaration in (*classes, *declarations))
 
@@ -408,8 +416,8 @@ def _declaration_from_block(
     return _Declaration(location, language, receiver.lower() if receiver else None, source_locations, tuple(operations), controls, (), _calls(lines, line))
 
 
-def _mask_non_code(source: str, language: str) -> str:
-    masked = list(source)
+def _lexical_state_map(source: str, language: str) -> str:
+    states = [_CODE] * len(source)
     quote: str | None = None
     triple_quote = False
     index = 0
@@ -418,101 +426,104 @@ def _mask_non_code(source: str, language: str) -> str:
         following = source[index + 1] if index + 1 < len(source) else ""
         if quote is not None:
             if triple_quote and source.startswith(quote * 3, index):
-                masked[index : index + 3] = [" ", " ", " "]
+                states[index : index + 3] = [_STRING, _STRING, _STRING]
                 quote = None
                 triple_quote = False
                 index += 3
                 continue
             if character == "\\" and not triple_quote and quote != "'" and index + 1 < len(source):
-                masked[index] = " "
+                states[index] = _STRING
                 index += 1
-                if masked[index] != "\n":
-                    masked[index] = " "
+                states[index] = _STRING
             elif character == quote and not triple_quote:
-                masked[index] = " "
+                states[index] = _STRING
                 quote = None
-            elif character != "\n":
-                masked[index] = " "
+            else:
+                states[index] = _STRING
             index += 1
             continue
         if language == "python" and character == "#":
             while index < len(source) and source[index] != "\n":
-                masked[index] = " "
+                states[index] = _COMMENT
                 index += 1
             continue
         if language != "python" and character == "/" and following == "/":
             while index < len(source) and source[index] != "\n":
-                masked[index] = " "
+                states[index] = _COMMENT
                 index += 1
             continue
         if language != "python" and character == "/" and following == "*":
-            masked[index] = masked[index + 1] = " "
+            states[index] = states[index + 1] = _COMMENT
             index += 2
             while index < len(source) and not (source[index] == "*" and index + 1 < len(source) and source[index + 1] == "/"):
-                if source[index] != "\n":
-                    masked[index] = " "
+                states[index] = _COMMENT
                 index += 1
             if index + 1 < len(source):
-                masked[index] = masked[index + 1] = " "
+                states[index] = states[index + 1] = _COMMENT
                 index += 2
             continue
         if language == "python" and character in {"'", '"'} and source.startswith(character * 3, index):
             quote = character
             triple_quote = True
-            masked[index : index + 3] = [" ", " ", " "]
+            states[index : index + 3] = [_STRING, _STRING, _STRING]
             index += 3
             continue
         if character in {"'", '"'} or (language != "python" and character == "`"):
             quote = character
-            masked[index] = " "
+            states[index] = _STRING
         index += 1
-    return "".join(masked)
+    return "".join(states)
 
 
-def _python_imports(source: str, masked: str) -> tuple[_Import, ...]:
+def _mask_non_code(source: str, states: str) -> str:
+    return "".join(character if state == _CODE else "\n" if character == "\n" else " " for character, state in zip(source, states, strict=True))
+
+
+def _scan_imports(source: str, states: str, language: str) -> tuple[_Import, ...]:
     imports: list[_Import] = []
-    for match in re.finditer(r"(?m)^\s*(from)\s+(\.*[A-Za-z_][\w.]*)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?", source):
-        if _keyword_is_code(masked, match.start(1), "from"):
-            imports.append(_Import(match.group(4) or match.group(3), match.group(2), match.group(3)))
-    for match in re.finditer(r"(?m)^\s*(import)\s+([A-Za-z_][\w.]*)(?:\s+as\s+([A-Za-z_]\w*))?", source):
-        if _keyword_is_code(masked, match.start(1), "import"):
-            module = match.group(2)
-            imports.append(_Import(match.group(3) or module.rsplit(".", 1)[-1], module, None))
+    if language == "python":
+        pattern = r"(?m)^\s*(from)\s+(\.+(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)?|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+(import)\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?"
+        for match in re.finditer(pattern, source):
+            if _state_is(states, match.start(1), match.end(1), _CODE) and _state_is(states, match.start(2), match.end(2), _CODE) and _state_is(states, match.start(3), match.end(3), _CODE):
+                imports.append(_Import(match.group(5) or match.group(4), match.group(2), match.group(4)))
+        for match in re.finditer(r"(?m)^\s*(import)\s+([A-Za-z_][\w.]*)(?:\s+as\s+([A-Za-z_]\w*))?", source):
+            if _state_is(states, match.start(1), match.end(1), _CODE) and _state_is(states, match.start(2), match.end(2), _CODE):
+                module = match.group(2)
+                imports.append(_Import(match.group(3) or module.rsplit(".", 1)[-1], module, None))
+    elif language == "go":
+        scalar = r'(?m)^\s*(import)\s+(?:([A-Za-z_]\w*)\s+)?(?P<literal>"[^"\n]+")'
+        for match in re.finditer(scalar, source):
+            if _state_is(states, match.start(1), match.end(1), _CODE) and _state_is(states, match.start("literal"), match.end("literal"), _STRING):
+                module = match.group("literal")[1:-1]
+                imports.append(_Import(match.group(2) or module.rsplit("/", 1)[-1], module, None))
+        for block in re.finditer(r"(?ms)^\s*(import)\s*\((?P<body>.*?)^\s*\)", source):
+            if not _state_is(states, block.start(1), block.end(1), _CODE):
+                continue
+            body_start = block.start("body")
+            for match in re.finditer(r'(?m)^\s*(?:([A-Za-z_]\w*)\s+)?(?P<literal>"[^"\n]+")', block.group("body")):
+                start = body_start + match.start("literal")
+                end = body_start + match.end("literal")
+                if _state_is(states, start, end, _STRING):
+                    module = match.group("literal")[1:-1]
+                    imports.append(_Import(match.group(1) or module.rsplit("/", 1)[-1], module, None))
+    elif language == "typescript":
+        named = r'(?m)^\s*(import)\s*{([^}]+)}\s*(from)\s*(?P<literal>["\'][^"\']+["\'])'
+        for match in re.finditer(named, source):
+            if _state_is(states, match.start(1), match.end(1), _CODE) and _state_is(states, match.start(3), match.end(3), _CODE) and _state_is(states, match.start("literal"), match.end("literal"), _STRING):
+                module = match.group("literal")[1:-1]
+                for part in match.group(2).split(","):
+                    names = re.match(r"\s*([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?", part)
+                    if names:
+                        imports.append(_Import(names.group(2) or names.group(1), module, names.group(1)))
+        default = r'(?m)^\s*(import)\s+([A-Za-z_$][\w$]*)\s+(from)\s*(?P<literal>["\'][^"\']+["\'])'
+        for match in re.finditer(default, source):
+            if _state_is(states, match.start(1), match.end(1), _CODE) and _state_is(states, match.start(3), match.end(3), _CODE) and _state_is(states, match.start("literal"), match.end("literal"), _STRING):
+                imports.append(_Import(match.group(2), match.group("literal")[1:-1], None))
     return tuple(imports)
 
 
-def _go_imports(source: str, masked: str) -> tuple[_Import, ...]:
-    imports: list[_Import] = []
-    scalar = r'(?m)^\s*(import)\s+(?:([A-Za-z_]\w*)\s+)?"([^"\n]+)"'
-    for match in re.finditer(scalar, source):
-        if _keyword_is_code(masked, match.start(1), "import"):
-            module = match.group(3)
-            imports.append(_Import(match.group(2) or module.rsplit("/", 1)[-1], module, None))
-    for block in re.finditer(r"(?ms)^\s*(import)\s*\((?P<body>.*?)^\s*\)", source):
-        if not _keyword_is_code(masked, block.start(1), "import"):
-            continue
-        for match in re.finditer(r'(?m)^\s*(?:([A-Za-z_]\w*)\s+)?"([^"\n]+)"', block.group("body")):
-            module = match.group(2)
-            imports.append(_Import(match.group(1) or module.rsplit("/", 1)[-1], module, None))
-    return tuple(imports)
-
-
-def _typescript_imports(source: str, masked: str) -> tuple[_Import, ...]:
-    imports: list[_Import] = []
-    for match in re.finditer(r'(?m)^\s*(import)\s*{([^}]+)}\s*from\s*["\']([^"\']+)["\']', source):
-        if _keyword_is_code(masked, match.start(1), "import"):
-            for part in match.group(2).split(","):
-                names = re.match(r"\s*([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?", part)
-                if names:
-                    imports.append(_Import(names.group(2) or names.group(1), match.group(3), names.group(1)))
-    for match in re.finditer(r'(?m)^\s*(import)\s+([A-Za-z_$][\w$]*)\s+from\s*["\']([^"\']+)["\']', source):
-        if _keyword_is_code(masked, match.start(1), "import"):
-            imports.append(_Import(match.group(2), match.group(3), None))
-    return tuple(imports)
-
-
-def _keyword_is_code(masked: str, offset: int, keyword: str) -> bool:
-    return masked[offset : offset + len(keyword)] == keyword
+def _state_is(states: str, start: int, end: int, state: str) -> bool:
+    return start < end and end <= len(states) and all(value == state for value in states[start:end])
 
 
 def _calls(lines: list[str], start_line: int) -> tuple[_Call, ...]:
@@ -572,7 +583,7 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
         for target, strength in edges:
             incoming[target].append((caller, strength))
     retained: dict[tuple[_Location, _Location], _Route] = {}
-    forward_limit = (limits.route_count + 1) // 2
+    forward_limit, reverse_quota = _route_direction_quotas(limits.route_count)
     for declaration in declarations:
         if not declaration.sources:
             continue
@@ -583,24 +594,29 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
                 break
         if len(retained) >= forward_limit:
             break
-    for declaration in declarations:
-        identity = _location_identity(declaration.location)
-        for family, operation in declaration.operations:
-            _traverse_reverse_routes(
-                family,
-                operation,
-                identity,
-                by_identity,
-                incoming,
-                limits,
-                retained,
-                limits.route_count,
-            )
+    if reverse_quota:
+        for declaration in declarations:
+            identity = _location_identity(declaration.location)
+            for family, operation in declaration.operations:
+                _traverse_reverse_routes(
+                    family,
+                    operation,
+                    identity,
+                    by_identity,
+                    incoming,
+                    limits,
+                    retained,
+                    limits.route_count,
+                )
+                if len(retained) >= limits.route_count:
+                    break
             if len(retained) >= limits.route_count:
                 break
-        if len(retained) >= limits.route_count:
-            break
     return tuple(retained.values()), edge_count
+
+
+def _route_direction_quotas(route_count: int) -> tuple[int, int]:
+    return ((route_count + 1) // 2, route_count // 2)
 
 
 def _traverse_routes(
@@ -744,33 +760,41 @@ def _resolve_import_targets(
         targets.extend(
             item
             for item in declarations
-            if item.location.symbol.lower() == symbol and _module_matches(declaration.location.path, imported.module, item.location.path)
+            if item.language == declaration.language
+            and item.location.symbol.lower() == symbol
+            and _module_matches(declaration.location.path, imported.module, item.location.path, declaration.language, imported.symbol)
         )
     return list(dict.fromkeys(targets))
 
 
-def _module_matches(caller_path: str, module: str, target_path: str) -> bool:
+def _module_matches(caller_path: str, module: str, target_path: str, language: str, imported_symbol: str | None) -> bool:
     caller_parent = PurePosixPath(caller_path).parent
     normalized = module.replace("\\", "/")
-    leading_dots = len(normalized) - len(normalized.lstrip("."))
-    if leading_dots:
-        base = caller_parent
-        for _ in range(leading_dots - 1):
-            base = base.parent
-        remainder = normalized[leading_dots:]
-        if remainder.startswith("/"):
-            remainder = remainder[1:]
+    if language == "python":
+        leading_dots = len(normalized) - len(normalized.lstrip("."))
+        if leading_dots:
+            base = caller_parent
+            for _ in range(leading_dots - 1):
+                base = base.parent
+            remainder = normalized[leading_dots:]
+            normalized = (base / remainder.replace(".", "/")).as_posix()
         else:
-            remainder = remainder.replace(".", "/")
-        normalized = (base / remainder).as_posix()
-    elif "/" not in normalized:
-        normalized = normalized.replace(".", "/")
+            normalized = normalized.replace(".", "/")
+    elif normalized.startswith("."):
+        normalized = posixpath.normpath(f"{caller_parent.as_posix()}/{normalized}")
     target = PurePosixPath(target_path).as_posix()
     if target.endswith(".d.ts"):
         target = target[: -len(".d.ts")]
     else:
         target = PurePosixPath(target).with_suffix("").as_posix()
-    return target == normalized or target == f"{normalized}/__init__" or target == f"{normalized}/index"
+    if language == "python":
+        candidates = {normalized, f"{normalized}/__init__"}
+        if imported_symbol is not None:
+            candidates.add(f"{normalized}/{imported_symbol}")
+        return target in candidates
+    if language == "typescript":
+        return target == normalized or target == f"{normalized}/index"
+    return target == normalized
 
 
 def _trace_controls(
