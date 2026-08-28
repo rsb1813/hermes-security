@@ -1,7 +1,7 @@
 # Experimental Hunt Workflow Implementation Plan
 
-Status: Approved architecture, implementation-ready plan  
-Branch: `hermes/benchmark-foundation`  
+Status: Approved architecture, implementation-ready plan
+Branch: `hermes/benchmark-foundation`
 Depends on: `docs/superpowers/specs/2026-08-27-hermes-security-design.md`
 
 ## Goal
