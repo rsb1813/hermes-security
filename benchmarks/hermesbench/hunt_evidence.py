@@ -40,10 +40,23 @@ HUNT_EVIDENCE_FIELDS = frozenset({
     "priority_packet_count", "candidate_links_sha256", "candidate_count", "linked_location_count",
     "coverage_debt_sha256", "coverage_debt_count", "validated_closure_count",
 })
+HUNT_EVIDENCE_FAILURE_CODES = frozenset({
+    "hunt_evidence_packet_missing",
+    "hunt_evidence_packet_duplicate",
+    "hunt_evidence_artifact_integrity",
+    "hunt_evidence_candidate_location",
+    "hunt_evidence_candidate_search_pass",
+})
 
 
 class HuntEvidenceError(ValueError):
     """Signals a Hunt artifact or attestation contract failure."""
+
+    def __init__(self, message: str, *, category: str | None = None) -> None:
+        if category is not None and category not in HUNT_EVIDENCE_FAILURE_CODES:
+            raise ValueError("Hunt evidence failure category is unsupported")
+        super().__init__(message)
+        self.category = category
 
 
 @dataclass(frozen=True)
@@ -193,16 +206,21 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
     """Checks prepared bytes and binds a valid discovery result without source paths."""
     if not isinstance(prepared, PreparedHuntArtifacts):
         raise HuntEvidenceError("prepared Hunt artifacts are invalid")
-    if not isinstance(observed_argv, tuple) or observed_argv.count(_REQUIRED_PACKET_READ) != 1:
-        raise HuntEvidenceError("priority packet was not read exactly as required")
-    for artifact, label in ((prepared.inventory, "inventory"), (prepared.rank_input, "rank input"), (prepared.frontier, "frontier"), (prepared.frontier_receipt, "frontier receipt"), (prepared.priority_packet, "priority packet")):
-        _verify_record(artifact, label)
-    inventory_paths = _inventory_paths_value(_read_pinned_bytes(prepared.inventory, "inventory", MAX_INVENTORY_BYTES))
-    rank_rows = _jsonl_rows_value(_read_pinned_bytes(prepared.rank_input, "rank input", MAX_RANK_INPUT_BYTES), "rank input", None)
-    frontier_rows = _jsonl_rows_value(_read_pinned_bytes(prepared.frontier, "frontier", MAX_FRONTIER_BYTES), "frontier", MAX_FRONTIER_ROWS)
-    rank_by_path = _validate_rank_rows(rank_rows, inventory_paths)
-    frontier_by_path = _validate_frontier_rows(frontier_rows, set(rank_by_path))
-    _validate_frontier_receipt(_read_pinned_bytes(prepared.frontier_receipt, "frontier receipt", MAX_FRONTIER_RECEIPT_BYTES), prepared.profile, prepared.rank_input.sha256, len(frontier_rows))
+    if not isinstance(observed_argv, tuple) or observed_argv.count(_REQUIRED_PACKET_READ) == 0:
+        raise HuntEvidenceError("priority packet was not read", category="hunt_evidence_packet_missing")
+    if observed_argv.count(_REQUIRED_PACKET_READ) != 1:
+        raise HuntEvidenceError("priority packet was read more than once", category="hunt_evidence_packet_duplicate")
+    try:
+        for artifact, label in ((prepared.inventory, "inventory"), (prepared.rank_input, "rank input"), (prepared.frontier, "frontier"), (prepared.frontier_receipt, "frontier receipt"), (prepared.priority_packet, "priority packet")):
+            _verify_record(artifact, label)
+        inventory_paths = _inventory_paths_value(_read_pinned_bytes(prepared.inventory, "inventory", MAX_INVENTORY_BYTES))
+        rank_rows = _jsonl_rows_value(_read_pinned_bytes(prepared.rank_input, "rank input", MAX_RANK_INPUT_BYTES), "rank input", None)
+        frontier_rows = _jsonl_rows_value(_read_pinned_bytes(prepared.frontier, "frontier", MAX_FRONTIER_BYTES), "frontier", MAX_FRONTIER_ROWS)
+        rank_by_path = _validate_rank_rows(rank_rows, inventory_paths)
+        frontier_by_path = _validate_frontier_rows(frontier_rows, set(rank_by_path))
+        _validate_frontier_receipt(_read_pinned_bytes(prepared.frontier_receipt, "frontier receipt", MAX_FRONTIER_RECEIPT_BYTES), prepared.profile, prepared.rank_input.sha256, len(frontier_rows))
+    except HuntEvidenceError as error:
+        raise HuntEvidenceError("prepared Hunt artifacts are invalid", category="hunt_evidence_artifact_integrity") from error
     candidates = getattr(prediction, "candidates", None)
     if not isinstance(candidates, tuple):
         raise HuntEvidenceError("Hunt discovery prediction is invalid")
@@ -218,13 +236,13 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
             start_line = getattr(location, "start_line", None)
             end_line = getattr(location, "end_line", None)
             if not isinstance(candidate_id, str) or not isinstance(path, str) or path not in inventory_paths or path not in frontier_by_path:
-                raise HuntEvidenceError("candidate location is outside the complete frontier")
+                raise HuntEvidenceError("candidate location is outside the complete frontier", category="hunt_evidence_candidate_location")
             row = frontier_by_path[path]
             if search_pass in row["passes"]:
                 matching_pass = True
             links.append({"candidate_id": candidate_id, "role": role, "trace_index": trace_index, "start_line": start_line, "end_line": end_line, "work_id": row["work_id"], "matching_pass_work_id": row["work_id"] if search_pass in row["passes"] else None})
         if not matching_pass:
-            raise HuntEvidenceError("candidate search pass is absent from linked frontier rows")
+            raise HuntEvidenceError("candidate search pass is absent from linked frontier rows", category="hunt_evidence_candidate_search_pass")
     debt = [{"work_id": row["work_id"], "pass": review_pass} for row in frontier_rows for review_pass in row["passes"]]
     return HuntEvidence(
         prepared.profile, prepared.inventory.sha256, prepared.inventory_count, prepared.rank_input.sha256,

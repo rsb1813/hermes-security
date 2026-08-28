@@ -279,3 +279,7 @@
 ### Task 16 discovery-failure receipt recovery
 
 - Discovery receipt revalidation now derives the completed subset from committed task receipts in manifest order. It validates only those persisted prediction and Hunt evidence rows, while a non-completed discovery requires an empty candidate transfer, incomplete workflow status, and no verification or public artifacts.
+
+### Task 17 typed Hunt attestation failures
+
+- Hunt attestation now assigns bounded categories at the packet-cardinality, prepared-artifact integrity, candidate-location linkage, and search-pass linkage origins. The adapter exposes only an allowlisted category, while unknown, preparation, parsing, and serialization failures retain the legacy broad code.

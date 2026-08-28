@@ -103,8 +103,9 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
         with tempfile.TemporaryDirectory() as directory:
             prepared, prediction = self._prepared_prediction(Path(directory))
             prepared.priority_packet.path.write_bytes(prepared.priority_packet.path.read_bytes() + b" ")
-            with self.assertRaises(HuntEvidenceError):
+            with self.assertRaises(HuntEvidenceError) as caught:
                 attest_hunt_discovery(prepared, prediction, (self._PACKET_READ,))
+        self.assertEqual(caught.exception.category, "hunt_evidence_artifact_integrity")
 
     def test_oversized_artifact_fails_closed(self) -> None:
         # Exceeding the priority packet limit must invalidate attestation.
@@ -167,8 +168,9 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 {"schema_version": 1, "task_id": "task-1", "candidates": [{"finding_id": candidate.finding_id, "entry_point": {"file": "missing.py", "line": 1}, "critical_operation": {"file": "src/sink.py", "line": 1}, "trace": [], "confidence": candidate.confidence, "vulnerability_family": candidate.vulnerability_family, "search_pass": candidate.search_pass, "hypothesis": candidate.hypothesis, "evidence": candidate.evidence, "counterevidence": candidate.counterevidence, "expected_control": candidate.expected_control}]},
                 "task-1",
             )
-            with self.assertRaises(HuntEvidenceError):
+            with self.assertRaises(HuntEvidenceError) as caught:
                 attest_hunt_discovery(prepared, malformed, (self._PACKET_READ,))
+        self.assertEqual(caught.exception.category, "hunt_evidence_candidate_location")
 
     def test_case_ambiguous_candidate_path_fails_closed(self) -> None:
         # Case changes must not be normalized into a frontier location.
@@ -179,8 +181,9 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 {"schema_version": 1, "task_id": "task-1", "candidates": [{"finding_id": candidate.finding_id, "entry_point": {"file": "SRC/ENTRY.py", "line": 1}, "critical_operation": {"file": "src/sink.py", "line": 1}, "trace": [], "confidence": candidate.confidence, "vulnerability_family": candidate.vulnerability_family, "search_pass": candidate.search_pass, "hypothesis": candidate.hypothesis, "evidence": candidate.evidence, "counterevidence": candidate.counterevidence, "expected_control": candidate.expected_control}]},
                 "task-1",
             )
-            with self.assertRaises(HuntEvidenceError):
+            with self.assertRaises(HuntEvidenceError) as caught:
                 attest_hunt_discovery(prepared, malformed, (self._PACKET_READ,))
+        self.assertEqual(caught.exception.category, "hunt_evidence_candidate_location")
 
     def test_incompatible_search_pass_fails_closed(self) -> None:
         # A search pass absent from every linked frontier row must be rejected.
@@ -191,8 +194,9 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 {"schema_version": 1, "task_id": "task-1", "candidates": [{"finding_id": candidate.finding_id, "entry_point": {"file": "src/entry.py", "line": 1}, "critical_operation": {"file": "src/sink.py", "line": 1}, "trace": [], "confidence": candidate.confidence, "vulnerability_family": candidate.vulnerability_family, "search_pass": "state", "hypothesis": candidate.hypothesis, "evidence": candidate.evidence, "counterevidence": candidate.counterevidence, "expected_control": candidate.expected_control}]},
                 "task-1",
             )
-            with self.assertRaises(HuntEvidenceError):
+            with self.assertRaises(HuntEvidenceError) as caught:
                 attest_hunt_discovery(prepared, malformed, (self._PACKET_READ,))
+        self.assertEqual(caught.exception.category, "hunt_evidence_candidate_search_pass")
 
     def test_linkage_does_not_reduce_coverage_debt(self) -> None:
         # Packet presentation and candidate links must never become reviewed closure.
@@ -208,8 +212,17 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
         # The fixed packet may be presented exactly once, never repeatedly.
         with tempfile.TemporaryDirectory() as directory:
             prepared, prediction = self._prepared_prediction(Path(directory))
-            with self.assertRaises(HuntEvidenceError):
+            with self.assertRaises(HuntEvidenceError) as caught:
                 attest_hunt_discovery(prepared, prediction, (self._PACKET_READ, self._PACKET_READ))
+        self.assertEqual(caught.exception.category, "hunt_evidence_packet_duplicate")
+
+    def test_missing_priority_packet_read_has_its_own_category(self) -> None:
+        # No packet read and duplicate reads must remain distinguishable failures.
+        with tempfile.TemporaryDirectory() as directory:
+            prepared, prediction = self._prepared_prediction(Path(directory))
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(prepared, prediction, ())
+        self.assertEqual(caught.exception.category, "hunt_evidence_packet_missing")
 
     def test_frontier_receipt_must_be_bounded_and_match_frontier_inputs(self) -> None:
         # The helper receipt is a bound artifact, not unvalidated metadata.

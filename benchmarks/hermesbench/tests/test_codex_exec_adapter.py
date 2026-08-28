@@ -22,6 +22,7 @@ from benchmarks.hermesbench.adapters.codex_exec import (
 )
 from benchmarks.hermesbench.phase_runner import CanonicalCandidate
 from benchmarks.hermesbench.contracts import Location
+from benchmarks.hermesbench.hunt_evidence import HuntEvidenceError
 from benchmarks.hermesbench.runner import ExecutorTimeoutError
 
 
@@ -128,7 +129,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as caught:
                 adapter(_request(), Path(directory), 60)
-        self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
+        self.assertEqual(caught.exception.failure_code, "hunt_evidence_packet_missing")
 
     def test_hunt_discovery_rejects_mutated_prepared_artifacts(self) -> None:
         # Changing the prepared packet after container return must invalidate the result.
@@ -143,7 +144,38 @@ class CodexExecAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as caught:
                 self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
-        self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
+        self.assertEqual(caught.exception.failure_code, "hunt_evidence_artifact_integrity")
+
+    def test_hunt_discovery_rejects_duplicate_priority_packet_reads_with_typed_code(self) -> None:
+        # Duplicate packet reads must not collapse into the missing-read category.
+        packet_read = json.dumps(
+            {"type": "item.completed", "item": {"type": "command_execution", "command": "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"}}
+        ).encode("utf-8") + b"\n"
+        runtime = _Runtime(packet_read + _stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
+        self.assertEqual(caught.exception.failure_code, "hunt_evidence_packet_duplicate")
+
+    def test_hunt_attestation_categories_map_to_path_free_public_codes(self) -> None:
+        # Every typed attestation origin must retain only its bounded category.
+        for code in (
+            "hunt_evidence_packet_missing",
+            "hunt_evidence_packet_duplicate",
+            "hunt_evidence_artifact_integrity",
+            "hunt_evidence_candidate_location",
+            "hunt_evidence_candidate_search_pass",
+        ):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                runtime = _Runtime(_stream(command="cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"))
+                with patch(
+                    "benchmarks.hermesbench.adapters.codex_exec.attest_hunt_discovery",
+                    side_effect=HuntEvidenceError("private evidence detail", category=code),
+                ):
+                    with self.assertRaises(CodexExecError) as caught:
+                        self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
+                self.assertEqual(caught.exception.failure_code, code)
+                self.assertNotIn("private evidence detail", str(caught.exception))
 
     def test_hunt_preparation_consumes_whole_task_timeout(self) -> None:
         # A 17.2 second preparation must leave floor(480 - 17.2) seconds for Docker.

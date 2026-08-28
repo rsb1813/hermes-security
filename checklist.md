@@ -97,7 +97,7 @@
 - [x] Run the fixed paid diagnostic after the rich-candidate change and record its separated cost, candidate, decision, score, and integrity evidence.
 - [x] Bind deterministic inventory, frontier, candidate references, and explicit coverage debt into the Hunt receipts.
 - [x] Make discovery-failure workflow receipts independently revalidatable for completed-task subsets and empty candidate transfer.
-- [ ] Replace the broad live Hunt attestation failure with bounded path-free packet, artifact, location, and pass-linkage codes.
+- [x] Replace the broad live Hunt attestation failure with bounded path-free packet, artifact, location, and pass-linkage codes.
 - [ ] Revalidate the failed v12 receipt and run the fixed diagnostic once under a new immutable output root.
 - [ ] Rerun the fixed single-task diagnostic with one material strategy change at a time.
 - [ ] Measure `hunt-balanced` and `hunt-max` on Canary.

@@ -66,6 +66,11 @@ _PUBLIC_FAILURE_CODES = frozenset(
         "setup_child_start",
         "setup_wrapper_os_error",
         "hunt_evidence_invalid",
+        "hunt_evidence_packet_missing",
+        "hunt_evidence_packet_duplicate",
+        "hunt_evidence_artifact_integrity",
+        "hunt_evidence_candidate_location",
+        "hunt_evidence_candidate_search_pass",
     }
 )
 _SUCCESS_ARTIFACT_NAMES = frozenset({"adapter-response.json", "events.jsonl", "commands.jsonl", "evidence.json"})

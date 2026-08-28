@@ -429,6 +429,35 @@ class SuiteExecutionTests(unittest.TestCase):
                 "".join(path.read_text(encoding="utf-8") for path in task_dir.iterdir()),
             )
 
+    def test_runner_persists_typed_hunt_evidence_failure_codes_without_detail(self) -> None:
+        # The runner may retain only the typed public category, never exception detail.
+        for code in (
+            "hunt_evidence_packet_missing",
+            "hunt_evidence_packet_duplicate",
+            "hunt_evidence_artifact_integrity",
+            "hunt_evidence_candidate_location",
+            "hunt_evidence_candidate_search_pass",
+        ):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                snapshots = root / "snapshots"
+                output = root / "output"
+                snapshots.mkdir()
+                output.mkdir()
+                manifest = manifest_for("task-a", snapshots_root=snapshots)
+                policy = ExecutionPolicy((("python",),))
+
+                def executor(*_: object) -> ExecutorResult:
+                    raise ExecutorFailureError("private evidence detail", failure_code=code)
+
+                run_suite(
+                    manifest, snapshots, output, "run-001", "hunt", "hunt-balanced",
+                    config_for(manifest, policy), policy, executor, "hunt-discovery",
+                )
+                failure_path = next((output / "run-001" / "tasks").rglob("failure.json"))
+                self.assertEqual(json.loads(failure_path.read_text(encoding="utf-8")), {"code": code})
+                self.assertNotIn("private evidence detail", failure_path.read_text(encoding="utf-8"))
+
     def test_reassigned_executor_failure_code_falls_back_and_continues(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
