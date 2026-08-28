@@ -242,34 +242,72 @@ def _extract_declarations(path: str, source: str, remaining: int) -> tuple[_Decl
     suffix = PurePosixPath(path).suffix.lower()
     if suffix == ".py":
         masked = _mask_non_code(source, "python")
+        classes = _class_declarations(
+            path,
+            "python",
+            masked,
+            r"(?m)^\s*class\s+(?P<name>[A-Za-z_]\w*)\b",
+            remaining,
+        )
         matches = list(re.finditer(
             r"(?m)^(?P<indent>[ \t]*)(?:(?:async[ \t]+)?def[ \t]+(?P<name>[A-Za-z_]\w*)\s*\(|(?P<assigned>[A-Za-z_]\w*)\s*=\s*(?:async[ \t]+)?lambda\b)",
             masked,
         ))
-        declarations = _python_declarations(path, masked, matches, remaining)
-        imports = _python_imports(source)
+        declarations = _python_declarations(path, masked, matches, remaining - len(classes))
+        imports = _python_imports(source, masked)
     elif suffix == ".go":
         masked = _mask_non_code(source, "go")
+        classes = _class_declarations(
+            path,
+            "go",
+            masked,
+            r"(?m)^\s*type\s+(?P<name>[A-Za-z_]\w*)\s+struct\b",
+            remaining,
+        )
         matches = list(re.finditer(
             r"\bfunc\s+(?:\((?P<receiver>[A-Za-z_]\w*)\s+[^\n)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(|\b(?P<assigned>[A-Za-z_]\w*)\s*(?::=|=)\s*func\s*\(",
             masked,
         ))
-        declarations = _brace_declarations(path, masked, matches, remaining, "go")
-        imports = _go_imports(source)
+        declarations = _brace_declarations(path, masked, matches, remaining - len(classes), "go")
+        imports = _go_imports(source, masked)
     elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
         masked = _mask_non_code(source, "typescript")
+        classes = _class_declarations(
+            path,
+            "typescript",
+            masked,
+            r"\bclass\s+(?P<name>[A-Za-z_$][\w$]*)\b",
+            remaining,
+        )
         matches = list(re.finditer(
             r"(?m)\b(?:async\s+)?function\s+(?P<name>[A-Za-z_$][\w$]*)\s*\(|"
             r"^[ \t]*(?!(?:if|for|while|switch|catch)\b)(?:public\s+|private\s+|protected\s+|static\s+|async\s+)*(?P<method>[A-Za-z_$][\w$]*)\s*\(|"
             r"(?:\b(?:const|let|var)\s+|^[ \t]*(?:public\s+|private\s+|protected\s+|static\s+)*)?(?P<assigned>[A-Za-z_$][\w$]*)(?:\s*:(?:(?!\s=\s)[^\n])*)?\s*=\s*(?:async\s+)?(?:function\s*)?(?:\([^\n)]*\)|[A-Za-z_$][\w$]*)\s*(?:=>|\{)",
             masked,
         ))
-        declarations = _brace_declarations(path, masked, matches, remaining, "typescript")
-        imports = _typescript_imports(source)
+        declarations = _brace_declarations(path, masked, matches, remaining - len(classes), "typescript")
+        imports = _typescript_imports(source, masked)
     else:
+        classes = ()
         declarations = _generic_declarations(path, _mask_non_code(source, "generic"), remaining)
         imports = ()
-    return tuple(replace(declaration, imports=imports) for declaration in declarations)
+    return tuple(replace(declaration, imports=imports) for declaration in (*classes, *declarations))
+
+
+def _class_declarations(
+    path: str,
+    language: str,
+    source: str,
+    pattern: str,
+    remaining: int,
+) -> tuple[_Declaration, ...]:
+    declarations: list[_Declaration] = []
+    for match in re.finditer(pattern, source):
+        if len(declarations) >= remaining:
+            break
+        line = source.count("\n", 0, match.start()) + 1
+        declarations.append(_Declaration(_Location(path, line, match.group("name")), language, None, (), (), (), (), ()))
+    return tuple(declarations)
 
 
 def _python_declarations(path: str, source: str, matches: list[re.Match[str]], remaining: int) -> tuple[_Declaration, ...]:
@@ -431,34 +469,50 @@ def _mask_non_code(source: str, language: str) -> str:
     return "".join(masked)
 
 
-def _python_imports(source: str) -> tuple[_Import, ...]:
+def _python_imports(source: str, masked: str) -> tuple[_Import, ...]:
     imports: list[_Import] = []
-    for match in re.finditer(r"(?m)^\s*from\s+(\.*[A-Za-z_][\w.]*)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?", source):
-        imports.append(_Import(match.group(3) or match.group(2), match.group(1), match.group(2)))
-    for match in re.finditer(r"(?m)^\s*import\s+([A-Za-z_][\w.]*)(?:\s+as\s+([A-Za-z_]\w*))?", source):
-        module = match.group(1)
-        imports.append(_Import(match.group(2) or module.rsplit(".", 1)[-1], module, None))
+    for match in re.finditer(r"(?m)^\s*(from)\s+(\.*[A-Za-z_][\w.]*)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?", source):
+        if _keyword_is_code(masked, match.start(1), "from"):
+            imports.append(_Import(match.group(4) or match.group(3), match.group(2), match.group(3)))
+    for match in re.finditer(r"(?m)^\s*(import)\s+([A-Za-z_][\w.]*)(?:\s+as\s+([A-Za-z_]\w*))?", source):
+        if _keyword_is_code(masked, match.start(1), "import"):
+            module = match.group(2)
+            imports.append(_Import(match.group(3) or module.rsplit(".", 1)[-1], module, None))
     return tuple(imports)
 
 
-def _go_imports(source: str) -> tuple[_Import, ...]:
+def _go_imports(source: str, masked: str) -> tuple[_Import, ...]:
     imports: list[_Import] = []
-    for match in re.finditer(r'(?m)^\s*(?:([A-Za-z_]\w*)\s+)?"([^"\n]+)"', source):
-        module = match.group(2)
-        imports.append(_Import(match.group(1) or module.rsplit("/", 1)[-1], module, None))
+    scalar = r'(?m)^\s*(import)\s+(?:([A-Za-z_]\w*)\s+)?"([^"\n]+)"'
+    for match in re.finditer(scalar, source):
+        if _keyword_is_code(masked, match.start(1), "import"):
+            module = match.group(3)
+            imports.append(_Import(match.group(2) or module.rsplit("/", 1)[-1], module, None))
+    for block in re.finditer(r"(?ms)^\s*(import)\s*\((?P<body>.*?)^\s*\)", source):
+        if not _keyword_is_code(masked, block.start(1), "import"):
+            continue
+        for match in re.finditer(r'(?m)^\s*(?:([A-Za-z_]\w*)\s+)?"([^"\n]+)"', block.group("body")):
+            module = match.group(2)
+            imports.append(_Import(match.group(1) or module.rsplit("/", 1)[-1], module, None))
     return tuple(imports)
 
 
-def _typescript_imports(source: str) -> tuple[_Import, ...]:
+def _typescript_imports(source: str, masked: str) -> tuple[_Import, ...]:
     imports: list[_Import] = []
-    for match in re.finditer(r'(?m)^\s*import\s*{([^}]+)}\s*from\s*["\']([^"\']+)["\']', source):
-        for part in match.group(1).split(","):
-            names = re.match(r"\s*([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?", part)
-            if names:
-                imports.append(_Import(names.group(2) or names.group(1), match.group(2), names.group(1)))
-    for match in re.finditer(r'(?m)^\s*import\s+([A-Za-z_$][\w$]*)\s+from\s*["\']([^"\']+)["\']', source):
-        imports.append(_Import(match.group(1), match.group(2), None))
+    for match in re.finditer(r'(?m)^\s*(import)\s*{([^}]+)}\s*from\s*["\']([^"\']+)["\']', source):
+        if _keyword_is_code(masked, match.start(1), "import"):
+            for part in match.group(2).split(","):
+                names = re.match(r"\s*([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?", part)
+                if names:
+                    imports.append(_Import(names.group(2) or names.group(1), match.group(3), names.group(1)))
+    for match in re.finditer(r'(?m)^\s*(import)\s+([A-Za-z_$][\w$]*)\s+from\s*["\']([^"\']+)["\']', source):
+        if _keyword_is_code(masked, match.start(1), "import"):
+            imports.append(_Import(match.group(2), match.group(3), None))
     return tuple(imports)
+
+
+def _keyword_is_code(masked: str, offset: int, keyword: str) -> bool:
+    return masked[offset : offset + len(keyword)] == keyword
 
 
 def _calls(lines: list[str], start_line: int) -> tuple[_Call, ...]:
@@ -518,15 +572,16 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
         for target, strength in edges:
             incoming[target].append((caller, strength))
     retained: dict[tuple[_Location, _Location], _Route] = {}
+    forward_limit = (limits.route_count + 1) // 2
     for declaration in declarations:
         if not declaration.sources:
             continue
         identity = _location_identity(declaration.location)
         for source in declaration.sources:
-            _traverse_routes(source, identity, by_identity, outgoing, limits, retained)
-            if len(retained) >= limits.route_count:
+            _traverse_routes(source, identity, by_identity, outgoing, limits, retained, forward_limit)
+            if len(retained) >= forward_limit:
                 break
-        if len(retained) >= limits.route_count:
+        if len(retained) >= forward_limit:
             break
     for declaration in declarations:
         identity = _location_identity(declaration.location)
@@ -539,6 +594,7 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
                 incoming,
                 limits,
                 retained,
+                limits.route_count,
             )
             if len(retained) >= limits.route_count:
                 break
@@ -554,11 +610,12 @@ def _traverse_routes(
     outgoing: dict[tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]],
     limits: GuidanceLimits,
     retained: dict[tuple[_Location, _Location], _Route],
+    route_limit: int,
 ) -> None:
     queue: list[tuple[tuple[str, int, str], tuple[_Location, ...], str, int]] = [
         (root_identity, (declarations[root_identity].location,), "direct", 0)
     ]
-    while queue and len(retained) < limits.route_count:
+    while queue and len(retained) < route_limit:
         identity, trace, strength, depth = queue.pop(0)
         declaration = declarations[identity]
         for family, operation in declaration.operations:
@@ -576,9 +633,9 @@ def _traverse_routes(
             current = retained.get(endpoint)
             if current is None or _route_sort_key(candidate) < _route_sort_key(current):
                 retained[endpoint] = candidate
-            if len(retained) >= limits.route_count:
+            if len(retained) >= route_limit:
                 break
-        if len(retained) >= limits.route_count:
+        if len(retained) >= route_limit:
             continue
         if depth >= limits.graph_depth or len(trace) >= 12:
             continue
@@ -598,11 +655,12 @@ def _traverse_reverse_routes(
     incoming: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]],
     limits: GuidanceLimits,
     retained: dict[tuple[_Location, _Location], _Route],
+    route_limit: int,
 ) -> None:
     queue: list[tuple[tuple[str, int, str], tuple[_Location, ...], str, int]] = [
         (root_identity, (declarations[root_identity].location,), "direct", 0)
     ]
-    while queue and len(retained) < limits.route_count:
+    while queue and len(retained) < route_limit:
         identity, reverse_trace, strength, depth = queue.pop(0)
         declaration = declarations[identity]
         trace = tuple(reversed(reverse_trace))
@@ -712,7 +770,7 @@ def _module_matches(caller_path: str, module: str, target_path: str) -> bool:
         target = target[: -len(".d.ts")]
     else:
         target = PurePosixPath(target).with_suffix("").as_posix()
-    return target == normalized
+    return target == normalized or target == f"{normalized}/__init__" or target == f"{normalized}/index"
 
 
 def _trace_controls(

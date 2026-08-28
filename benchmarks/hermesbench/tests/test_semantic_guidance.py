@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from benchmarks.hermesbench import semantic_guidance
 from benchmarks.hermesbench.semantic_guidance import (
     MAX_FILE_BYTES,
     GuidanceLimits,
@@ -191,6 +192,93 @@ class SemanticGuidanceTests(unittest.TestCase):
                 row = self._single_row({path: source})
                 self.assertEqual(row["strength"], "direct")
 
+    def test_class_declarations_are_facts_without_distorting_method_routes(self) -> None:
+        fixtures = {
+            "python": (
+                "app.py",
+                "import subprocess\n"
+                "class Handler:\n"
+                "    def handle(self, request):\n"
+                "        return self.run(request.args['q'])\n"
+                "    def run(self, value):\n"
+                "        return subprocess.run(value)\n",
+            ),
+            "go": (
+                "app.go",
+                "type Handler struct{}\n"
+                "func (handler Handler) handle(request *http.Request) { handler.run(request.URL.Query().Get(\"q\")) }\n"
+                "func (handler Handler) run(value string) { exec.Command(value) }\n",
+            ),
+            "typescript": (
+                "app.ts",
+                "class Handler {\n"
+                "  handle(request: Request) { return this.run(request.query.q); }\n"
+                "  run(value: string) { return child_process.exec(value); }\n"
+                "}\n",
+            ),
+            "javascript": (
+                "app.js",
+                "class Handler {\n"
+                "  handle(request) { return this.run(request.query.q); }\n"
+                "  run(value) { return child_process.exec(value); }\n"
+                "}\n",
+            ),
+        }
+        for language, (path, source) in fixtures.items():
+            with self.subTest(language=language):
+                declarations = semantic_guidance._extract_declarations(path, source, 20)
+                self.assertIn("Handler", [item.location.symbol for item in declarations])
+                row = self._single_row({path: source})
+                self.assertEqual([item["symbol"] for item in row["trace"]], ["handle", "run"])
+
+    def test_import_scanner_ignores_fake_imports_inside_non_code(self) -> None:
+        fixtures = {
+            "python": {
+                "api.py": "\"\"\"\nfrom pkg.store import run\n\"\"\"\ndef handle(request):\n    return run(request.args['q'])\n",
+                "pkg/store.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            },
+            "go": {
+                "api.go": "var note = `\n\"pkg/store\"\n`\nfunc handle(request *http.Request) { store.Run(request.URL.Query().Get(\"q\")) }\n",
+                "pkg/store.go": "func Run(value string) { exec.Command(value) }\n",
+            },
+            "typescript": {
+                "src/api.ts": "/*\nimport { run } from './store';\n*/\nconst note = `\nimport { run } from './store';\n`;\nexport function handle(request: Request) { return run(request.query.q); }\n",
+                "src/store.ts": "export function run(value: string) { return child_process.exec(value); }\n",
+            },
+            "javascript": {
+                "src/api.js": "/*\nimport { run } from './store';\n*/\nconst note = `\nimport { run } from './store';\n`;\nexport function handle(request) { return run(request.query.q); }\n",
+                "src/store.js": "export function run(value) { return child_process.exec(value); }\n",
+            },
+        }
+        for language, files in fixtures.items():
+            with self.subTest(language=language):
+                rows = self._rows(files)
+                self.assertFalse(any(row["strength"] == "import-linked" for row in rows))
+
+    def test_package_and_index_modules_remain_exact_import_links(self) -> None:
+        fixtures = {
+            "python": {
+                "api.py": "from pkg import run\ndef handle(request):\n    return run(request.args['q'])\n",
+                "pkg/__init__.py": "import subprocess\ndef run(value):\n    return subprocess.run(value)\n",
+            },
+            "go": {
+                "api.go": "import \"pkg/store\"\nfunc handle(request *http.Request) { store.Run(request.URL.Query().Get(\"q\")) }\n",
+                "pkg/store.go": "func Run(value string) { exec.Command(value) }\n",
+            },
+            "typescript": {
+                "src/api.ts": "import { run } from './store';\nexport function handle(request: Request) { return run(request.query.q); }\n",
+                "src/store/index.ts": "export function run(value: string) { return child_process.exec(value); }\n",
+            },
+            "javascript": {
+                "src/api.js": "import { run } from './store';\nexport function handle(request) { return run(request.query.q); }\n",
+                "src/store/index.js": "export function run(value) { return child_process.exec(value); }\n",
+            },
+        }
+        for language, files in fixtures.items():
+            with self.subTest(language=language):
+                row = self._single_row(files)
+                self.assertEqual(row["strength"], "import-linked")
+
     def test_source_scanner_ignores_comments_and_strings_without_losing_call_name(self) -> None:
         row = self._single_row(
             {
@@ -276,6 +364,37 @@ class SemanticGuidanceTests(unittest.TestCase):
         )
         self.assertEqual(row["strength"], "direct")
         self.assertEqual([item["symbol"] for item in row["trace"]], ["handle", "relay", "run"])
+
+    def test_small_route_limit_still_schedules_reverse_traversal(self) -> None:
+        limits = GuidanceLimits(4096, 10, 10, 2, 10, 4096, 4)
+        reverse_entry_counts: list[int] = []
+        original_reverse = semantic_guidance._traverse_reverse_routes
+
+        def observe_reverse(*args: object) -> None:
+            reverse_entry_counts.append(len(args[-2]))
+            original_reverse(*args)
+
+        with mock.patch.object(
+            semantic_guidance,
+            "_traverse_reverse_routes",
+            side_effect=observe_reverse,
+        ) as reverse:
+            result = self._build_with_limits(
+                "reverse-schedule",
+                {
+                    "app.py": (
+                        "import subprocess\n"
+                        "def first(request):\n"
+                        "    return subprocess.run(request.args['q'])\n"
+                        "def second(request):\n"
+                        "    return open(request.args['path'])\n"
+                    )
+                },
+                limits,
+            )
+        self.assertEqual(result.row_count, 2)
+        self.assertGreater(reverse.call_count, 0)
+        self.assertTrue(any(count < limits.route_count for count in reverse_entry_counts))
 
     def test_ambiguous_name_never_becomes_a_strong_route(self) -> None:
         rows = self._rows(
