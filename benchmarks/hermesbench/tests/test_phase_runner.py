@@ -317,6 +317,93 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(PhaseRunnerError, "unexpected public predictions"):
                 validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),)))
 
+    def test_failed_hunt_discovery_revalidates_empty_completed_subset(self) -> None:
+        # Discovery failure must retain no candidates or second-phase artifacts.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def discovery(*_: object) -> ExecutorResult:
+                raise ExecutorFailureError("failure", failure_code="final_response_invalid")
+
+            result = run_workflow(
+                manifest, root / "snapshots", outputs, "failed-discovery", "hunt", "hunt-balanced",
+                _controls(), ExecutionPolicy((("python",),)), discovery, lambda _: self.fail("verification must not run"),
+            )
+            receipt_path = outputs / "failed-discovery-workflow-receipt.json"
+
+            self.assertEqual(result.receipt.status, "incomplete")
+            self.assertEqual((outputs / "failed-discovery-candidates.jsonl").read_bytes(), b"")
+            self.assertFalse((outputs / "failed-discovery-verification").exists())
+            self.assertFalse((outputs / "failed-discovery-public-predictions.jsonl").exists())
+            self.assertEqual(
+                validate_workflow_receipt(
+                    manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),))
+                ).status,
+                "incomplete",
+            )
+
+    def test_partial_hunt_discovery_revalidates_manifest_ordered_subset_and_rejects_artifacts(self) -> None:
+        # Only completed task receipts may contribute discovery prediction or evidence rows.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                if request.task_id == "task-a":
+                    return _hunt_result(request)
+                raise ExecutorFailureError("failure", failure_code="final_response_invalid")
+
+            result = run_workflow(
+                manifest, root / "snapshots", outputs, "partial-discovery", "hunt", "hunt-balanced",
+                _controls(), ExecutionPolicy((("python",),)), discovery, lambda _: self.fail("verification must not run"),
+            )
+            receipt_path = outputs / "partial-discovery-workflow-receipt.json"
+            candidate_path = outputs / "partial-discovery-candidates.jsonl"
+            evidence_path = outputs / "partial-discovery-discovery" / "evidence.jsonl"
+
+            self.assertEqual(result.receipt.status, "incomplete")
+            self.assertEqual(
+                [json.loads(line)["task_id"] for line in (outputs / "partial-discovery-discovery" / "predictions.jsonl").read_text(encoding="utf-8").splitlines()],
+                ["task-a"],
+            )
+            self.assertEqual(len(evidence_path.read_text(encoding="utf-8").splitlines()), 1)
+            self.assertEqual(candidate_path.read_bytes(), b"")
+            self.assertEqual(
+                validate_workflow_receipt(
+                    manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),))
+                ).status,
+                "incomplete",
+            )
+
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            candidate_path.write_text("tampered\n", encoding="utf-8")
+            receipt["candidate_transfer_sha256"] = sha256_file(candidate_path)
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            with self.assertRaisesRegex(PhaseRunnerError, "candidate transfer"):
+                validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),)))
+
+            candidate_path.write_bytes(b"")
+            receipt["candidate_transfer_sha256"] = sha256_file(candidate_path)
+            evidence_path.write_bytes(evidence_path.read_bytes() * 2)
+            receipt["discovery_evidence_sha256"] = sha256_file(evidence_path)
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            with self.assertRaisesRegex(PhaseRunnerError, "evidence is incomplete"):
+                validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),)))
+
+            evidence_path.write_bytes(evidence_path.read_bytes()[: len(evidence_path.read_bytes()) // 2])
+            receipt["discovery_evidence_sha256"] = sha256_file(evidence_path)
+            verification_dir = outputs / "partial-discovery-verification"
+            verification_dir.mkdir()
+            (verification_dir / "receipt.json").write_text("{}", encoding="utf-8")
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            with self.assertRaisesRegex(PhaseRunnerError, "unexpected verification"):
+                validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),)))
+
     def test_hunt_workflow_preserves_six_candidates_and_rejects_missing_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -275,3 +275,7 @@
 - The first paid artifact-gate invocation reached one discovery runtime and ended after 182.296 seconds with fixed code `hunt_evidence_invalid`. Predictions, commands, evidence, and candidate transfer were atomically empty; the pre/post snapshot hashes matched and no container remained. Because attestation occurs after terminal parsing, the zero receipt usage cannot prove that the paid model was not called.
 - Independent receipt validation exposed a separate bug: discovery-failure workflow receipts are committed as incomplete, but `validate_workflow_receipt` unconditionally requires a complete discovery prediction row set and therefore rejects the receipt with `phase predictions are incomplete`.
 - Ruling: do not retain or inspect discarded model output to diagnose attestation. First make incomplete discovery receipts revalidatable from task receipts, then expose only typed path-free public attestation codes for exact packet-read cardinality, prepared-artifact integrity, candidate-frontier location linkage, and candidate-pass linkage. Unknown and preparation failures keep the broad legacy code.
+
+### Task 16 discovery-failure receipt recovery
+
+- Discovery receipt revalidation now derives the completed subset from committed task receipts in manifest order. It validates only those persisted prediction and Hunt evidence rows, while a non-completed discovery requires an empty candidate transfer, incomplete workflow status, and no verification or public artifacts.

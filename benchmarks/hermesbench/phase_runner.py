@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from .contracts import BenchmarkManifest, Finding, Location, TaskPrediction, parse_prediction
+from .contracts import BenchmarkManifest, Finding, Location, TaskDescriptor, TaskPrediction, parse_prediction
 from .hunt_protocol import (
     HUNT_CANDIDATE_PROTOCOL_VERSION,
     HUNT_DISCOVERY_MAX_CANDIDATES,
@@ -622,18 +622,33 @@ def validate_workflow_receipt(
     if sha256_file(discovery_predictions_path) != receipt.discovery_predictions_sha256:
         raise PhaseRunnerError("workflow receipt discovery predictions hash does not match")
     discovery = load_receipt(discovery_path)
-    _validate_phase(manifest, discovery_dir, discovery, config)
+    discovery_records = _validate_phase(manifest, discovery_dir, discovery, config)
     candidate_path = output_root / f"{receipt.run_id}-candidates.jsonl"
     if sha256_file(candidate_path) != receipt.candidate_transfer_sha256:
         raise PhaseRunnerError("workflow receipt candidate hash does not match")
     discovery_kind = "hunt-discovery" if receipt.workflow == "hunt" else "standard"
-    discovery_predictions = _load_phase_predictions(manifest, discovery_predictions_path, discovery_kind)
+    completed_discovery_tasks = tuple(
+        task for task, record in zip(manifest.tasks, discovery_records, strict=True)
+        if record.status == "completed"
+    )
+    discovery_predictions = _load_phase_predictions(
+        manifest, discovery_predictions_path, discovery_kind, completed_discovery_tasks
+    )
     if receipt.workflow == "hunt":
         evidence_path = discovery_dir / "evidence.jsonl"
         if not evidence_path.is_file() or receipt.discovery_evidence_sha256 is None or sha256_file(evidence_path) != receipt.discovery_evidence_sha256:
             raise PhaseRunnerError("workflow receipt discovery evidence hash does not match")
-        evidence_rows = _read_jsonl(evidence_path, "discovery evidence")
-        if len(evidence_rows) != len(manifest.tasks):
+        if completed_discovery_tasks:
+            evidence_rows = _read_jsonl(evidence_path, "discovery evidence")
+        else:
+            try:
+                evidence_bytes = evidence_path.read_bytes()
+            except OSError as error:
+                raise PhaseRunnerError("discovery evidence is unavailable") from error
+            if evidence_bytes != b"":
+                raise PhaseRunnerError("discovery evidence is incomplete")
+            evidence_rows = []
+        if len(evidence_rows) != len(completed_discovery_tasks):
             raise PhaseRunnerError("discovery evidence is incomplete")
         try:
             evidence_rows = [parse_hunt_evidence(row, receipt.profile) for row in evidence_rows]
@@ -645,10 +660,28 @@ def validate_workflow_receipt(
                 receipt.profile,
                 parse_hunt_discovery_prediction(discovery_predictions[task.task_id], task.task_id),
             ).to_json()
-            for task in manifest.tasks
+            for task in completed_discovery_tasks
         )
         if evidence_path.read_bytes() != expected_evidence:
             raise PhaseRunnerError("workflow receipt discovery evidence does not reproduce")
+    _validate_phase_commands(manifest, discovery_commands_path, execution_policy)
+    if discovery.status != "completed":
+        verification_dir = output_root / f"{receipt.run_id}-verification"
+        public_predictions_path = output_root / f"{receipt.run_id}-public-predictions.jsonl"
+        if receipt.status != "incomplete":
+            raise PhaseRunnerError("failed discovery workflow receipt must be incomplete")
+        if (
+            receipt.verification_receipt_sha256 is not None
+            or receipt.verification_commands_sha256 is not None
+            or receipt.verification_predictions_sha256 is not None
+            or receipt.public_predictions_sha256 is not None
+            or verification_dir.exists()
+            or public_predictions_path.exists()
+        ):
+            raise PhaseRunnerError("failed discovery workflow receipt has unexpected verification artifacts")
+        if candidate_path.read_bytes() != b"":
+            raise PhaseRunnerError("failed discovery workflow candidate transfer must be empty")
+        return receipt
     candidates = canonicalize_candidates(manifest, snapshots_root, discovery_predictions, receipt.workflow)
     expected_candidate_bytes = _jsonl_bytes(
         _candidate_row(task.task_id, candidates[task.task_id]) for task in manifest.tasks
@@ -656,7 +689,6 @@ def validate_workflow_receipt(
     actual_candidate_bytes = candidate_path.read_bytes()
     if actual_candidate_bytes != expected_candidate_bytes:
         raise PhaseRunnerError("workflow receipt candidate transfer does not match discovery")
-    _validate_phase_commands(manifest, discovery_commands_path, execution_policy)
     if receipt.verification_receipt_sha256 is not None:
         verification_dir = output_root / f"{receipt.run_id}-verification"
         verification_path = verification_dir / "receipt.json"
@@ -720,7 +752,9 @@ def _workflow_receipt(
     )
 
 
-def _validate_phase(manifest: BenchmarkManifest, directory: Path, receipt: RunReceipt, config: RunConfig) -> None:
+def _validate_phase(
+    manifest: BenchmarkManifest, directory: Path, receipt: RunReceipt, config: RunConfig
+) -> tuple[TaskRunReceipt, ...]:
     stored = load_receipt(directory / "receipt.json")
     if stored != receipt or stored.config != config:
         raise PhaseRunnerError("phase receipt does not match committed receipt bytes")
@@ -756,16 +790,30 @@ def _validate_phase(manifest: BenchmarkManifest, directory: Path, receipt: RunRe
         raise PhaseRunnerError("phase failure evidence is invalid") from error
     if receipt.failure_evidence_sha256 != actual_failure_evidence_sha256:
         raise PhaseRunnerError("phase failure evidence hash does not match")
+    return tuple(records)
 
 
 def _load_phase_predictions(
-    manifest: BenchmarkManifest, path: Path, response_kind: str = "standard"
+    manifest: BenchmarkManifest,
+    path: Path,
+    response_kind: str = "standard",
+    tasks: Sequence[TaskDescriptor] | None = None,
 ) -> dict[str, object]:
-    rows = _read_jsonl(path, "phase predictions")
-    if len(rows) != len(manifest.tasks):
+    expected_tasks = tuple(manifest.tasks if tasks is None else tasks)
+    if not expected_tasks:
+        try:
+            value = path.read_bytes()
+        except OSError as error:
+            raise PhaseRunnerError("phase predictions are unavailable") from error
+        if value != b"":
+            raise PhaseRunnerError("phase predictions are incomplete")
+        rows: list[dict[str, object]] = []
+    else:
+        rows = _read_jsonl(path, "phase predictions")
+    if len(rows) != len(expected_tasks):
         raise PhaseRunnerError("phase predictions are incomplete")
     loaded: dict[str, object] = {}
-    for task, row in zip(manifest.tasks, rows, strict=True):
+    for task, row in zip(expected_tasks, rows, strict=True):
         if response_kind == "hunt-discovery":
             prediction = parse_hunt_discovery_prediction(row, task.task_id)
         elif response_kind == "hunt-verification":
@@ -775,7 +823,7 @@ def _load_phase_predictions(
         if prediction.task_id in loaded:
             raise PhaseRunnerError("phase predictions contain duplicate task IDs")
         loaded[prediction.task_id] = row
-    if set(loaded) != {task.task_id for task in manifest.tasks}:
+    if set(loaded) != {task.task_id for task in expected_tasks}:
         raise PhaseRunnerError("phase predictions do not match manifest tasks")
     return loaded
 
