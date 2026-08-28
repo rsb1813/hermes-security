@@ -49,7 +49,7 @@ HUNT_EVIDENCE_FIELDS_V1 = frozenset({
 })
 HUNT_EVIDENCE_FIELDS_V2 = HUNT_EVIDENCE_FIELDS_V1 | frozenset({
     "semantic_guidance_sha256",
-    "semantic_guidance_row_count",
+    "semantic_guidance_count",
     "semantic_guidance_edge_count",
     "semantic_guidance_scanned_file_count",
     "semantic_guidance_skipped_file_count",
@@ -131,7 +131,7 @@ class HuntEvidence:
     coverage_debt_sha256: str
     coverage_debt_count: int
     semantic_guidance_sha256: str | None
-    semantic_guidance_row_count: int | None
+    semantic_guidance_count: int | None
     semantic_guidance_edge_count: int | None
     semantic_guidance_scanned_file_count: int | None
     semantic_guidance_skipped_file_count: int | None
@@ -162,7 +162,7 @@ class HuntEvidence:
         if self.protocol_version == HUNT_EVIDENCE_PROTOCOL_VERSION:
             value |= {
                 "semantic_guidance_sha256": self.semantic_guidance_sha256,
-                "semantic_guidance_row_count": self.semantic_guidance_row_count,
+                "semantic_guidance_count": self.semantic_guidance_count,
                 "semantic_guidance_edge_count": self.semantic_guidance_edge_count,
                 "semantic_guidance_scanned_file_count": self.semantic_guidance_scanned_file_count,
                 "semantic_guidance_skipped_file_count": self.semantic_guidance_skipped_file_count,
@@ -206,7 +206,7 @@ def parse_hunt_evidence(
     )
     if version == HUNT_EVIDENCE_PROTOCOL_VERSION:
         counts += (
-            "semantic_guidance_row_count",
+            "semantic_guidance_count",
             "semantic_guidance_edge_count",
             "semantic_guidance_scanned_file_count",
             "semantic_guidance_skipped_file_count",

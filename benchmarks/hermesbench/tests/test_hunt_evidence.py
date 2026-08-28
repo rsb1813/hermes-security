@@ -14,6 +14,7 @@ from benchmarks.hermesbench import hunt_evidence
 from benchmarks.hermesbench.hunt_evidence import (
     HuntEvidenceError,
     attest_hunt_discovery,
+    parse_hunt_evidence,
     prepare_hunt_artifacts,
 )
 from benchmarks.hermesbench.hunt_protocol import parse_hunt_discovery_prediction
@@ -61,6 +62,35 @@ class HuntEvidencePreparationTests(unittest.TestCase):
             },
             "task-1",
         )
+
+    def _evidence_payload(self, version: int) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": version,
+            "profile": "hunt-balanced",
+            "inventory_sha256": "0" * 64,
+            "inventory_count": 3,
+            "rank_input_sha256": "1" * 64,
+            "frontier_sha256": "2" * 64,
+            "frontier_count": 3,
+            "frontier_pass_count": 3,
+            "priority_packet_sha256": "3" * 64,
+            "priority_packet_count": 3,
+            "candidate_links_sha256": "4" * 64,
+            "candidate_count": 1,
+            "linked_location_count": 1,
+            "coverage_debt_sha256": "5" * 64,
+            "coverage_debt_count": 3,
+            "validated_closure_count": 0,
+        }
+        if version == 2:
+            payload |= {
+                "semantic_guidance_sha256": "6" * 64,
+                "semantic_guidance_count": 2,
+                "semantic_guidance_edge_count": 4,
+                "semantic_guidance_scanned_file_count": 3,
+                "semantic_guidance_skipped_file_count": 0,
+            }
+        return payload
 
     def test_preparation_preserves_inventory_and_frontier_deterministically(self) -> None:
         # Removing deterministic preparation would make this test fail.
@@ -334,9 +364,63 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 prepared,
                 prediction,
                 (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
-            )
+        )
         self.assertEqual(evidence.protocol_version, 2)
-        self.assertEqual(set(evidence.to_json()), hunt_evidence.HUNT_EVIDENCE_FIELDS_V2)
+        self.assertEqual(
+            set(evidence.to_json()),
+            {
+                "schema_version",
+                "profile",
+                "inventory_sha256",
+                "inventory_count",
+                "rank_input_sha256",
+                "frontier_sha256",
+                "frontier_count",
+                "frontier_pass_count",
+                "priority_packet_sha256",
+                "priority_packet_count",
+                "candidate_links_sha256",
+                "candidate_count",
+                "linked_location_count",
+                "coverage_debt_sha256",
+                "coverage_debt_count",
+                "validated_closure_count",
+                "semantic_guidance_sha256",
+                "semantic_guidance_count",
+                "semantic_guidance_edge_count",
+                "semantic_guidance_scanned_file_count",
+                "semantic_guidance_skipped_file_count",
+            },
+        )
+
+    def test_parser_accepts_literal_protocol_one_and_two_evidence(self) -> None:
+        # Changing the public versioned schema must reject its literal valid receipt.
+        protocol_one = self._evidence_payload(1)
+        protocol_two = self._evidence_payload(2)
+        self.assertEqual(
+            parse_hunt_evidence(protocol_one, "hunt-balanced", evidence_protocol_version=1),
+            protocol_one,
+        )
+        self.assertEqual(
+            parse_hunt_evidence(protocol_two, "hunt-balanced", evidence_protocol_version=2),
+            protocol_two,
+        )
+
+    def test_parser_rejects_mixed_version_fields(self) -> None:
+        # Adding a protocol two field to a protocol one receipt must fail exact-field validation.
+        mixed = self._evidence_payload(1)
+        mixed["semantic_guidance_count"] = 2
+        with self.assertRaises(HuntEvidenceError):
+            parse_hunt_evidence(mixed, "hunt-balanced", evidence_protocol_version=1)
+
+    def test_parser_rejects_unsupported_and_mismatched_protocol_versions(self) -> None:
+        # Unsupported schema values and receipt-version disagreement must both fail.
+        unsupported = self._evidence_payload(1)
+        unsupported["schema_version"] = 3
+        with self.assertRaises(HuntEvidenceError):
+            parse_hunt_evidence(unsupported, "hunt-balanced")
+        with self.assertRaises(HuntEvidenceError):
+            parse_hunt_evidence(self._evidence_payload(2), "hunt-balanced", evidence_protocol_version=1)
 
     def test_protocol_two_missing_semantic_guidance_read_has_its_own_category(self) -> None:
         # A protocol two receipt without its semantic read must be rejected distinctly.
