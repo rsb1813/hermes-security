@@ -113,7 +113,7 @@
 - [x] Write the semantic-guidance implementation plan with RED and GREEN checkpoints.
 - [ ] Implement protocol-v2 semantic guidance while preserving protocol-v1 receipt reconstruction.
   - [x] Implement and independently review the deterministic lexical guidance builder.
-  - [ ] Bind semantic guidance into Hunt evidence protocol version 2.
+  - [x] Bind semantic guidance into Hunt evidence protocol version 2.
   - [ ] Require the guidance in Hunt discovery without changing Standard or verification prompts.
   - [ ] Reconstruct retained Hunt receipts by their explicit evidence protocol version.
 - [ ] Complete independent review and all no-model boundary checks.

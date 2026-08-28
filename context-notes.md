@@ -326,3 +326,12 @@
 - Task-level review found three Important issues in the first implementation: intermediate-link containment and equivalent-path deduplication, loss of additional operation families in one declaration, and incomplete independent hard-bound tests.
 - Fix round 1 addressed all three findings. The focused suite passed 15 tests with one Windows link-creation skip, followed by successful compileall and diff checks. Scoped re-review found no new Critical or Important issue.
 - Guidance strength remains an investigation priority only. The builder does not execute source, create model calls, change frontier eligibility, or claim reachability or vulnerability proof.
+
+### Task 24 Hunt evidence protocol version 2
+
+- Hunt evidence now supports explicit protocol versions 1 and 2. Protocol 1 retains the exact five-artifact preparation fingerprint, individual artifact hashes, evidence field set, and canonical evidence hash recorded before this change.
+- Protocol 2 adds only the immutable semantic-guidance scratch artifact, binds its hash into preparation, persists five path-free semantic hash/count fields, and requires exactly one audited semantic read after the priority packet read.
+- Semantic guidance mutation, oversize replacement, symbolic or hard linking, and low-level replacement fail through the existing artifact-integrity category. Missing and duplicate semantic reads use their two fixed path-free categories.
+- Task-level review found a public contract mismatch: the first implementation exposed `semantic_guidance_row_count` rather than `semantic_guidance_count`, and its test mirrored the same implementation constant. Fix round 1 corrected the field and added literal v1/v2 parser, field-mixing, unsupported-version, and explicit-mismatch tests.
+- The reviewed focused suite passed 50 tests with four Windows or opt-in skips, followed by successful compileall and diff checks. Scoped re-review found no new Critical or Important issue.
+- One unchanged phase-runner expectation still assumes the old default protocol. That planned cross-task integration remains explicit for the version-aware workflow task and is not silently inferred from evidence rows.
