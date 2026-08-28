@@ -99,7 +99,7 @@
 - [x] Make discovery-failure workflow receipts independently revalidatable for completed-task subsets and empty candidate transfer.
 - [x] Replace the broad live Hunt attestation failure with bounded path-free packet, artifact, location, and pass-linkage codes.
 - [ ] Revalidate the failed v12 receipt and run the fixed diagnostic once under a new immutable output root.
-- [ ] Classify command-event rejection origins with fixed path-free codes without changing any shell-composition rejection.
+- [x] Classify command-event rejection origins with fixed path-free codes without changing any shell-composition rejection.
 - [ ] Revalidate the failed v12b receipt and run one fixed v12c diagnostic under a new immutable output root.
 - [ ] Rerun the fixed single-task diagnostic with one material strategy change at a time.
 - [ ] Measure `hunt-balanced` and `hunt-max` on Canary.

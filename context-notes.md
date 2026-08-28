@@ -289,3 +289,7 @@
 - Paid v12b ran one discovery runtime for 316.805 seconds and ended before attestation with fixed legacy code `command_event_invalid`. Predictions, commands, evidence, and candidate transfer were atomically empty; the task snapshot hash remained unchanged, the schema-3 incomplete receipt revalidated, ten retained artifacts contained no bounded auth or host-path value, and no container remained.
 - A read-only security-boundary advisor selected diagnosis without normalization changes. Ruling: preserve every current shell-composition and malformed-command rejection, add only fixed path-free codes at each command scanner/parser origin, and keep the broad legacy code valid.
 - No later parser broadening is authorized by this diagnostic step. A future normalization change requires a concrete live syntax-class code plus a separate RED test proving the exact form is a safe single command.
+
+### Task 19 command-audit classification
+
+- The command scanner and parser now preserve the same rejection order and semantics while assigning fixed path-free codes for event shape, empty or NUL input, newline, shell composition syntax classes, malformed quoting, parser failure, wrapper depth, and token encoding. The legacy broad code remains allowlisted for unknown command-event failures.

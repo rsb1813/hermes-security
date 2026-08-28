@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 import tempfile
 import unittest
 from dataclasses import replace
@@ -537,6 +538,70 @@ class CodexExecAdapterTests(unittest.TestCase):
             with self.subTest(command=command):
                 with self.assertRaisesRegex(CodexExecError, "unsafe"):
                     _normalize_command(command)
+
+    def test_command_event_shape_has_a_fixed_public_code(self) -> None:
+        # Non-string command payloads must not collapse into a generic event failure.
+        rows = (
+            {"type": "item.completed", "item": {"type": "command_execution", "command": []}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": _FINAL_PREDICTION}},
+            {"type": "turn.completed", "usage": {"input_tokens": 30, "cached_input_tokens": 20, "output_tokens": 10}},
+        )
+        runtime = _Runtime(b"".join(json.dumps(row).encode("utf-8") + b"\n" for row in rows))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter("standard", "baseline", runtime)(_request(), Path(directory), 60)
+        self.assertEqual(caught.exception.failure_code, "command_shape_invalid")
+
+    def test_command_scanner_origins_have_distinct_fixed_codes(self) -> None:
+        # Scanner syntax classes must remain distinguishable without retaining command text.
+        cases = (
+            ("", "command_empty_or_nul"),
+            ("rg\x00needle", "command_empty_or_nul"),
+            ("rg needle\nsort", "command_newline"),
+            ("rg needle source.py | sort", "command_unquoted_pipe"),
+            ("rg needle > result.txt", "command_redirect"),
+            ("rg needle && sort", "command_control_operator"),
+            ("rg (needle)", "command_grouping"),
+            ("rg $(pwd)", "command_substitution"),
+            ("rg needle # comment", "command_comment"),
+            ('rg "$HOME"', "command_double_quoted_substitution"),
+            ('rg "`pwd`"', "command_double_quoted_substitution"),
+            ("rg 'unterminated", "command_malformed_quote_escape"),
+            ("rg needle\\", "command_malformed_quote_escape"),
+        )
+        for command, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(CodexExecError) as caught:
+                    _normalize_command(command)
+                self.assertEqual(caught.exception.failure_code, code)
+                if command:
+                    self.assertNotIn(command, str(caught.exception))
+
+    def test_command_parser_origins_have_distinct_fixed_codes(self) -> None:
+        # Shell parser details must remain outside the public failure code.
+        with patch(
+            "benchmarks.hermesbench.adapters.codex_exec.shlex.split",
+            side_effect=ValueError("private parser detail"),
+        ):
+            with self.assertRaises(CodexExecError) as caught:
+                _normalize_command("rg needle source.py")
+        self.assertEqual(caught.exception.failure_code, "command_shell_parse")
+        self.assertNotIn("private parser detail", str(caught.exception))
+
+    def test_command_wrapper_depth_has_a_fixed_public_code(self) -> None:
+        # Excessive shell wrappers must remain a distinct parser origin.
+        nested = "rg needle source.py"
+        for _ in range(5):
+            nested = f"bash -c {shlex.quote(nested)}"
+        with self.assertRaises(CodexExecError) as caught:
+            _normalize_command(nested)
+        self.assertEqual(caught.exception.failure_code, "command_wrapper_depth")
+
+    def test_command_token_encoding_has_a_fixed_public_code(self) -> None:
+        # Non-UTF-8 command tokens must not leak encoding details.
+        with self.assertRaises(CodexExecError) as caught:
+            _normalize_command("rg \ud800")
+        self.assertEqual(caught.exception.failure_code, "command_token_encoding")
 
     def test_preserves_executor_timeout_and_rejects_unbounded_auth_payload(self) -> None:
         class _TimeoutRuntime(_Runtime):

@@ -29,6 +29,7 @@ from benchmarks.hermesbench.sanitize import tree_sha256
 from benchmarks.hermesbench.receipts import sha256_file
 from benchmarks.hermesbench.hunt_evidence import reproduce_hunt_evidence
 from benchmarks.hermesbench.hunt_protocol import parse_hunt_discovery_prediction
+from benchmarks.hermesbench.adapters.codex_exec import _normalize_command
 
 
 def _manifest(root: Path) -> BenchmarkManifest:
@@ -206,6 +207,40 @@ class CandidateCanonicalizationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_standard_command_audit_failure_revalidates_without_success_artifacts(self) -> None:
+        # A classified command rejection must preserve the snapshot and receipt evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            before = tree_sha256(root / "snapshots" / "task-a")
+
+            def discovery(*_: object) -> ExecutorResult:
+                _normalize_command("rg needle source.py | sort")
+                self.fail("unsafe command must not produce a result")
+
+            result = run_workflow(
+                manifest, root / "snapshots", outputs, "command-audit", "standard", "baseline",
+                _controls(), ExecutionPolicy((("python",),)), discovery, lambda _: self.fail("verification must not run"),
+            )
+            receipt_path = outputs / "command-audit-workflow-receipt.json"
+            task_dir = next((outputs / "command-audit-discovery" / "tasks").iterdir())
+
+            self.assertEqual(result.receipt.status, "incomplete")
+            self.assertEqual(tree_sha256(root / "snapshots" / "task-a"), before)
+            self.assertEqual({path.name for path in task_dir.iterdir()}, {"request.json", "failure.json"})
+            self.assertEqual(
+                json.loads((task_dir / "failure.json").read_text(encoding="utf-8")),
+                {"code": "command_unquoted_pipe"},
+            )
+            self.assertEqual(
+                validate_workflow_receipt(
+                    manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),))
+                ).status,
+                "incomplete",
+            )
+
     def test_hunt_schema_three_binds_reproducible_evidence_and_rejects_tampering(self) -> None:
         # Rewriting receipt or evidence bytes cannot replace host-reproduced evidence.
         with tempfile.TemporaryDirectory() as directory:

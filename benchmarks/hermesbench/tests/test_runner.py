@@ -387,8 +387,49 @@ class SuiteExecutionTests(unittest.TestCase):
             self.assertEqual({path.name for path in task_dir.iterdir()}, {"request.json", "failure.json"})
             self.assertEqual(
                 json.loads((task_dir / "failure.json").read_text(encoding="utf-8")),
-                {"code": "command_event_invalid"},
+                {"code": "command_unquoted_pipe"},
             )
+
+    def test_runner_persists_only_allowlisted_command_audit_codes(self) -> None:
+        # Command text must not survive a runner failure sidecar.
+        for code in (
+            "command_shape_invalid",
+            "command_empty_or_nul",
+            "command_newline",
+            "command_unquoted_pipe",
+            "command_redirect",
+            "command_control_operator",
+            "command_grouping",
+            "command_substitution",
+            "command_comment",
+            "command_double_quoted_substitution",
+            "command_malformed_quote_escape",
+            "command_shell_parse",
+            "command_wrapper_depth",
+            "command_token_encoding",
+            "command_event_invalid",
+        ):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                snapshots = root / "snapshots"
+                output = root / "output"
+                snapshots.mkdir()
+                output.mkdir()
+                manifest = manifest_for("task-a", snapshots_root=snapshots)
+                policy = ExecutionPolicy((("python",),))
+
+                def executor(*_: object) -> ExecutorResult:
+                    raise ExecutorFailureError("private command sentinel", failure_code=code)
+
+                run_suite(
+                    manifest, snapshots, output, "run-001", "standard", "baseline",
+                    config_for(manifest, policy), policy, executor,
+                )
+                task_dir = next((output / "run-001" / "tasks").iterdir())
+                self.assertEqual({path.name for path in task_dir.iterdir()}, {"request.json", "failure.json"})
+                failure = (task_dir / "failure.json").read_text(encoding="utf-8")
+                self.assertEqual(json.loads(failure), {"code": code})
+                self.assertNotIn("private command sentinel", failure)
 
     def test_failed_task_persists_only_the_bounded_executor_failure_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

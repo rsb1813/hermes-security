@@ -626,7 +626,7 @@ def _parse_result(
                 if not isinstance(command, str):
                     raise CodexExecError(
                         "command event is invalid",
-                        failure_code="command_event_invalid",
+                        failure_code="command_shape_invalid",
                     )
                 commands.append(_normalize_command(command))
             elif item_type == "agent_message":
@@ -856,11 +856,11 @@ def _normalize_command(command: str) -> tuple[str, ...]:
             tokens = tuple(shlex.split(current, posix=True))
         except ValueError as error:
             raise CodexExecError(
-                "command event is unsafe", failure_code="command_event_invalid"
+                "command event is unsafe", failure_code="command_shell_parse"
             ) from error
         if not tokens or any(not token for token in tokens):
             raise CodexExecError(
-                "command event is unsafe", failure_code="command_event_invalid"
+                "command event is unsafe", failure_code="command_empty_or_nul"
             )
         if (
             tokens[0] in _SHELL_WRAPPER_EXECUTABLES
@@ -872,18 +872,18 @@ def _normalize_command(command: str) -> tuple[str, ...]:
             current = tokens[2]
             continue
         return _public_command_tokens(tokens)
-    raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+    raise CodexExecError("command event is unsafe", failure_code="command_wrapper_depth")
 
 
 def _scan_single_shell_command(command: str) -> None:
     if not command or "\x00" in command:
-        raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+        raise CodexExecError("command event is unsafe", failure_code="command_empty_or_nul")
     quote: str | None = None
     index = 0
     while index < len(command):
         character = command[index]
         if character in "\n\r":
-            raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+            raise CodexExecError("command event is unsafe", failure_code="command_newline")
         if quote is None:
             if character == "'":
                 quote = character
@@ -892,9 +892,21 @@ def _scan_single_shell_command(command: str) -> None:
             elif character == "\\":
                 index += 1
                 if index == len(command) or command[index] in "\n\r":
-                    raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+                    raise CodexExecError("command event is unsafe", failure_code="command_malformed_quote_escape")
             elif character in _UNSAFE_UNQUOTED_SHELL:
-                raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+                failure_code = {
+                    "|": "command_unquoted_pipe",
+                    "<": "command_redirect",
+                    ">": "command_redirect",
+                    "&": "command_control_operator",
+                    ";": "command_control_operator",
+                    "(": "command_grouping",
+                    ")": "command_grouping",
+                    "$": "command_substitution",
+                    "`": "command_substitution",
+                    "#": "command_comment",
+                }[character]
+                raise CodexExecError("command event is unsafe", failure_code=failure_code)
         elif quote == "'":
             if character == "'":
                 quote = None
@@ -903,12 +915,12 @@ def _scan_single_shell_command(command: str) -> None:
         elif character == "\\":
             index += 1
             if index == len(command) or command[index] in "\n\r":
-                raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+                raise CodexExecError("command event is unsafe", failure_code="command_malformed_quote_escape")
         elif character in _UNSAFE_DOUBLE_QUOTED_SHELL:
-            raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+            raise CodexExecError("command event is unsafe", failure_code="command_double_quoted_substitution")
         index += 1
     if quote is not None:
-        raise CodexExecError("command event is unsafe", failure_code="command_event_invalid")
+        raise CodexExecError("command event is unsafe", failure_code="command_malformed_quote_escape")
 
 
 def _public_command_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
@@ -921,7 +933,7 @@ def _public_command_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
             digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         except UnicodeEncodeError as error:
             raise CodexExecError(
-                "command event is unsafe", failure_code="command_event_invalid"
+                "command event is unsafe", failure_code="command_token_encoding"
             ) from error
         public.append(f"sha256={digest}")
     return tuple(public)
