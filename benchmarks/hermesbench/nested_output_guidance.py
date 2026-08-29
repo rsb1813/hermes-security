@@ -485,14 +485,19 @@ def scan_nested_output_contexts(source: str) -> tuple[NestedOutputObservation, .
     if "`" not in source or "${" not in source:
         return ()
     scanner = _TemplateScanner(source)
+    interpolations = tuple(
+        (interpolation, context)
+        for interpolation in scanner.scan()
+        if (context := _classify_context(interpolation.raw_before, interpolation.raw_after)) is not None
+    )
+    if not interpolations:
+        return ()
     declarations = _javascript_declarations(source)
     observations: list[NestedOutputObservation] = []
-    for interpolation in scanner.scan():
+    controls_by_declaration: dict[_Declaration, tuple[int, ...]] = {}
+    for interpolation, context in interpolations:
         declaration = _containing_declaration(declarations, interpolation.expression_start)
         if declaration is None:
-            continue
-        context = _classify_context(interpolation.raw_before, interpolation.raw_after)
-        if context is None:
             continue
         expression = source[interpolation.expression_start:interpolation.expression_end]
         origin = _origin_for_expression(source, declaration, interpolation.expression_start, expression)
@@ -503,7 +508,10 @@ def scan_nested_output_contexts(source: str) -> tuple[NestedOutputObservation, .
             _CONTEXT_REASON_CODES[context],
             *origin.reason_codes,
         )
-        controls = _outer_sanitizer_lines(source, declaration)
+        controls = controls_by_declaration.get(declaration)
+        if controls is None:
+            controls = _outer_sanitizer_lines(source, declaration)
+            controls_by_declaration[declaration] = controls
         if controls:
             reasons = (*reasons, "outer_html_sanitizer_context_mismatch")
         observations.append(

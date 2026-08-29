@@ -294,16 +294,6 @@ def _scan_files(
         seen_paths.add(relative_path)
         candidate = snapshot / Path(relative_path)
         try:
-            resolved = candidate.resolve(strict=True)
-            resolved.relative_to(snapshot)
-            candidate.lstat()
-        except OSError:
-            skipped += 1
-            continue
-        except ValueError:
-            skipped += 1
-            continue
-        try:
             encoded, source_size = _read_pinned_source(snapshot, candidate)
             if total_bytes + source_size > limits.total_source_bytes:
                 raise ValueError("source budget exceeded")

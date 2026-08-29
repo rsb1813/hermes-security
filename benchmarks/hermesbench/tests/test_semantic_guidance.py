@@ -179,6 +179,78 @@ class SemanticGuidanceTests(unittest.TestCase):
             self.assertEqual(nested_output_guidance.scan_nested_output_contexts("const value = `static`;\n"), ())
             self.assertEqual(nested_output_guidance.scan_nested_output_contexts("const value = '${request.query.q}';\n"), ())
 
+    def test_nested_output_scanner_skips_declaration_scan_without_supported_context(self) -> None:
+        source = "export function render(request) { return `value: ${request.query.q}`; }\n"
+        with mock.patch.object(
+            nested_output_guidance,
+            "_javascript_declarations",
+            side_effect=AssertionError("declaration scanner should not run"),
+        ):
+            self.assertEqual(nested_output_guidance.scan_nested_output_contexts(source), ())
+
+    def test_nested_output_reuses_controls_for_supported_interpolations_in_one_declaration(self) -> None:
+        source = (
+            "export function render(request) {\n"
+            "  return `<script>${request.query.first}${request.query.second}</script>`;\n"
+            "}\n"
+        )
+        with mock.patch.object(
+            nested_output_guidance,
+            "_outer_sanitizer_lines",
+            wraps=nested_output_guidance._outer_sanitizer_lines,
+        ) as controls:
+            observations = nested_output_guidance.scan_nested_output_contexts(source)
+        self.assertEqual(
+            observations,
+            (
+                nested_output_guidance.NestedOutputObservation(
+                    "script",
+                    1,
+                    "render",
+                    2,
+                    "request",
+                    2,
+                    (),
+                    ("nested_output_context", "embedded_script", "property_provenance"),
+                ),
+                nested_output_guidance.NestedOutputObservation(
+                    "script",
+                    1,
+                    "render",
+                    2,
+                    "request",
+                    2,
+                    (),
+                    ("nested_output_context", "embedded_script", "property_provenance"),
+                ),
+            ),
+        )
+        self.assertEqual(controls.call_count, 1)
+
+    def test_schema_three_does_not_resolve_each_candidate_before_pinned_read(self) -> None:
+        snapshot = self._root / "schema-three-no-candidate-resolve"
+        snapshot.mkdir()
+        (snapshot / "render.ts").write_text(
+            "export function render(request) { return `<script>${request.query.q}</script>`; }\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            semantic_guidance,
+            "_safe_snapshot",
+            return_value=snapshot,
+        ), mock.patch.object(
+            Path,
+            "resolve",
+            side_effect=AssertionError("candidate paths should not resolve before pinned read"),
+        ):
+            result = build_semantic_guidance(
+                snapshot,
+                (("render.ts", "component-default", ("forward",)),),
+                "hunt-balanced",
+                guidance_schema_version=3,
+            )
+        self.assertEqual(result.scanned_file_count, 1)
+
     def test_schema_three_emits_each_nested_output_context(self) -> None:
         fixtures = {
             "script": "export function render(request) { return `<script>const value = '${request.query.value}'</script>`; }\n",
