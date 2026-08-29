@@ -146,6 +146,11 @@
 - [x] Implement schema-3 nested-output guidance with vulnerable, guarded, and decoy tests first.
 - [x] Implement deterministic strong-edge and family/component row allocation with budget tests first.
 - [x] Implement the v4 blind verifier projection and prompt golden test first.
+- [ ] Remove the measured Protocol-v4 semantic preparation bottleneck without changing canonical guidance.
+  - [x] Classify nested output contexts before declaration parsing and reuse sanitizer controls per declaration.
+  - [x] Remove redundant pre-read path metadata calls while retaining pinned source identity checks.
+  - [x] Replace schema-3 imported-call candidate scans with an exact module-target index and reuse declaration-local resolutions.
+  - [x] Prove unchanged target rows, legacy bytes, link/race rejection, and lower no-target work with RED/GREEN tests.
 - [ ] Preserve exact protocol-v1 through protocol-v3 artifact, prompt, and receipt reconstruction.
 - [ ] Pass the label-independent retained-snapshot artifact build and separate private coverage gate.
 - [ ] Complete independent review and all full no-model verification gates.
