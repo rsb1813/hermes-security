@@ -403,6 +403,39 @@ class SemanticGuidanceTests(unittest.TestCase):
                 self.assertEqual(second.canonical_bytes, b"")
                 self.assertEqual(first.canonical_bytes, second.canonical_bytes)
 
+    def test_nested_output_lexical_goal_accepts_balanced_typescript_class_headers(self) -> None:
+        headers = {
+            "named_generic": "export function render(request) { class Widget<T> { static {} method() {} } /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "anonymous_generic": "export function render(request) { const Widget = class<T extends string> { static {} method() {} }; /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "nested_generic_extends_implements": "export function render(request) { class Widget<T extends Record<string, Array<number>>> extends mixin(Base) implements A, B { static {} method() {} } /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+        }
+        for name, source in headers.items():
+            with self.subTest(name=name):
+                result = self._build(f"nested-goal-typescript-class-{name}", {"src/render.ts": source}, guidance_schema_version=3)
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(nested, [])
+
+    def test_nested_output_lexical_goal_bounds_class_header_source_span(self) -> None:
+        prefix = "export function render(request) { const Widget = class"
+        suffix = " { static {} /`<style>${request.q}<\\/style>`/.test('safe'); }; return `<style>${request.q}</style>`; }\n"
+        fillers = {
+            "whitespace": lambda size: " " * (size - len("class {".encode("utf-8"))),
+            "line_comment": lambda size: "//" + (" " * (size - len("class//\n {".encode("utf-8")))) + "\n",
+            "block_comment": lambda size: "/*" + (" " * (size - len("class/**/ {".encode("utf-8")))) + "*/",
+        }
+        for name, filler in fillers.items():
+            for size, expected in ((16 * 1024, 1), ((16 * 1024) + 1, 0)):
+                with self.subTest(name=name, size=size):
+                    source = prefix + filler(size) + suffix
+                    class_start = source.index("class")
+                    body_start = source.index("{", class_start)
+                    self.assertEqual(len(source[class_start:body_start + 1].encode("utf-8")), size)
+                    first = self._build(f"nested-goal-class-span-{name}-{size}-first", {"src/render.ts": source}, guidance_schema_version=3)
+                    second = self._build(f"nested-goal-class-span-{name}-{size}-second", {"src/render.ts": source}, guidance_schema_version=3)
+                    nested = [json.loads(line) for line in first.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                    self.assertEqual(len(nested), expected)
+                    self.assertEqual(first.canonical_bytes, second.canonical_bytes)
+
     def test_nested_output_depth_budget_counts_nested_template_levels(self) -> None:
         fixtures = {}
         for depth in (9, 16, 17):

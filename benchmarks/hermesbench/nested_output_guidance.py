@@ -77,11 +77,11 @@ class _Token:
 @dataclass
 class _ClassCandidate:
     kind: str
-    stage: str = "after_class"
+    start: int
+    cursor: int
     header_stack: list[str] = field(default_factory=list)
-    token_count: int = 0
     byte_count: int = 0
-    extends_value: bool = False
+    header_terms: int = 0
 
 
 @dataclass
@@ -92,6 +92,7 @@ class _LexicalGoal:
     pending_control_header: bool = False
     pending_function_header: bool = False
     class_candidate: _ClassCandidate | None = None
+    failed_closed: bool = False
     control_parenthesis_depth: int = 0
     function_parenthesis_depth: int = 0
     class_member_parenthesis_depth: int = 0
@@ -115,9 +116,22 @@ class _LexicalGoal:
         return bool(self.brace_kinds and self.brace_kinds[-1] in {"class_declaration", "class_expression"})
 
     def consume(self, token: _Token) -> None:
+        if not self.advance_to(token.end):
+            return
         if self.class_candidate is not None and self._consume_class_candidate(token):
             return
         self._consume_token(token)
+
+    def advance_to(self, position: int) -> bool:
+        candidate = self.class_candidate
+        if candidate is None or position <= candidate.cursor:
+            return not self.failed_closed
+        candidate.byte_count += len(self.source[candidate.cursor:position].encode("utf-8"))
+        candidate.cursor = position
+        if candidate.byte_count > MAX_EXPRESSION_BYTES:
+            self.class_candidate = None
+            self.failed_closed = True
+        return not self.failed_closed
 
     def _consume_class_candidate(self, token: _Token) -> bool:
         candidate = self.class_candidate
@@ -125,64 +139,52 @@ class _LexicalGoal:
             return False
         if token.kind == "space":
             return True
-        candidate.token_count += 1
-        candidate.byte_count += len(self.source[token.start:token.end].encode("utf-8"))
-        if candidate.token_count > MAX_INTERPOLATION_DEPTH or candidate.byte_count > MAX_EXPRESSION_BYTES:
-            self.class_candidate = None
-            return False
-        if candidate.stage == "after_class":
-            if token.kind == "identifier":
-                if token.value == "extends":
-                    candidate.stage = "extends"
-                else:
-                    candidate.stage = "after_name"
-                return True
-            if token.value == "{":
-                self._commit_class_candidate()
-                return True
-            self.class_candidate = None
-            return False
-        if candidate.stage == "after_name":
-            if token.kind == "identifier" and token.value == "extends":
-                candidate.stage = "extends"
-                return True
-            if token.value == "{":
-                self._commit_class_candidate()
-                return True
-            self.class_candidate = None
-            return False
-        if token.value in {"(", "["}:
-            if len(candidate.header_stack) >= MAX_INTERPOLATION_DEPTH:
+        if token.value == "{" and not candidate.header_stack:
+            self._commit_class_candidate()
+            return True
+        if token.value in {"(", "[", "<"}:
+            if token.value in {"(", "["} and candidate.header_terms == 0:
                 self.class_candidate = None
                 return False
-            candidate.header_stack.append(")" if token.value == "(" else "]")
-            candidate.extends_value = True
+            if len(candidate.header_stack) >= MAX_INTERPOLATION_DEPTH:
+                self.class_candidate = None
+                self.failed_closed = True
+                return True
+            candidate.header_stack.append({"(": ")", "[": "]", "<": ">"}[token.value])
             return True
         if token.value == "{" and candidate.header_stack:
             if len(candidate.header_stack) >= MAX_INTERPOLATION_DEPTH:
                 self.class_candidate = None
-                return False
+                self.failed_closed = True
+                return True
             candidate.header_stack.append("}")
-            candidate.extends_value = True
             return True
-        if token.value in {")", "]", "}"
-        }:
+        if token.value in {")", "]", "}", ">"}:
             if candidate.header_stack and token.value == candidate.header_stack[-1]:
                 candidate.header_stack.pop()
                 return True
             self.class_candidate = None
             return False
-        if token.value == "{":
-            if candidate.extends_value:
-                self._commit_class_candidate()
+        if candidate.header_stack:
+            return True
+        if token.value in {";", "=>", ":", "="}:
+            self.class_candidate = None
+            return False
+        if token.value == ",":
+            if candidate.header_terms >= 2:
                 return True
             self.class_candidate = None
             return False
-        if token.value in {";", "=>", ":", ",", "="}:
+        if token.value == "." and candidate.header_terms == 0:
             self.class_candidate = None
             return False
-        candidate.extends_value = True
-        return True
+        if token.kind in {"identifier", "number", "string", "regex", "template"}:
+            candidate.header_terms += 1
+            return True
+        if candidate.header_terms:
+            return True
+        self.class_candidate = None
+        return False
 
     def _commit_class_candidate(self) -> None:
         candidate = self.class_candidate
@@ -211,7 +213,8 @@ class _LexicalGoal:
                 else:
                     self.class_candidate = _ClassCandidate(
                         "class_declaration" if self.statement_start else "class_expression",
-                        token_count=1,
+                        token.start,
+                        token.end,
                         byte_count=len(self.source[token.start:token.end].encode("utf-8")),
                     )
             elif token.value == "static" and self._inside_class_body():
@@ -341,6 +344,8 @@ class _TemplateScanner:
         goal = _LexicalGoal(self.source)
         try:
             while index < len(self.source):
+                if not goal.advance_to(index):
+                    raise _ScanLimit()
                 if self.source.startswith("//", index):
                     newline = self.source.find("\n", index + 2)
                     index = len(self.source) if newline < 0 else newline + 1
@@ -431,6 +436,8 @@ class _TemplateScanner:
         index = start
         goal = _LexicalGoal(self.source)
         while index < len(self.source):
+            if not goal.advance_to(index):
+                raise _ScanLimit()
             if self.source.startswith("//", index):
                 newline = self.source.find("\n", index + 2)
                 index = len(self.source) if newline < 0 else newline + 1
@@ -466,6 +473,8 @@ class _TemplateScanner:
             elif token.value == "}":
                 braces -= 1
                 if braces == 0:
+                    if not goal.advance_to(token.end):
+                        raise _ScanLimit()
                     return index
             goal.consume(token)
             index = token.end
@@ -761,6 +770,8 @@ def _top_level_value_end(raw: str, start: int) -> int | None:
     depth = 0
     goal = _LexicalGoal(raw)
     while index < len(raw):
+        if not goal.advance_to(index):
+            return None
         if raw.startswith("//", index):
             newline = raw.find("\n", index + 2)
             index = len(raw) if newline < 0 else newline + 1
@@ -861,6 +872,8 @@ def _is_code_position(source: str, position: int) -> bool:
     index = 0
     goal = _LexicalGoal(source)
     while index < position:
+        if not goal.advance_to(index):
+            return False
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
             index = len(source) if newline < 0 else newline + 1
@@ -909,6 +922,8 @@ def _matching_code_brace(source: str, opening: int) -> int | None:
     index = opening
     goal = _LexicalGoal(source)
     while index < len(source):
+        if not goal.advance_to(index):
+            return None
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
             index = len(source) if newline < 0 else newline + 1
@@ -977,6 +992,8 @@ def _skip_template_expression(source: str, start: int, depth: int = 0) -> int | 
     index = start
     goal = _LexicalGoal(source)
     while index < len(source):
+        if not goal.advance_to(index):
+            return None
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
             index = len(source) if newline < 0 else newline + 1
