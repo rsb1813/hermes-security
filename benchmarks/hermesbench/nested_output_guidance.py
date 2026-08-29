@@ -482,6 +482,8 @@ class _TemplateScanner:
 
 
 def scan_nested_output_contexts(source: str) -> tuple[NestedOutputObservation, ...]:
+    if "`" not in source or "${" not in source:
+        return ()
     scanner = _TemplateScanner(source)
     declarations = _javascript_declarations(source)
     observations: list[NestedOutputObservation] = []

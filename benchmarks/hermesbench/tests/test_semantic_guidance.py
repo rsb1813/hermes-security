@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from benchmarks.hermesbench import semantic_guidance
+from benchmarks.hermesbench import nested_output_guidance, semantic_guidance
 from benchmarks.hermesbench.semantic_guidance import (
     MAX_FILE_BYTES,
     GuidanceLimits,
@@ -164,6 +164,20 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(row["component"], "component-api")
         self.assertEqual(row["eligible_search_passes"], ["forward"])
         self.assertEqual(row["proof_status"], "investigation_only")
+
+    def test_nested_output_scanner_skips_sources_without_template_interpolation_markers(self) -> None:
+        with mock.patch.object(
+            nested_output_guidance,
+            "_TemplateScanner",
+            side_effect=AssertionError("template scanner should not run"),
+        ), mock.patch.object(
+            nested_output_guidance,
+            "_javascript_declarations",
+            side_effect=AssertionError("declaration scanner should not run"),
+        ):
+            self.assertEqual(nested_output_guidance.scan_nested_output_contexts("const value = request.query.q;\n"), ())
+            self.assertEqual(nested_output_guidance.scan_nested_output_contexts("const value = `static`;\n"), ())
+            self.assertEqual(nested_output_guidance.scan_nested_output_contexts("const value = '${request.query.q}';\n"), ())
 
     def test_schema_three_emits_each_nested_output_context(self) -> None:
         fixtures = {
