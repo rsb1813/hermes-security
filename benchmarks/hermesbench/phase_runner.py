@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from .adapter_contract import AdapterTaskRequest
 from .contracts import BenchmarkManifest, Finding, Location, TaskDescriptor, TaskPrediction, parse_prediction
 from .hunt_protocol import (
     HUNT_CANDIDATE_PROTOCOL_VERSION,
@@ -24,6 +25,7 @@ from .hunt_protocol import (
 )
 from .hunt_evidence import (
     HUNT_EVIDENCE_PROTOCOL_VERSION,
+    NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
     SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS,
     HuntEvidenceError,
     parse_hunt_evidence,
@@ -41,6 +43,7 @@ from .receipts import (
 from .runner import (
     ExecutionPolicy,
     Executor,
+    ExecutorResult,
     RunnerError,
     execution_policy_sha256,
     failure_evidence_sha256,
@@ -428,6 +431,126 @@ def canonicalize_candidates(
     return result
 
 
+def _recoverable_partial_phase(
+    records: Sequence[TaskRunReceipt],
+    workflow: str,
+    evidence_protocol_version: int | None,
+) -> bool:
+    statuses = tuple(record.status for record in records)
+    return (
+        workflow == "hunt"
+        and evidence_protocol_version
+        == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
+        and any(status == "completed" for status in statuses)
+        and any(status != "completed" for status in statuses)
+        and all(status in {"completed", "failed", "timeout"} for status in statuses)
+    )
+
+
+def _full_manifest_candidates(
+    manifest: BenchmarkManifest,
+    snapshots_root: Path,
+    discovery_predictions: Mapping[str, object],
+    workflow: str,
+    completed_tasks: Sequence[TaskDescriptor],
+) -> dict[str, tuple[CanonicalCandidate, ...]]:
+    completed = tuple(completed_tasks)
+    if completed == manifest.tasks:
+        return canonicalize_candidates(
+            manifest,
+            snapshots_root,
+            discovery_predictions,
+            workflow,
+        )
+    completed_ids = {task.task_id for task in completed}
+    ordered = tuple(task for task in manifest.tasks if task.task_id in completed_ids)
+    if not completed or completed != ordered:
+        raise PhaseRunnerError("completed discovery tasks do not preserve manifest order")
+    partial_manifest = BenchmarkManifest(
+        schema_version=manifest.schema_version,
+        suite=manifest.suite,
+        manifest_id=manifest.manifest_id,
+        tasks=completed,
+    )
+    partial = canonicalize_candidates(
+        partial_manifest,
+        snapshots_root,
+        discovery_predictions,
+        workflow,
+    )
+    return {
+        task.task_id: partial.get(task.task_id, ())
+        for task in manifest.tasks
+    }
+
+
+def _skip_empty_candidate_verification(
+    executor: Executor,
+    candidates: Mapping[str, tuple[CanonicalCandidate, ...]],
+    workflow: str,
+) -> Executor:
+    if workflow != "hunt":
+        raise PhaseRunnerError("local empty verification is Hunt-only")
+
+    def execute(
+        request: AdapterTaskRequest,
+        scratch_path: Path,
+        timeout_seconds: int,
+    ) -> ExecutorResult:
+        try:
+            task_candidates = candidates[request.task_id]
+        except KeyError as error:
+            raise PhaseRunnerError("verification candidates are incomplete") from error
+        if task_candidates:
+            return executor(request, scratch_path, timeout_seconds)
+        return ExecutorResult(
+            raw_response={
+                "prediction": {
+                    "schema_version": 1,
+                    "task_id": request.task_id,
+                    "findings": [],
+                    "decisions": [],
+                },
+                "usage": {
+                    "input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                },
+            },
+            event_rows=({"event": "local_empty"},),
+            observed_argv=(),
+        )
+
+    return execute
+
+
+def _full_manifest_verification_predictions(
+    manifest: BenchmarkManifest,
+    verification_predictions: Mapping[str, object],
+    completed_tasks: Sequence[TaskDescriptor],
+    workflow: str,
+) -> dict[str, object]:
+    completed = tuple(completed_tasks)
+    if completed == manifest.tasks:
+        return dict(verification_predictions)
+    completed_ids = {task.task_id for task in completed}
+    ordered = tuple(task for task in manifest.tasks if task.task_id in completed_ids)
+    if not completed or completed != ordered or workflow != "hunt":
+        raise PhaseRunnerError("completed verification tasks do not preserve manifest order")
+    return {
+        task.task_id: verification_predictions.get(
+            task.task_id,
+            {
+                "schema_version": 1,
+                "task_id": task.task_id,
+                "findings": [],
+                "decisions": [],
+            },
+        )
+        for task in manifest.tasks
+    }
+
+
 def run_workflow(
     manifest: BenchmarkManifest,
     snapshots_root: Path,
@@ -465,6 +588,11 @@ def run_workflow(
     snapshot_hash = _snapshot_set_sha256(manifest)
     discovery_run_id = f"{run_id}-discovery"
     discovery_kind = "hunt-discovery" if workflow == "hunt" else "standard"
+    account_failure_usage = (
+        workflow == "hunt"
+        and selected_hunt_evidence_protocol_version
+        == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
+    )
     discovery = run_suite(
         manifest,
         snapshots_root,
@@ -477,12 +605,24 @@ def run_workflow(
         discovery_executor,
         discovery_kind,
         selected_hunt_evidence_protocol_version,
+        account_failure_usage=account_failure_usage,
     )
     discovery_dir = output_root / discovery_run_id
-    _validate_phase(manifest, discovery_dir, discovery, config)
+    discovery_records = _validate_phase(
+        manifest,
+        discovery_dir,
+        discovery,
+        config,
+        account_failure_usage=account_failure_usage,
+    )
 
     candidate_path = output_root / f"{run_id}-candidates.jsonl"
-    if discovery.status != "completed":
+    partial_discovery = _recoverable_partial_phase(
+        discovery_records,
+        workflow,
+        selected_hunt_evidence_protocol_version,
+    )
+    if discovery.status != "completed" and not partial_discovery:
         _write_jsonl(candidate_path, ())
         receipt = _workflow_receipt(
             run_id, workflow, profile, controls, config, snapshot_hash, len(manifest.tasks), discovery_dir / "receipt.json",
@@ -495,12 +635,34 @@ def run_workflow(
         _write_json(output_root / f"{run_id}-result.json", paths)
         return WorkflowResult(receipt, paths)
 
-    discovery_predictions = _load_phase_predictions(manifest, discovery_dir / "predictions.jsonl", discovery_kind)
-    candidates = canonicalize_candidates(manifest, snapshots_root, discovery_predictions, workflow)
+    completed_discovery_tasks = tuple(
+        task
+        for task, record in zip(manifest.tasks, discovery_records, strict=True)
+        if record.status == "completed"
+    )
+    discovery_predictions = _load_phase_predictions(
+        manifest,
+        discovery_dir / "predictions.jsonl",
+        discovery_kind,
+        completed_discovery_tasks if partial_discovery else None,
+    )
+    candidates = _full_manifest_candidates(
+        manifest,
+        snapshots_root,
+        discovery_predictions,
+        workflow,
+        completed_discovery_tasks if partial_discovery else manifest.tasks,
+    )
     _write_jsonl(candidate_path, (_candidate_row(task.task_id, candidates[task.task_id]) for task in manifest.tasks))
     verification_executor = verification_executor_factory(candidates)
     if not callable(verification_executor):
         raise PhaseRunnerError("verification executor factory returned an invalid executor")
+    if account_failure_usage:
+        verification_executor = _skip_empty_candidate_verification(
+            verification_executor,
+            candidates,
+            workflow,
+        )
     verification_run_id = f"{run_id}-verification"
     verification_kind = "hunt-verification" if workflow == "hunt" else "standard"
     verification = run_suite(
@@ -514,10 +676,22 @@ def run_workflow(
         execution_policy,
         verification_executor,
         verification_kind,
+        account_failure_usage=account_failure_usage,
     )
     verification_dir = output_root / verification_run_id
-    _validate_phase(manifest, verification_dir, verification, config)
-    if verification.status != "completed":
+    verification_records = _validate_phase(
+        manifest,
+        verification_dir,
+        verification,
+        config,
+        account_failure_usage=account_failure_usage,
+    )
+    partial_verification = _recoverable_partial_phase(
+        verification_records,
+        workflow,
+        selected_hunt_evidence_protocol_version,
+    )
+    if verification.status != "completed" and not partial_verification:
         receipt = _workflow_receipt(
             run_id, workflow, profile, controls, config, snapshot_hash, len(manifest.tasks), discovery_dir / "receipt.json",
             discovery_dir / "commands.jsonl", candidate_path, verification_dir / "receipt.json", verification_dir / "commands.jsonl", None,
@@ -530,12 +704,37 @@ def run_workflow(
         paths = _artifact_paths(run_id, workflow, verification_started=True, completed=False)
         _write_json(output_root / f"{run_id}-result.json", paths)
         return WorkflowResult(receipt, paths)
-    verification_predictions = _load_phase_predictions(manifest, verification_dir / "predictions.jsonl", verification_kind)
-    _validate_verification_subset(candidates, verification_predictions, workflow)
+    completed_verification_tasks = tuple(
+        task
+        for task, record in zip(manifest.tasks, verification_records, strict=True)
+        if record.status == "completed"
+    )
+    raw_verification_predictions = _load_phase_predictions(
+        manifest,
+        verification_dir / "predictions.jsonl",
+        verification_kind,
+        completed_verification_tasks if partial_verification else None,
+    )
+    _validate_verification_subset(candidates, raw_verification_predictions, workflow)
+    verification_predictions = _full_manifest_verification_predictions(
+        manifest,
+        raw_verification_predictions,
+        completed_verification_tasks if partial_verification else manifest.tasks,
+        workflow,
+    )
     public_predictions_path: Path | None = None
     if workflow == "hunt":
         public_predictions_path = output_root / f"{run_id}-public-predictions.jsonl"
-        _write_jsonl(public_predictions_path, (_public_hunt_prediction(row, task.task_id) for task, row in zip(manifest.tasks, verification_predictions.values(), strict=True)))
+        _write_jsonl(
+            public_predictions_path,
+            (
+                _public_hunt_prediction(
+                    verification_predictions[task.task_id],
+                    task.task_id,
+                )
+                for task in manifest.tasks
+            ),
+        )
     receipt = _workflow_receipt(
         run_id, workflow, profile, controls, config, snapshot_hash, len(manifest.tasks), discovery_dir / "receipt.json",
         discovery_dir / "commands.jsonl", candidate_path, verification_dir / "receipt.json", verification_dir / "commands.jsonl", public_predictions_path,
@@ -687,7 +886,18 @@ def validate_workflow_receipt(
     if sha256_file(discovery_predictions_path) != receipt.discovery_predictions_sha256:
         raise PhaseRunnerError("workflow receipt discovery predictions hash does not match")
     discovery = load_receipt(discovery_path)
-    discovery_records = _validate_phase(manifest, discovery_dir, discovery, config)
+    account_failure_usage = (
+        receipt.workflow == "hunt"
+        and receipt.hunt_evidence_protocol_version
+        == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
+    )
+    discovery_records = _validate_phase(
+        manifest,
+        discovery_dir,
+        discovery,
+        config,
+        account_failure_usage=account_failure_usage,
+    )
     candidate_path = output_root / f"{receipt.run_id}-candidates.jsonl"
     if sha256_file(candidate_path) != receipt.candidate_transfer_sha256:
         raise PhaseRunnerError("workflow receipt candidate hash does not match")
@@ -738,7 +948,12 @@ def validate_workflow_receipt(
         if evidence_path.read_bytes() != expected_evidence:
             raise PhaseRunnerError("workflow receipt discovery evidence does not reproduce")
     _validate_phase_commands(manifest, discovery_commands_path, execution_policy)
-    if discovery.status != "completed":
+    partial_discovery = _recoverable_partial_phase(
+        discovery_records,
+        receipt.workflow,
+        receipt.hunt_evidence_protocol_version,
+    )
+    if discovery.status != "completed" and not partial_discovery:
         verification_dir = output_root / f"{receipt.run_id}-verification"
         public_predictions_path = output_root / f"{receipt.run_id}-public-predictions.jsonl"
         if receipt.status != "incomplete":
@@ -754,8 +969,15 @@ def validate_workflow_receipt(
             raise PhaseRunnerError("failed discovery workflow receipt has unexpected verification artifacts")
         if candidate_path.read_bytes() != b"":
             raise PhaseRunnerError("failed discovery workflow candidate transfer must be empty")
+        _validate_workflow_aggregate(receipt, discovery)
         return receipt
-    candidates = canonicalize_candidates(manifest, snapshots_root, discovery_predictions, receipt.workflow)
+    candidates = _full_manifest_candidates(
+        manifest,
+        snapshots_root,
+        discovery_predictions,
+        receipt.workflow,
+        completed_discovery_tasks if partial_discovery else manifest.tasks,
+    )
     expected_candidate_bytes = _jsonl_bytes(
         _candidate_row(task.task_id, candidates[task.task_id]) for task in manifest.tasks
     )
@@ -780,23 +1002,86 @@ def validate_workflow_receipt(
         elif receipt.public_predictions_sha256 is not None or public_predictions_path.exists():
             raise PhaseRunnerError("workflow receipt has unexpected public predictions")
         verification = load_receipt(verification_path)
-        _validate_phase(manifest, verification_dir, verification, config)
+        verification_records = _validate_phase(
+            manifest,
+            verification_dir,
+            verification,
+            config,
+            account_failure_usage=account_failure_usage,
+        )
+        _validate_workflow_aggregate(receipt, discovery, verification)
         _validate_phase_commands(manifest, verification_commands_path, execution_policy)
+        partial_verification = _recoverable_partial_phase(
+            verification_records,
+            receipt.workflow,
+            receipt.hunt_evidence_protocol_version,
+        )
         if receipt.status == "completed":
+            if (
+                discovery.status != "completed" and not partial_discovery
+            ) or (
+                verification.status != "completed" and not partial_verification
+            ):
+                raise PhaseRunnerError("completed workflow receipt has an incomplete phase")
             verification_kind = "hunt-verification" if receipt.workflow == "hunt" else "standard"
-            verification_predictions = _load_phase_predictions(manifest, verification_predictions_path, verification_kind)
-            _validate_verification_subset(candidates, verification_predictions, receipt.workflow)
+            completed_verification_tasks = tuple(
+                task
+                for task, record in zip(manifest.tasks, verification_records, strict=True)
+                if record.status == "completed"
+            )
+            raw_verification_predictions = _load_phase_predictions(
+                manifest,
+                verification_predictions_path,
+                verification_kind,
+                completed_verification_tasks if partial_verification else None,
+            )
+            _validate_verification_subset(
+                candidates,
+                raw_verification_predictions,
+                receipt.workflow,
+            )
+            verification_predictions = _full_manifest_verification_predictions(
+                manifest,
+                raw_verification_predictions,
+                completed_verification_tasks if partial_verification else manifest.tasks,
+                receipt.workflow,
+            )
             if receipt.workflow == "hunt" and receipt.status == "completed":
-                expected_public = _jsonl_bytes(_public_hunt_prediction(row, task.task_id) for task, row in zip(manifest.tasks, verification_predictions.values(), strict=True))
+                expected_public = _jsonl_bytes(
+                    _public_hunt_prediction(
+                        verification_predictions[task.task_id],
+                        task.task_id,
+                    )
+                    for task in manifest.tasks
+                )
                 if public_predictions_path.read_bytes() != expected_public:
                     raise PhaseRunnerError("workflow receipt public predictions do not match verification")
-            if discovery.status != "completed" or verification.status != "completed":
-                raise PhaseRunnerError("completed workflow receipt has an incomplete phase")
-        elif discovery.status != "completed" or verification.status == "completed":
+        elif (
+            discovery.status != "completed" and not partial_discovery
+        ) or verification.status == "completed":
             raise PhaseRunnerError("incomplete workflow receipt phase status is invalid")
-    elif receipt.verification_receipt_sha256 is None and discovery.status == "completed":
+    elif receipt.verification_receipt_sha256 is None and (
+        discovery.status == "completed" or partial_discovery
+    ):
         raise PhaseRunnerError("incomplete workflow receipt omitted a required phase")
     return receipt
+
+
+def _validate_workflow_aggregate(
+    receipt: WorkflowReceipt,
+    discovery: RunReceipt,
+    verification: RunReceipt | None = None,
+) -> None:
+    expected_usage = discovery.token_usage
+    expected_elapsed = discovery.elapsed_seconds
+    if verification is not None:
+        expected_usage = _add_usage(expected_usage, verification.token_usage)
+        expected_elapsed += verification.elapsed_seconds
+    if (
+        receipt.token_usage != expected_usage
+        or receipt.elapsed_seconds != expected_elapsed
+    ):
+        raise PhaseRunnerError("workflow receipt aggregate does not match phase receipts")
 
 
 def _workflow_receipt(
@@ -827,7 +1112,12 @@ def _workflow_receipt(
 
 
 def _validate_phase(
-    manifest: BenchmarkManifest, directory: Path, receipt: RunReceipt, config: RunConfig
+    manifest: BenchmarkManifest,
+    directory: Path,
+    receipt: RunReceipt,
+    config: RunConfig,
+    *,
+    account_failure_usage: bool = False,
 ) -> tuple[TaskRunReceipt, ...]:
     stored = load_receipt(directory / "receipt.json")
     if stored != receipt or stored.config != config:
@@ -847,10 +1137,13 @@ def _validate_phase(
             raise PhaseRunnerError("phase task receipt snapshot binding is invalid")
         records.append(task_receipt)
     expected_status = _aggregate_task_status(record.status for record in records)
+    accounted_records = records if account_failure_usage else tuple(
+        record for record in records if record.status == "completed"
+    )
     expected_usage = TokenUsage(
-        sum(record.token_usage.cached_input_tokens for record in records if record.status == "completed"),
-        sum(record.token_usage.uncached_input_tokens for record in records if record.status == "completed"),
-        sum(record.token_usage.output_tokens for record in records if record.status == "completed"),
+        sum(record.token_usage.cached_input_tokens for record in accounted_records),
+        sum(record.token_usage.uncached_input_tokens for record in accounted_records),
+        sum(record.token_usage.output_tokens for record in accounted_records),
     )
     if (
         receipt.status != expected_status

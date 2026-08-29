@@ -109,3 +109,24 @@ Verification: RED/GREEN tests prove that more than five internal candidates surv
 - Make exactly one same-variable paid Canary rerun after all no-model and review gates pass. Do not retry automatically.
 
 Verification: protocol-v4 semantic guidance contains the reviewed output-context pattern without oracle input, guarded and decoy cases stay negative, the verifier prompt contains no discovery conclusion fields, legacy receipts revalidate exactly, the full no-model suites pass, and the single paid result is reported with localized accuracy and separated cost evidence.
+
+## Current Protocol-v4 partial-phase checkpoint
+
+- Treat the one-shot paid Canary as an incomplete measurement, not an accuracy result. Seven of eight discovery tasks completed, one failed bounded host attestation, and the current workflow discarded every successful candidate before verification.
+- Preserve the full manifest and normalize recoverable Protocol-v4 discovery failures or timeouts to explicit empty candidate sets. Keep contaminated snapshots fail-closed.
+- Continue verification for the complete manifest, but synthesize a deterministic zero-token verification result whenever a task has no transferred candidate. Normalize recoverable verification failures or timeouts to explicit empty final predictions so every failed task remains a scored miss.
+- Bind discovery task status, bounded failure evidence, and post-response token usage. Preserve Protocols 1 through 3 and Standard workflow behavior.
+- Keep automatic retries at zero. The consumed Canary is immutable and must not be rerun.
+- Add throughput work only after partial-result correctness is proven. A larger paid suite must not inherit the measured sequential tail unchanged.
+
+Verification: partial discovery and partial verification fixtures both produce complete manifest-ordered final prediction rows, failed tasks are empty misses, zero-candidate verification makes no model call, failure evidence and all observed token classes revalidate, contamination still aborts, and all-completed legacy behavior remains unchanged.
+
+## Current Protocol-v4 throughput checkpoint
+
+- Keep task snapshots, scratch roots, authentication runtimes, and containers isolated per invocation.
+- Prefer bounded phase-local task parallelism over container reuse, shared authentication caches, or discovery-to-verification pipelining. Those alternatives enlarge the security boundary or alter the current phase contract.
+- Complete every snapshot preflight before starting any executor and publish every receipt, prediction, command, and evidence row in manifest order regardless of worker completion order.
+- Freeze and hash-bind the worker limit with a compatibility path that keeps existing sequential controls and retained receipts reproducible.
+- Start with two workers. Parallelism is a wall-time optimization; token-cost reductions must come from zero-candidate local verification and fewer paid failures, not from an unsupported billing claim.
+
+Verification: deterministic fake executors prove real overlap, manifest-ordered byte-stable outputs, fail-before-start preflight behavior, isolated failure handling, frozen-control mismatch rejection, and identical logical results between one and two workers.

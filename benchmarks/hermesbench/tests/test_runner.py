@@ -785,6 +785,51 @@ class SuiteExecutionTests(unittest.TestCase):
                 ["executor_failure", "executor_timeout"],
             )
 
+    def test_protocol_four_accounts_bounded_usage_from_failed_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("failed", "completed", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("python",),))
+
+            def executor(request: object, *_: object) -> ExecutorResult:
+                if request.task_id == "failed":
+                    raise ExecutorFailureError(
+                        "private failure detail",
+                        failure_code="hunt_evidence_candidate_location",
+                        token_usage=runner.TokenUsage(11, 13, 17),
+                    )
+                return ExecutorResult(raw_response(request.task_id), (), ())
+
+            receipt = run_suite(
+                manifest,
+                snapshots,
+                output,
+                "run-001",
+                "hunt",
+                "hunt-balanced",
+                config_for(manifest, policy),
+                policy,
+                executor,
+                account_failure_usage=True,
+            )
+            records = [
+                json.loads(line)
+                for line in (output / "run-001" / "task-receipts.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(
+            {"cached_input_tokens": 15, "uncached_input_tokens": 19, "output_tokens": 19},
+            receipt.token_usage.to_json(),
+        )
+        self.assertEqual(
+            {"cached_input_tokens": 11, "uncached_input_tokens": 13, "output_tokens": 17},
+            records[0]["token_usage"],
+        )
+
     def test_post_run_mutation_or_command_violation_is_contaminated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

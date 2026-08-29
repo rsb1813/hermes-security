@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from benchmarks.hermesbench.contracts import BenchmarkManifest, load_predictions, parse_manifest
+import benchmarks.hermesbench.phase_runner as phase_runner
+from benchmarks.hermesbench.contracts import BenchmarkManifest, load_predictions, parse_manifest, parse_oracle
 from benchmarks.hermesbench.phase_runner import (
     FrozenControls,
     PhaseRunnerError,
@@ -27,7 +28,8 @@ from benchmarks.hermesbench.runner import (
     task_order_sha256,
 )
 from benchmarks.hermesbench.sanitize import tree_sha256
-from benchmarks.hermesbench.receipts import sha256_file
+from benchmarks.hermesbench.receipts import TokenUsage, sha256_file
+from benchmarks.hermesbench.scoring import score_run
 from benchmarks.hermesbench.hunt_evidence import HUNT_EVIDENCE_PROTOCOL_VERSION, reproduce_hunt_evidence
 from benchmarks.hermesbench.hunt_protocol import parse_hunt_discovery_prediction
 from benchmarks.hermesbench.adapters.codex_exec import _normalize_command
@@ -166,6 +168,32 @@ def _hunt_verification(task_id: str, candidate: object) -> dict[str, object]:
     finding["confidence"] = candidate.confidence
     decision = {"candidate_id": candidate.candidate_id, "disposition": "accepted", "attacker_control": "proven", "reachability": "proven", "impact": "proven", "guard_failure": "proven", "evidence": "Confirmed.", "counterevidence": "", "proof_gaps": "", "confidence": candidate.confidence}
     return {"prediction": {"schema_version": 1, "task_id": task_id, "findings": [finding], "decisions": [decision]}, "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}}
+
+
+def _vulnerable_oracles(*task_ids: str):
+    return {
+        task_id: parse_oracle(
+            {
+                "schema_version": 1,
+                "task_id": task_id,
+                "kind": "vulnerable",
+                "group_id": task_id,
+                "split": "hidden_test",
+                "category": "injection",
+                "language": "python",
+                "paths": [
+                    {
+                        "path_id": "path-1",
+                        "entry_point": {"file": "source.py", "line": 1},
+                        "critical_operation": {"file": "source.py", "line": 3},
+                        "trace": [{"file": "source.py", "line": 2}],
+                    }
+                ],
+                "retired_paths": [],
+            }
+        )
+        for task_id in task_ids
+    }
 
 
 class FrozenControlsTests(unittest.TestCase):
@@ -345,6 +373,218 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result.receipt.status, "incomplete")
             self.assertFalse((outputs / "protocol-mismatch-verification").exists())
             self.assertFalse((outputs / "protocol-mismatch-public-predictions.jsonl").exists())
+
+    def test_protocol_four_scores_recoverable_discovery_failure_as_empty_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            policy = ExecutionPolicy((("python",),))
+            verification_model_calls: list[str] = []
+            oracles = _vulnerable_oracles("task-a", "task-b")
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                if request.task_id == "task-a":
+                    raise ExecutorFailureError(
+                        "private attestation detail",
+                        failure_code="hunt_evidence_candidate_location",
+                        token_usage=TokenUsage(11, 13, 17),
+                    )
+                return _hunt_result(request)
+
+            def verification_factory(candidates: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    verification_model_calls.append(request.task_id)
+                    return ExecutorResult(
+                        _hunt_verification(request.task_id, candidates[request.task_id][0]),
+                        ({"event": "done"},),
+                        (),
+                    )
+
+                return verification
+
+            result = run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "partial-v4",
+                "hunt",
+                "hunt-balanced",
+                _controls(),
+                policy,
+                discovery,
+                verification_factory,
+                lambda path: {
+                    "advisory_recall": score_run(
+                        oracles,
+                        load_predictions(path),
+                    ).advisory_recall
+                },
+                hunt_evidence_protocol_version=4,
+            )
+            validated = validate_workflow_receipt(
+                manifest,
+                root / "snapshots",
+                outputs,
+                outputs / "partial-v4-workflow-receipt.json",
+                _controls(),
+                policy,
+            )
+            candidates = [
+                json.loads(line)
+                for line in (outputs / "partial-v4-candidates.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            predictions = [
+                json.loads(line)
+                for line in (outputs / "partial-v4-public-predictions.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            discovery_receipt = json.loads(
+                (outputs / "partial-v4-discovery" / "receipt.json").read_text(encoding="utf-8")
+            )
+            score = json.loads(
+                (outputs / "partial-v4-score.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("completed", result.receipt.status)
+        self.assertEqual("completed", validated.status)
+        self.assertEqual(["task-b"], verification_model_calls)
+        self.assertEqual(["task-a", "task-b"], [row["task_id"] for row in candidates])
+        self.assertEqual([], candidates[0]["candidates"])
+        self.assertEqual(["task-a", "task-b"], [row["task_id"] for row in predictions])
+        self.assertEqual([], predictions[0]["findings"])
+        self.assertEqual(
+            {"cached_input_tokens": 13, "uncached_input_tokens": 18, "output_tokens": 20},
+            discovery_receipt["token_usage"],
+        )
+        self.assertEqual(TokenUsage(15, 23, 23), result.receipt.token_usage)
+        self.assertEqual(0.5, score["advisory_recall"])
+
+    def test_protocol_four_scores_recoverable_verification_failure_as_empty_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            policy = ExecutionPolicy((("python",),))
+            oracles = _vulnerable_oracles("task-a", "task-b")
+
+            def verification_factory(candidates: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    if request.task_id == "task-a":
+                        raise ExecutorFailureError(
+                            "private verification detail",
+                            failure_code="final_response_invalid",
+                            token_usage=TokenUsage(11, 13, 17),
+                        )
+                    return ExecutorResult(
+                        _hunt_verification(request.task_id, candidates[request.task_id][0]),
+                        ({"event": "done"},),
+                        (),
+                    )
+
+                return verification
+
+            result = run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "partial-verification-v4",
+                "hunt",
+                "hunt-balanced",
+                _controls(),
+                policy,
+                lambda request, *_: _hunt_result(request),
+                verification_factory,
+                lambda path: {
+                    "advisory_recall": score_run(
+                        oracles,
+                        load_predictions(path),
+                    ).advisory_recall
+                },
+                hunt_evidence_protocol_version=4,
+            )
+            receipt_path = outputs / "partial-verification-v4-workflow-receipt.json"
+            validated = validate_workflow_receipt(
+                manifest,
+                root / "snapshots",
+                outputs,
+                receipt_path,
+                _controls(),
+                policy,
+            )
+            predictions = load_predictions(
+                outputs / "partial-verification-v4-public-predictions.jsonl"
+            )
+            score = json.loads(
+                (outputs / "partial-verification-v4-score.json").read_text(encoding="utf-8")
+            )
+            original_receipt = receipt_path.read_bytes()
+            for field in ("token_usage", "elapsed_seconds"):
+                with self.subTest(field=field):
+                    aggregate = json.loads(original_receipt)
+                    if field == "token_usage":
+                        aggregate[field]["output_tokens"] += 1
+                    else:
+                        aggregate[field] += 1
+                    receipt_path.write_text(
+                        json.dumps(aggregate, sort_keys=True, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(PhaseRunnerError, "aggregate"):
+                        validate_workflow_receipt(
+                            manifest,
+                            root / "snapshots",
+                            outputs,
+                            receipt_path,
+                            _controls(),
+                            policy,
+                        )
+                    receipt_path.write_bytes(original_receipt)
+
+        self.assertEqual("completed", result.receipt.status)
+        self.assertEqual("completed", validated.status)
+        self.assertEqual((), predictions["task-a"].findings)
+        self.assertEqual(1, len(predictions["task-b"].findings))
+        self.assertEqual(0.5, score["advisory_recall"])
+        self.assertEqual(TokenUsage(17, 28, 26), result.receipt.token_usage)
+
+    def test_partial_discovery_recovery_rejects_contamination_all_failure_and_legacy(self) -> None:
+        def record(status: str, task_id: str) -> phase_runner.TaskRunReceipt:
+            return phase_runner.TaskRunReceipt(
+                schema_version=phase_runner.RECEIPT_SCHEMA_VERSION,
+                task_id=task_id,
+                status=status,
+                pre_snapshot_sha256="a" * 64,
+                post_snapshot_sha256="a" * 64,
+                elapsed_seconds=0.0,
+                token_usage=TokenUsage(0, 0, 0),
+            )
+
+        completed = record("completed", "task-a")
+        failed = record("failed", "task-b")
+        contaminated = record("contaminated", "task-b")
+
+        self.assertTrue(
+            phase_runner._recoverable_partial_phase(
+                (completed, failed), "hunt", 4
+            )
+        )
+        self.assertFalse(
+            phase_runner._recoverable_partial_phase(
+                (completed, contaminated), "hunt", 4
+            )
+        )
+        self.assertFalse(
+            phase_runner._recoverable_partial_phase(
+                (failed, failed), "hunt", 4
+            )
+        )
+        self.assertFalse(
+            phase_runner._recoverable_partial_phase(
+                (completed, failed), "hunt", 3
+            )
+        )
 
     def test_hunt_workflow_revalidation_rejects_mixed_or_mismatched_evidence_protocols(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -598,6 +838,21 @@ class WorkflowTests(unittest.TestCase):
                 ).status,
                 "incomplete",
             )
+            aggregate = json.loads(receipt_path.read_text(encoding="utf-8"))
+            aggregate["token_usage"]["output_tokens"] += 1
+            receipt_path.write_text(
+                json.dumps(aggregate, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PhaseRunnerError, "aggregate"):
+                validate_workflow_receipt(
+                    manifest,
+                    root / "snapshots",
+                    outputs,
+                    receipt_path,
+                    _controls(),
+                    ExecutionPolicy((("python",),)),
+                )
 
     def test_partial_hunt_discovery_revalidates_manifest_ordered_subset_and_rejects_artifacts(self) -> None:
         # Only completed task receipts may contribute discovery prediction or evidence rows.

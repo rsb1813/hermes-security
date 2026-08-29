@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..adapter_contract import AdapterTaskRequest, parse_adapter_response
+from ..adapter_contract import AdapterTaskRequest, parse_adapter_response, parse_model_usage
 from ..container_runtime import MAX_CONFIDENTIAL_STDIN_BYTES, ContainerResult, ContainerRuntime, ContainerTimeoutError
 from ..phase_runner import CanonicalCandidate
 from ..hunt_protocol import parse_hunt_discovery_prediction, parse_hunt_verification_prediction
@@ -279,14 +279,29 @@ class CodexExecAdapter:
         parsed = _parse_result(result, request.task_id, final_response_path, self._workflow, self._phase)
         if prepared is None:
             return parsed
+        parsed_usage = parse_model_usage(parsed.raw_response["usage"])
+        failure_usage = (
+            parsed_usage
+            if self._hunt_evidence_protocol_version
+            == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
+            else None
+        )
         try:
             prediction = parse_hunt_discovery_prediction(parsed.raw_response["prediction"], request.task_id)
             evidence = attest_hunt_discovery(prepared, prediction, parsed.observed_argv)
         except HuntEvidenceError as error:
             failure_code = error.category if error.category in HUNT_EVIDENCE_FAILURE_CODES else "hunt_evidence_invalid"
-            raise CodexExecError("Hunt evidence attestation failed", failure_code=failure_code) from error
+            raise CodexExecError(
+                "Hunt evidence attestation failed",
+                failure_code=failure_code,
+                token_usage=failure_usage,
+            ) from error
         except (KeyError, TypeError, ValueError) as error:
-            raise CodexExecError("Hunt evidence attestation failed", failure_code="hunt_evidence_invalid") from error
+            raise CodexExecError(
+                "Hunt evidence attestation failed",
+                failure_code="hunt_evidence_invalid",
+                token_usage=failure_usage,
+            ) from error
         return ExecutorResult(parsed.raw_response, parsed.event_rows, parsed.observed_argv, evidence.to_json())
 
     def _candidates_for_request(

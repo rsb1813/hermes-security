@@ -110,11 +110,20 @@ class ExecutorTimeoutError(TimeoutError):
 class ExecutorFailureError(RuntimeError):
     """Carries one bounded public failure code while keeping details private."""
 
-    def __init__(self, message: str, *, failure_code: str = "executor_failure") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: str = "executor_failure",
+        token_usage: TokenUsage | None = None,
+    ) -> None:
         if not _is_public_failure_code(failure_code):
             raise ValueError("executor failure code is invalid")
+        if token_usage is not None and not isinstance(token_usage, TokenUsage):
+            raise ValueError("executor failure token usage is invalid")
         super().__init__(message)
         self.failure_code = failure_code
+        self.token_usage = token_usage
 
 
 @dataclass(frozen=True)
@@ -162,6 +171,8 @@ def run_suite(
     executor: Executor,
     response_kind: str = "standard",
     evidence_protocol_version: int | None = None,
+    *,
+    account_failure_usage: bool = False,
 ) -> RunReceipt:
     """Runs one manifest in order after completing every snapshot preflight."""
     _require_safe_run_id(run_id)
@@ -171,6 +182,8 @@ def run_suite(
         raise RunnerError("config must be a RunConfig")
     if not isinstance(execution_policy, ExecutionPolicy):
         raise RunnerError("execution_policy must be an ExecutionPolicy")
+    if not isinstance(account_failure_usage, bool):
+        raise RunnerError("account_failure_usage must be a boolean")
     if config.execution_policy_sha256 != execution_policy_sha256(execution_policy):
         raise RunnerError("execution policy hash does not match RunConfig")
     if config.manifest_sha256 != manifest_sha256(manifest):
@@ -223,6 +236,7 @@ def run_suite(
             evidence_rows.append(task_evidence)
         if prediction is not None:
             predictions.append(prediction)
+        if record.status == "completed" or account_failure_usage:
             total_usage = _add_usage(total_usage, record.token_usage)
 
     _write_jsonl(run_directory / "predictions.jsonl", predictions)
@@ -415,6 +429,8 @@ def _run_task(
                 _write_task_failure(task_directory, "executor_timeout")
             except ExecutorFailureError as error:
                 status = "failed"
+                if error.token_usage is not None:
+                    usage = error.token_usage
                 _write_task_failure(task_directory, error.failure_code)
             except Exception:
                 status = "failed"

@@ -481,3 +481,31 @@
 - Fresh public verification after the performance changes and gate correction passes 234 focused Python tests with six documented skips, all 417 HermesBench Python tests with ten documented skips, and the Bun HermesBench bridge with one pass and zero failures in 74.69 seconds.
 - The final private-boundary audit found all five checked private inputs, scripts, and output roots ignored, zero private-marker matches in tracked files, and zero running containers. Compileall and `git diff --check` passed; the branch was 31 local commits ahead of its upstream and remained unpushed.
 - A fresh whole-branch public-diff review found no Critical, Important, or Minor issue. It confirmed Protocol-v4/schema-3 isolation, exact v1-v3 compatibility, blind verification, bounded fail-closed source handling, strong-first fair allocation, module-index correctness, and no additional model-call path.
+
+### Task 40 one-shot Protocol-v4 Canary and partial-discovery ruling
+
+- The approved Protocol-v4 Canary made exactly one paid benchmark process attempt with zero automatic retries. Two earlier retained processes were mechanically revalidated as pre-model no-ops, so they did not consume the one-shot model invocation authority.
+- The paid workflow ended `incomplete` after discovery only. Seven of eight tasks completed and one failed with the bounded host-attestation category `hunt_evidence_candidate_location`; verification did not start and no candidate score exists. This is not evidence of improved recall.
+- Revalidated discovery usage was 25,026,304 cached input tokens, 881,876 uncached input tokens, and 65,540 output tokens over 2,629.068 seconds. The task elapsed distribution ranged from 178.595 to 409.274 seconds with a 346.098-second median. Failed post-response usage is not represented by the current receipt, so the paid total is a lower bound.
+- Snapshot integrity passed, public-boundary violations were zero after restricting the audit to public receipt, result, prediction, and score artifacts, no benchmark container remained, and the retained baseline remains a tracked aggregate rather than a revalidated receipt.
+- The architectural defect is all-or-nothing discovery handling. One recoverable task failure caused seven completed results and their paid work to be discarded before independent verification.
+- The selected correction keeps the full manifest, maps recoverable Protocol-v4 failures and timeouts to explicit empty candidates, counts them as misses, and locally emits canonical empty verification results without a model call. Snapshot contamination remains fail-closed.
+- A read-only high-effort architecture advisor recommended this full-manifest design over a subset manifest because it preserves scoring denominators and avoids a second hash and receipt contract. Git status and diff were unchanged before and after the advice.
+- Protocol-v4 failure receipts must retain bounded failure evidence and post-response token usage. Protocols 1 through 3 and Standard behavior remain compatibility boundaries. The consumed paid Canary will not be retried.
+
+### Task 41 recoverable Protocol-v4 phase results
+
+- Protocol 4 now preserves recoverable discovery and verification failures or timeouts as full-manifest empty misses. Snapshot contamination, all-task failure, Standard, and Hunt Protocols 1 through 3 retain their prior fail-closed behavior.
+- Completed discovery tasks are canonicalized in manifest order and failed tasks receive empty candidate sets. Zero-candidate verification is emitted locally with zero token usage and never calls the verification model.
+- Completed verification tasks retain their independently validated predictions, while recoverable failed tasks receive canonical empty public predictions. The scorer therefore keeps the complete benchmark denominator instead of silently excluding failed work.
+- Post-response host-attestation failures carry bounded model usage only under Protocol 4. Both run-time and independent receipt validation account for those observed tokens while legacy accounting remains completed-task-only.
+- RED/GREEN coverage proves partial discovery and partial verification both complete with miss-inclusive scoring, local empty verification skips the delegate, contamination and all-failure remain unrecoverable, and public failure messages contain no private detail.
+- Independent review found and the implementation closed one aggregate-receipt gap: workflow token usage and elapsed time now revalidate against the exact one-phase or two-phase totals. The one allowed re-review found no remaining Critical or Important issue.
+- Fresh verification passes 117 focused runner, phase, and adapter tests; all 421 HermesBench Python tests with ten documented skips; the Bun bridge with one pass and zero failures; compileall; and `git diff --check`.
+
+### Task 42 bounded throughput architecture decision
+
+- Read-only code analysis confirmed that `run_suite` serially executes every task after global preflight and that per-task containers repeat setup and teardown. The measured Canary tail therefore accumulates almost the full sum of task durations.
+- Three alternatives were compared. Container reuse risks task and authentication isolation, discovery-to-verification pipelining changes the phase contract, and shared authentication caching introduces mutable secret state. The selected minimal design is bounded phase-local parallelism with two isolated workers.
+- Every snapshot must still preflight before any executor begins. Workers retain distinct scratch directories, containers, and authentication runtimes; aggregate artifacts remain byte-stable in manifest order rather than completion order.
+- Parallelism is expected to lower wall time, not model-token billing. Cost claims remain limited to the already implemented zero-candidate verification skip and any measured reduction in paid timeout or attestation failures.

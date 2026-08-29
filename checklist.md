@@ -154,8 +154,17 @@
 - [x] Preserve exact protocol-v1 through protocol-v3 artifact, prompt, and receipt reconstruction.
 - [x] Pass the label-independent retained-snapshot artifact build and separate private coverage gate.
 - [x] Complete independent review and all full no-model verification gates.
-- [ ] Run exactly one fixed paid Protocol-v4 Canary diagnostic with no automatic retry.
-- [ ] Report localized accuracy, separated phase cost, integrity, and public-boundary evidence.
+- [x] Run exactly one fixed paid Protocol-v4 Canary diagnostic with no automatic retry.
+- [x] Report its incomplete status, separated discovery cost, integrity, and public-boundary evidence without claiming an accuracy result.
+- [x] Preserve recoverable partial discovery and verification as full-manifest empty misses instead of discarding completed work.
+  - [x] Keep contaminated snapshots fail-closed and preserve bounded failure evidence.
+  - [x] Skip model verification locally for zero-candidate tasks while emitting canonical empty predictions.
+  - [x] Bind post-response failure token usage for Protocol v4 without changing Protocols 1 through 3.
+  - [x] Prove complete ordered final rows, miss-inclusive scoring, zero extra model calls, and legacy compatibility.
+- [ ] Reduce the measured sequential tail before any 48-task paid run.
+  - [ ] Add a frozen and hash-bound two-worker phase-local execution limit with legacy sequential compatibility.
+  - [ ] Preserve preflight-before-start, per-task isolation, manifest-ordered artifacts, and deterministic hashes.
+  - [ ] Prove overlap and logical equivalence with deterministic fake executors before any paid run.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
 

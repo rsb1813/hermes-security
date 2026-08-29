@@ -584,6 +584,14 @@ class CodexExecAdapterTests(unittest.TestCase):
                     with self.assertRaises(CodexExecError) as caught:
                         self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
                 self.assertEqual(caught.exception.failure_code, code)
+                self.assertEqual(
+                    {
+                        "cached_input_tokens": 20,
+                        "uncached_input_tokens": 10,
+                        "output_tokens": 10,
+                    },
+                    caught.exception.token_usage.to_json(),
+                )
                 self.assertNotIn("private evidence detail", str(caught.exception))
 
     def test_hunt_preparation_consumes_whole_task_timeout(self) -> None:
