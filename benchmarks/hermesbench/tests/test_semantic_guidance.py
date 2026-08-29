@@ -364,6 +364,45 @@ class SemanticGuidanceTests(unittest.TestCase):
         nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
         self.assertEqual(len(nested), 1)
 
+    def test_nested_output_lexical_goal_defers_class_header_confirmation(self) -> None:
+        decoys = {
+            "destructuring_key": "export function render(config, request) { const { class: alias } = config; {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "object_property": "export function render(config, request) { const value = { class: config.value }; {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "member_access": "export function render(config, request) { const value = config.class; {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "object_method": "export function render(config, request) { const value = { class() {} }; {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "string_and_computed_keys": "export function render(config, request) { const value = { 'class': config.value, ['class']: config.value }; {} /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+        }
+        class_headers = {
+            "declaration": "export function render(request) { class Widget { static {} method() {} } /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "export_default": "export default class Widget { static {} method() {} } /`<style>${request.q}</style>`/.test('safe'); export function render(request) { return 'safe'; }\n",
+            "named_expression": "export function render(request) { const Widget = class Widget extends mixin(Base) { static {} method() {} }; /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "anonymous_expression": "export function render(request) { const Widget = class extends mixin(Base) { static {} method() {} }; /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+        }
+        for name, source in {**decoys, **class_headers}.items():
+            with self.subTest(kind="regex", name=name):
+                result = self._build(f"nested-goal-deferred-class-{name}", {"src/render.ts": source}, guidance_schema_version=3)
+                nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+                self.assertEqual(nested, [])
+        division = "export function render(config, request) { const value = config.class / 2; return `<style>${request.q}</style>`; }\n"
+        result = self._build("nested-goal-deferred-class-division", {"src/render.ts": division}, guidance_schema_version=3)
+        nested = [json.loads(line) for line in result.canonical_bytes.splitlines() if b"nested-output-context" in line]
+        self.assertEqual(len(nested), 1)
+
+    def test_nested_output_lexical_goal_fails_closed_for_invalid_class_headers(self) -> None:
+        over_limit_header = ".".join(["Root", *("member" for _ in range(17))])
+        fixtures = {
+            "computed_key": "export function render(config, request) { const value = class [config.kind] {}; /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "malformed_extends": "export function render(request) { const value = class Widget extends mixin(Base); /`<style>${request.q}</style>`/.test('safe'); return 'safe'; }\n",
+            "over_limit": f"export function render(request) {{ const value = class Widget extends {over_limit_header} {{}}; /`<style>${{request.q}}</style>`/.test('safe'); return 'safe'; }}\n",
+        }
+        for name, source in fixtures.items():
+            with self.subTest(name=name):
+                first = self._build(f"nested-goal-invalid-class-{name}-first", {"src/render.ts": source}, guidance_schema_version=3)
+                second = self._build(f"nested-goal-invalid-class-{name}-second", {"src/render.ts": source}, guidance_schema_version=3)
+                self.assertEqual(first.canonical_bytes, b"")
+                self.assertEqual(second.canonical_bytes, b"")
+                self.assertEqual(first.canonical_bytes, second.canonical_bytes)
+
     def test_nested_output_depth_budget_counts_nested_template_levels(self) -> None:
         fixtures = {}
         for depth in (9, 16, 17):

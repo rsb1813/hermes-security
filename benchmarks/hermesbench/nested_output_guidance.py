@@ -75,16 +75,28 @@ class _Token:
 
 
 @dataclass
+class _ClassCandidate:
+    kind: str
+    stage: str = "after_class"
+    header_stack: list[str] = field(default_factory=list)
+    token_count: int = 0
+    byte_count: int = 0
+    extends_value: bool = False
+
+
+@dataclass
 class _LexicalGoal:
+    source: str = ""
     expression_start: bool = True
     statement_start: bool = True
     pending_control_header: bool = False
     pending_function_header: bool = False
-    pending_class_kind: str | None = None
+    class_candidate: _ClassCandidate | None = None
     control_parenthesis_depth: int = 0
     function_parenthesis_depth: int = 0
     class_member_parenthesis_depth: int = 0
     block_expected: bool = False
+    property_access: bool = False
     brace_kinds: list[str] = field(default_factory=list)
 
     def _expect_expression(self) -> None:
@@ -103,6 +115,86 @@ class _LexicalGoal:
         return bool(self.brace_kinds and self.brace_kinds[-1] in {"class_declaration", "class_expression"})
 
     def consume(self, token: _Token) -> None:
+        if self.class_candidate is not None and self._consume_class_candidate(token):
+            return
+        self._consume_token(token)
+
+    def _consume_class_candidate(self, token: _Token) -> bool:
+        candidate = self.class_candidate
+        if candidate is None:
+            return False
+        if token.kind == "space":
+            return True
+        candidate.token_count += 1
+        candidate.byte_count += len(self.source[token.start:token.end].encode("utf-8"))
+        if candidate.token_count > MAX_INTERPOLATION_DEPTH or candidate.byte_count > MAX_EXPRESSION_BYTES:
+            self.class_candidate = None
+            return False
+        if candidate.stage == "after_class":
+            if token.kind == "identifier":
+                if token.value == "extends":
+                    candidate.stage = "extends"
+                else:
+                    candidate.stage = "after_name"
+                return True
+            if token.value == "{":
+                self._commit_class_candidate()
+                return True
+            self.class_candidate = None
+            return False
+        if candidate.stage == "after_name":
+            if token.kind == "identifier" and token.value == "extends":
+                candidate.stage = "extends"
+                return True
+            if token.value == "{":
+                self._commit_class_candidate()
+                return True
+            self.class_candidate = None
+            return False
+        if token.value in {"(", "["}:
+            if len(candidate.header_stack) >= MAX_INTERPOLATION_DEPTH:
+                self.class_candidate = None
+                return False
+            candidate.header_stack.append(")" if token.value == "(" else "]")
+            candidate.extends_value = True
+            return True
+        if token.value == "{" and candidate.header_stack:
+            if len(candidate.header_stack) >= MAX_INTERPOLATION_DEPTH:
+                self.class_candidate = None
+                return False
+            candidate.header_stack.append("}")
+            candidate.extends_value = True
+            return True
+        if token.value in {")", "]", "}"
+        }:
+            if candidate.header_stack and token.value == candidate.header_stack[-1]:
+                candidate.header_stack.pop()
+                return True
+            self.class_candidate = None
+            return False
+        if token.value == "{":
+            if candidate.extends_value:
+                self._commit_class_candidate()
+                return True
+            self.class_candidate = None
+            return False
+        if token.value in {";", "=>", ":", ",", "="}:
+            self.class_candidate = None
+            return False
+        candidate.extends_value = True
+        return True
+
+    def _commit_class_candidate(self) -> None:
+        candidate = self.class_candidate
+        if candidate is None:
+            return
+        self.class_candidate = None
+        self.brace_kinds.append(candidate.kind)
+        self.block_expected = False
+        self.property_access = False
+        self._start_statement()
+
+    def _consume_token(self, token: _Token) -> None:
         if token.kind != "space" and token.value != "{":
             self.block_expected = False
         if token.kind == "identifier":
@@ -113,22 +205,34 @@ class _LexicalGoal:
                 self.pending_function_header = True
                 self._expect_expression()
             elif token.value == "class":
-                self.pending_class_kind = "class_declaration" if self.statement_start else "class_expression"
-                self._expect_expression()
+                if self.property_access:
+                    self.property_access = False
+                    self._end_operand()
+                else:
+                    self.class_candidate = _ClassCandidate(
+                        "class_declaration" if self.statement_start else "class_expression",
+                        token_count=1,
+                        byte_count=len(self.source[token.start:token.end].encode("utf-8")),
+                    )
             elif token.value == "static" and self._inside_class_body():
                 self.block_expected = True
                 self._expect_expression()
             elif token.value in {"default", "export"}:
+                self.property_access = False
                 self._start_statement()
             elif token.value in {"do", "else", "finally", "try"}:
+                self.property_access = False
                 self.block_expected = True
                 self._expect_expression()
             elif token.value in {"case", "delete", "new", "return", "throw", "typeof", "void", "yield"}:
+                self.property_access = False
                 self._expect_expression()
             else:
+                self.property_access = False
                 self._end_operand()
             return
         if token.kind in {"number", "string", "regex", "template"}:
+            self.property_access = False
             self._end_operand()
             return
         if token.kind != "punctuation":
@@ -170,13 +274,10 @@ class _LexicalGoal:
                     return
             self._end_operand()
         elif token.value == "{":
-            if self.pending_class_kind is not None:
-                kind = self.pending_class_kind
-                self.pending_class_kind = None
-            else:
-                kind = "block" if self.block_expected or self.statement_start else "object"
+            kind = "block" if self.block_expected or self.statement_start else "object"
             self.brace_kinds.append(kind)
             self.block_expected = False
+            self.property_access = False
             if kind in {"block", "class_declaration", "class_expression"}:
                 self._start_statement()
             else:
@@ -188,13 +289,20 @@ class _LexicalGoal:
             else:
                 self._end_operand()
         elif token.value == "=>":
+            self.property_access = False
             self.block_expected = True
             self._expect_expression()
         elif token.value in {"++", "--", "]"}:
+            self.property_access = False
             self._end_operand()
         elif token.value == ";":
+            self.property_access = False
             self._start_statement()
+        elif token.value == ".":
+            self.property_access = True
+            self._expect_expression()
         else:
+            self.property_access = False
             self._expect_expression()
 
 
@@ -230,7 +338,7 @@ class _TemplateScanner:
 
     def scan(self) -> tuple[_Interpolation, ...]:
         index = 0
-        goal = _LexicalGoal()
+        goal = _LexicalGoal(self.source)
         try:
             while index < len(self.source):
                 if self.source.startswith("//", index):
@@ -321,7 +429,7 @@ class _TemplateScanner:
     def _expression(self, start: int, depth: int) -> int:
         braces = 1
         index = start
-        goal = _LexicalGoal()
+        goal = _LexicalGoal(self.source)
         while index < len(self.source):
             if self.source.startswith("//", index):
                 newline = self.source.find("\n", index + 2)
@@ -651,7 +759,7 @@ def _policy_key_token(raw: str, index: int) -> tuple[str, int] | None:
 def _top_level_value_end(raw: str, start: int) -> int | None:
     index = start
     depth = 0
-    goal = _LexicalGoal()
+    goal = _LexicalGoal(raw)
     while index < len(raw):
         if raw.startswith("//", index):
             newline = raw.find("\n", index + 2)
@@ -751,7 +859,7 @@ def _audited_sanitizer_import(source: str) -> re.Match[str] | None:
 
 def _is_code_position(source: str, position: int) -> bool:
     index = 0
-    goal = _LexicalGoal()
+    goal = _LexicalGoal(source)
     while index < position:
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
@@ -799,7 +907,7 @@ def _static_attribute(raw_before: str) -> str | None:
 def _matching_code_brace(source: str, opening: int) -> int | None:
     depth = 0
     index = opening
-    goal = _LexicalGoal()
+    goal = _LexicalGoal(source)
     while index < len(source):
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
@@ -867,7 +975,7 @@ def _skip_template_expression(source: str, start: int, depth: int = 0) -> int | 
         return None
     braces = 1
     index = start
-    goal = _LexicalGoal()
+    goal = _LexicalGoal(source)
     while index < len(source):
         if source.startswith("//", index):
             newline = source.find("\n", index + 2)
