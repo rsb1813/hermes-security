@@ -679,7 +679,7 @@ Expected: every task produces a deterministic schema-3 artifact and private inde
 
 - [ ] **Step 6: Create and run the separate private evaluator**
 
-The evaluator imports `load_oracles`, reads only the completed artifact index and semantic JSONL, and requires at least one `nested-output-context` row whose source, operation, or trace overlaps a held-out vulnerable gold location within the scorer's fixed line tolerance. It also reports aggregate nested row count, vulnerable-task coverage count, and guarded/decoy synthetic status. It writes no paths or task IDs to its result.
+The evaluator imports `load_oracles` and reads only the completed artifact index and semantic JSONL. It prefers held-out vulnerable tasks whenever they exist; for a mini corpus with no held-out vulnerable task, it falls back to all vulnerable tasks without changing the oracle-blind build boundary. It requires at least one `nested-output-context` row whose source, operation, or trace overlaps an evaluated vulnerable gold location within the scorer's fixed line tolerance. It also reports aggregate nested row count, vulnerable-task coverage count, and guarded/decoy synthetic status. It writes no paths or task IDs to its result.
 
 Run in a fresh process with only gate root and oracle variables.
 
