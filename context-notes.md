@@ -455,3 +455,11 @@
 - Active declaration deques avoid repeated sparse full scans, list-plus-set edge storage removes per-caller quadratic membership, and terminal-cap guards stop all candidate prefetch immediately when the final edge is selected.
 - Optional caller companions come only from already allocated exact import-linked edges with source-bearing arguments, extend an existing local nested-output hint, and never create a hint or attach name-only/static callers.
 - Final verification passed 89 semantic-guidance tests with three documented Windows directory-link permission skips. Compile and diff checks passed, and the final independent review reported no Critical, Important, or Minor finding.
+
+### Task 38 blind Protocol-v4 verification
+
+- Task 4 adds a four-field verification projection containing only candidate identity and canonical locations. The v4 verifier must independently reconstruct attacker control, reachability, impact, guard failure, evidence, counterevidence, and proof gaps from immutable source.
+- Explicit Hunt protocols 1 through 3 retain rich candidate prompt serialization. Rich sentinel golden tests and a projection mutation check prove those legacy branches fail if accidentally switched to the blind projection, while v4 remains blind.
+- Private discovery-to-verification candidate transfer remains rich and continues to drive attestation and complete terminal decisions. Public projection and receipt fields are unchanged.
+- After the blind path passed, the live Hunt evidence default was promoted to Protocol 4 and default adapter and CLI propagation were verified against explicit v4.
+- Final focused verification passed 98 adapter, phase, and CLI tests. Compile and diff checks passed, and the final independent re-review reported no Critical, Important, or Minor finding.
