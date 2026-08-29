@@ -432,3 +432,10 @@
 - The first independent review reproduced a schema-1 and schema-2 duplicate-frontier compatibility regression caused by component-aware conflict handling. The implementation now applies component conflict checks only to schema 3.
 - Two subsequent boundary tests prove that differing components do not change schema-2 canonical bytes and that schema 3 still rejects a same-path, same-pass component conflict. The final independent re-review reported no Critical, Important, or Minor finding.
 - Focused verification passed 169 tests with six documented Windows or opt-in skips. `git diff --check` passed and the worktree was clean before Task 2.
+
+### Task 35 nested-output tokenizer architecture ruling
+
+- Repeated Task 2 reviews showed that immediate `class` keyword classification could confuse object or destructuring keys with class syntax. Earlier focused fixes closed wildcard policy, regex and division, malformed quote, sanitizer control, alias, general block, recursion, and depth-budget regressions, but the shared class state still admitted a public synthetic false positive.
+- Systematic root-cause review found that the failure originates when lexical goal state mutates on the `class` token before the following tokens prove a class header. The selected correction defers the state transition until a bounded token sequence confirms the class body brace, and cancels the candidate on property, computed, malformed, or otherwise incompatible syntax.
+- The selected design remains dependency-free and single-pass. It avoids a per-file JavaScript parser process and preserves schema-1 and schema-2 isolation, keeping runtime and token costs low while protecting recall and false-positive precision.
+- On 2026-08-29, the user authorized the main agent to make non-destructive architecture decisions and continue implementation with the explicit objective of materially higher finding performance at lower cost.
