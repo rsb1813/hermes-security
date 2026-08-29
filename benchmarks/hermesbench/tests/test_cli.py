@@ -151,7 +151,7 @@ HUNT_READ_ONLY_COMMAND_PREFIXES = [
 
 class LiveProtocolRunCommandTests(unittest.TestCase):
     def test_live_hunt_run_passes_the_current_evidence_protocol_explicitly(self) -> None:
-        self.assertEqual(HUNT_EVIDENCE_PROTOCOL_VERSION, 3)
+        self.assertEqual(HUNT_EVIDENCE_PROTOCOL_VERSION, 4)
         args = SimpleNamespace(
             workflow="hunt",
             snapshots_root=Path("snapshots"),

@@ -189,7 +189,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                     hashlib.sha256(prompt.encode("utf-8")).hexdigest(), digest
                 )
 
-    def test_hunt_discovery_default_protocol_equals_explicit_protocol_three(self) -> None:
+    def test_hunt_discovery_default_protocol_equals_explicit_protocol_four(self) -> None:
         default = _Runtime(_hunt_stream())
         explicit = _Runtime(_hunt_stream())
         with tempfile.TemporaryDirectory() as directory:
@@ -200,7 +200,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                 "hunt",
                 "hunt-balanced",
                 explicit,
-                hunt_evidence_protocol_version=3,
+                hunt_evidence_protocol_version=4,
             )(_request(), Path(directory) / "explicit", 60)
         self.assertEqual(
             default.calls[0]["command_argv"][-1],
@@ -335,17 +335,31 @@ class CodexExecAdapterTests(unittest.TestCase):
         expected = {
             "standard_discovery": "6388f631fd0fc680e63bab85e8acfd800486c3b2932fca71829eca9608edb246",
             "standard_verification": "716beedcd9c73cf349c6181233d93897ecf8bd04fa2b9496d793506d8ff74127",
-            "hunt_verification": "a4ca5252bf737379682e01521bc6aba58b992b52a848ebf9f7f28e6b967d470f",
+            "hunt_verification_v1": "a4ca5252bf737379682e01521bc6aba58b992b52a848ebf9f7f28e6b967d470f",
+            "hunt_verification_v2": "a4ca5252bf737379682e01521bc6aba58b992b52a848ebf9f7f28e6b967d470f",
+            "hunt_verification_v3": "a4ca5252bf737379682e01521bc6aba58b992b52a848ebf9f7f28e6b967d470f",
+            "hunt_verification_v4": "7009282bc7fee58765db9584ec973a26e0a9c5a1f27a52cbbf3d26adeb12eb41",
         }
         standard_discovery_runtime = _Runtime(_stream())
         standard_verification_runtime = _Runtime(_stream())
-        hunt_verification_runtime = _Runtime(
-            _stream(), final_message=_HUNT_VERIFICATION_RESPONSE
-        )
         cases = (
             ("standard_discovery", self._adapter("standard", "baseline", standard_discovery_runtime), standard_discovery_runtime),
             ("standard_verification", self._adapter("standard", "baseline", standard_verification_runtime).for_verification({"task-001": ()}), standard_verification_runtime),
-            ("hunt_verification", self._adapter("hunt", "hunt-balanced", hunt_verification_runtime).for_verification({"task-001": ()}), hunt_verification_runtime),
+            *tuple(
+                (
+                    f"hunt_verification_v{version}",
+                    self._adapter(
+                        "hunt",
+                        "hunt-balanced",
+                        runtime := _Runtime(
+                            _stream(), final_message=_HUNT_VERIFICATION_RESPONSE
+                        ),
+                        hunt_evidence_protocol_version=version,
+                    ).for_verification({"task-001": ()}),
+                    runtime,
+                )
+                for version in (1, 2, 3, 4)
+            ),
         )
         for name, adapter, runtime in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -354,6 +368,85 @@ class CodexExecAdapterTests(unittest.TestCase):
                     hashlib.sha256(runtime.calls[0]["command_argv"][-1].encode("utf-8")).hexdigest(),
                     expected[name],
                 )
+
+    def test_protocol_four_hunt_verifier_receives_only_candidate_identity_and_locations(self) -> None:
+        runtime = _Runtime(_stream(), final_message=_HUNT_VERIFICATION_RESPONSE)
+        candidate = CanonicalCandidate(
+            candidate_id="candidate-1",
+            entry_point=Location("source.py", 1, 1),
+            critical_operation=Location("source.py", 3, 3),
+            trace=(Location("source.py", 2, 2),),
+            confidence=0.81,
+            vulnerability_family="family-sentinel",
+            search_pass="pass-sentinel",
+            hypothesis="hypothesis-sentinel",
+            evidence="evidence-sentinel",
+            counterevidence="counterevidence-sentinel",
+            expected_control="control-sentinel",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                runtime,
+                hunt_evidence_protocol_version=4,
+            ).for_verification({"task-001": (candidate,)})(
+                _request(), Path(directory), 60
+            )
+        prompt = runtime.calls[0]["command_argv"][-1]
+        self.assertIn('"candidate_id":"candidate-1"', prompt)
+        self.assertEqual(
+            set(json.loads(prompt.rsplit("Candidate set: ", 1)[1])[0]),
+            {"candidate_id", "entry_point", "critical_operation", "trace"},
+        )
+        for sentinel in (
+            "0.81",
+            "family-sentinel",
+            "pass-sentinel",
+            "hypothesis-sentinel",
+            "evidence-sentinel",
+            "counterevidence-sentinel",
+            "control-sentinel",
+        ):
+            self.assertNotIn(sentinel, prompt)
+        self.assertIn("inspect the immutable source independently", prompt)
+
+    def test_default_hunt_verification_prompt_matches_explicit_protocol_four(self) -> None:
+        default_runtime = _Runtime(_stream(), final_message=_HUNT_VERIFICATION_RESPONSE)
+        explicit_runtime = _Runtime(_stream(), final_message=_HUNT_VERIFICATION_RESPONSE)
+        candidate = CanonicalCandidate(
+            candidate_id="candidate-1",
+            entry_point=Location("source.py", 1, 1),
+            critical_operation=Location("source.py", 3, 3),
+            trace=(Location("source.py", 2, 2),),
+            confidence=0.81,
+            vulnerability_family="family-sentinel",
+            search_pass="pass-sentinel",
+            hypothesis="hypothesis-sentinel",
+            evidence="evidence-sentinel",
+            counterevidence="counterevidence-sentinel",
+            expected_control="control-sentinel",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            default_scratch = Path(directory) / "default"
+            explicit_scratch = Path(directory) / "explicit"
+            default_scratch.mkdir()
+            explicit_scratch.mkdir()
+            self._adapter("hunt", "hunt-balanced", default_runtime).for_verification(
+                {"task-001": (candidate,)}
+            )(_request(), default_scratch, 60)
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                explicit_runtime,
+                hunt_evidence_protocol_version=4,
+            ).for_verification({"task-001": (candidate,)})(
+                _request(), explicit_scratch, 60
+            )
+        self.assertEqual(
+            default_runtime.calls[0]["command_argv"][-1],
+            explicit_runtime.calls[0]["command_argv"][-1],
+        )
 
     def test_hunt_verification_requires_quoted_literal_angle_guidance_without_changing_discovery(self) -> None:
         # The live failure mitigation must remain verification-only and preserve fail-closed parsing.

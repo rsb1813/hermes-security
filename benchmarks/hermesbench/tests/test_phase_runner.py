@@ -458,7 +458,7 @@ class WorkflowTests(unittest.TestCase):
                 "incomplete",
             )
 
-    def test_hunt_schema_three_binds_reproducible_evidence_and_rejects_tampering(self) -> None:
+    def test_hunt_schema_four_binds_reproducible_evidence_and_rejects_tampering(self) -> None:
         # Rewriting receipt or evidence bytes cannot replace host-reproduced evidence.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -478,7 +478,7 @@ class WorkflowTests(unittest.TestCase):
             receipt_path = outputs / "evidence-workflow-receipt.json"
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             self.assertEqual(receipt["schema_version"], 3)
-            self.assertEqual(receipt["hunt_evidence_protocol_version"], 3)
+            self.assertEqual(receipt["hunt_evidence_protocol_version"], 4)
             self.assertIn("discovery_evidence_sha256", receipt)
             self.assertEqual(validate_workflow_receipt(manifest, root / "snapshots", outputs, receipt_path, _controls(), ExecutionPolicy((("python",),))).status, "completed")
             evidence_path = outputs / "evidence-discovery" / "evidence.jsonl"
@@ -698,11 +698,14 @@ class WorkflowTests(unittest.TestCase):
             manifest = _manifest(root)
             outputs = root / "outputs"
             outputs.mkdir()
+            received: dict[str, tuple[object, ...]] = {}
 
             def discovery(request: object, *_: object) -> ExecutorResult:
                 return _hunt_result(request, 6)
 
             def valid_factory(candidate_sets: object):
+                received.update(candidate_sets)
+
                 def verification(request: object, *_: object) -> ExecutorResult:
                     candidates = candidate_sets[request.task_id]
                     findings = []
@@ -721,6 +724,35 @@ class WorkflowTests(unittest.TestCase):
             rows = [json.loads(line) for line in (outputs / "six-candidates.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(len(rows[0]["candidates"]), 6)
             self.assertIn("expected_control", rows[0]["candidates"][5])
+            rich_fields = {
+                "confidence",
+                "vulnerability_family",
+                "search_pass",
+                "hypothesis",
+                "evidence",
+                "counterevidence",
+                "expected_control",
+            }
+            for row in rows:
+                received_by_id = {
+                    candidate.candidate_id: candidate for candidate in received[row["task_id"]]
+                }
+                for candidate in row["candidates"]:
+                    self.assertTrue(rich_fields.issubset(candidate))
+                    received_candidate = received_by_id[candidate["candidate_id"]]
+                    self.assertEqual(candidate, received_candidate.to_json())
+                    self.assertEqual(
+                        {
+                            key: candidate[key]
+                            for key in (
+                                "candidate_id",
+                                "entry_point",
+                                "critical_operation",
+                                "trace",
+                            )
+                        },
+                        received_candidate.to_verification_projection(),
+                    )
             self.assertEqual(validate_workflow_receipt(manifest, root / "snapshots", outputs, outputs / "six-workflow-receipt.json", _controls(), ExecutionPolicy((("python",),))).status, "completed")
             self.assertEqual(result.receipt.status, "completed")
             receipt_path = outputs / "six-workflow-receipt.json"
@@ -738,6 +770,7 @@ class WorkflowTests(unittest.TestCase):
 
             with self.assertRaisesRegex(PhaseRunnerError, "terminal decision"):
                 run_workflow(manifest, root / "snapshots", outputs, "missing", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, missing_factory)
+
     def test_hunt_score_callback_receives_public_predictions_without_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

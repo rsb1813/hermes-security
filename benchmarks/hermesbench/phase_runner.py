@@ -207,6 +207,14 @@ class CanonicalCandidate:
             }
         return value
 
+    def to_verification_projection(self) -> dict[str, object]:
+        return {
+            "candidate_id": self.candidate_id,
+            "entry_point": _location_json(self.entry_point),
+            "critical_operation": _location_json(self.critical_operation),
+            "trace": [_location_json(location) for location in self.trace],
+        }
+
 
 @dataclass(frozen=True)
 class WorkflowReceipt:
