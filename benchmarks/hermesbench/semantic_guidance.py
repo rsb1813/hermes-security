@@ -199,10 +199,6 @@ def build_semantic_guidance(
         guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION,
     )
     if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
-        declarations = _allocate_schema_three_references(
-            declarations,
-            sum(len(declaration.calls) for declaration in declarations),
-        )
         routes, edge_count, incoming, by_identity = _build_schema_three_routes(declarations, limits)
         routes = (*routes, *_nested_output_routes(nested_observations, incoming, by_identity))
     else:
@@ -764,65 +760,217 @@ def _operation_callees(line: str, anchors: set[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(callees))
 
 
+def _resolve_exact_call(
+    declaration: _Declaration,
+    call: _Call,
+    by_file_symbol: dict[tuple[str, str], list[_Declaration]],
+    by_language_symbol: dict[tuple[str, str], list[_Declaration]],
+) -> tuple[tuple[str, int, str], str] | None:
+    direct = _unique_same_file_call_target(declaration, call, by_file_symbol)
+    if direct is not None:
+        return (_location_identity(direct.location), "direct")
+    imported = _unique_import_call_target(declaration, call, by_language_symbol)
+    if imported is not None:
+        return (_location_identity(imported.location), "import-linked")
+    return None
+
+
+def _unique_same_file_call_target(
+    declaration: _Declaration,
+    call: _Call,
+    by_file_symbol: dict[tuple[str, str], list[_Declaration]],
+) -> _Declaration | None:
+    selected: _Declaration | None = None
+    for candidate in by_file_symbol.get((declaration.location.path, call.name), ()):
+        if not _same_file_call_target(declaration, call, candidate):
+            continue
+        if selected is not None and selected != candidate:
+            return None
+        selected = candidate
+    return selected
+
+
+def _unique_import_call_target(
+    declaration: _Declaration,
+    call: _Call,
+    by_language_symbol: dict[tuple[str, str], list[_Declaration]],
+) -> _Declaration | None:
+    selected: _Declaration | None = None
+    seen_imports: set[tuple[str, str | None]] = set()
+    for imported in declaration.imports:
+        if not (
+            call.qualifier == imported.local_name.lower()
+            or (call.qualifier is None and call.name == imported.local_name.lower())
+        ):
+            continue
+        import_key = (imported.module, imported.symbol)
+        if import_key in seen_imports:
+            continue
+        seen_imports.add(import_key)
+        symbol = imported.symbol or call.name
+        for candidate in by_language_symbol.get((declaration.language, symbol), ()):
+            if not _module_matches(
+                declaration.location.path,
+                imported.module,
+                candidate.location.path,
+                declaration.language,
+                imported.symbol,
+            ):
+                continue
+            if selected is not None and selected != candidate:
+                return None
+            selected = candidate
+    return selected
+
+
 def _allocate_schema_three_references(
     declarations: tuple[_Declaration, ...],
     limit: int,
-) -> tuple[_Declaration, ...]:
-    queues = [deque(declaration.calls) for declaration in declarations]
-    retained = [[] for _ in declarations]
+    by_file_symbol: dict[tuple[str, str], list[_Declaration]],
+    by_language_symbol: dict[tuple[str, str], list[_Declaration]],
+) -> tuple[
+    tuple[_Declaration, ...],
+    dict[tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]],
+    dict[tuple[str, int, str], tuple[_Call, ...]],
+]:
+    retained = [deque() for _ in declarations]
+    strong: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {}
+    weak: dict[tuple[str, int, str], list[_Call]] = {}
     remaining = max(0, limit)
+    positions = [0] * len(declarations)
+    seen_strong = [set() for _ in declarations]
     while remaining:
         selected = False
-        for index, queue in enumerate(queues):
+        for index, declaration in enumerate(declarations):
+            identity = _location_identity(declaration.location)
+            selected_for_declaration = False
+            while positions[index] < len(declaration.calls):
+                call = declaration.calls[positions[index]]
+                positions[index] += 1
+                edge = _resolve_exact_call(declaration, call, by_file_symbol, by_language_symbol)
+                if edge is None or edge in seen_strong[index]:
+                    continue
+                seen_strong[index].add(edge)
+                retained[index].append(call)
+                strong.setdefault(identity, []).append(edge)
+                selected = True
+                selected_for_declaration = True
+                break
+            if not selected_for_declaration:
+                continue
+            remaining -= 1
+            if not remaining:
+                break
+        if not selected:
+            break
+    positions = [0] * len(declarations)
+    seen_weak = [set() for _ in declarations]
+    while remaining:
+        selected = False
+        for index, declaration in enumerate(declarations):
+            identity = _location_identity(declaration.location)
+            selected_for_declaration = False
+            while positions[index] < len(declaration.calls):
+                call = declaration.calls[positions[index]]
+                positions[index] += 1
+                if (
+                    call.qualifier is not None
+                    or _resolve_exact_call(declaration, call, by_file_symbol, by_language_symbol) is not None
+                ):
+                    continue
+                key = (declaration.language, call.name)
+                if key in seen_weak[index]:
+                    continue
+                seen_weak[index].add(key)
+                retained[index].append(call)
+                weak.setdefault(identity, []).append(call)
+                selected = True
+                selected_for_declaration = True
+                break
+            if not selected_for_declaration:
+                continue
+            remaining -= 1
+            if not remaining:
+                break
+        if not selected:
+            break
+    selected_declarations = tuple(
+        replace(declaration, calls=tuple(retained[index]))
+        for index, declaration in enumerate(declarations)
+    )
+    return (
+        selected_declarations,
+        {identity: tuple(edges) for identity, edges in strong.items()},
+        {identity: tuple(calls) for identity, calls in weak.items()},
+    )
+
+
+def _allocate_schema_three_edges(
+    strong_by_declaration: dict[
+        tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]
+    ],
+    weak_by_declaration: dict[tuple[str, int, str], tuple[_Call, ...]],
+    declarations: dict[tuple[str, int, str], _Declaration],
+    by_language_symbol: dict[tuple[str, str], list[_Declaration]],
+    limit: int,
+) -> dict[tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]]:
+    allocated: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {}
+    remaining = max(0, limit)
+    strong_queues = [
+        (identity, deque(edges))
+        for identity, edges in strong_by_declaration.items()
+    ]
+    while remaining:
+        selected = False
+        for identity, queue in strong_queues:
             if not queue:
                 continue
-            retained[index].append(queue.popleft())
+            edge = queue.popleft()
+            if edge in allocated.get(identity, ()):
+                continue
+            allocated.setdefault(identity, []).append(edge)
             remaining -= 1
             selected = True
             if not remaining:
                 break
         if not selected:
             break
-    return tuple(
-        replace(declaration, calls=tuple(retained[index]))
-        for index, declaration in enumerate(declarations)
-    )
-
-
-def _allocate_schema_three_edges(
-    resolved_by_declaration: dict[
-        tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]
-    ],
-    limit: int,
-) -> dict[tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]]:
-    allocated: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {
-        identity: [] for identity in resolved_by_declaration
+    weak_queues = {
+        identity: deque(calls)
+        for identity, calls in weak_by_declaration.items()
     }
-    remaining = max(0, limit)
-    for strengths in (("direct", "import-linked"), ("name-only",)):
-        queues: list[tuple[tuple[str, int, str], deque[tuple[tuple[str, int, str], str]]]] = []
-        for identity, edges in resolved_by_declaration.items():
-            seen: set[tuple[tuple[str, int, str], str]] = set()
-            queue = deque()
-            for edge in edges:
-                if edge[1] not in strengths or edge in seen:
+    target_iterators: dict[tuple[str, int, str], object] = {}
+    target_checks = remaining
+    while remaining and target_checks:
+        selected = False
+        for identity in declarations:
+            queue = weak_queues.get(identity)
+            if not queue:
+                continue
+            while target_checks:
+                iterator = target_iterators.get(identity)
+                if iterator is None:
+                    if not queue:
+                        break
+                    call = queue.popleft()
+                    iterator = iter(by_language_symbol.get((declarations[identity].language, call.name), ()))
+                    target_iterators[identity] = iterator
+                try:
+                    target = next(iterator)
+                except StopIteration:
+                    target_iterators.pop(identity, None)
                     continue
-                seen.add(edge)
-                queue.append(edge)
-            queues.append((identity, queue))
-        while remaining:
-            selected = False
-            for identity, queue in queues:
-                if not queue:
+                target_checks -= 1
+                edge = (_location_identity(target.location), "name-only")
+                if edge in allocated.get(identity, ()):
                     continue
-                allocated[identity].append(queue.popleft())
+                allocated.setdefault(identity, []).append(edge)
                 remaining -= 1
                 selected = True
-                if not remaining:
-                    break
-            if not selected:
                 break
-        if not remaining:
+            if not remaining or not target_checks:
+                break
+        if not selected:
             break
     return {
         identity: tuple(edges)
@@ -846,11 +994,22 @@ def _build_schema_three_routes(
     for item in declarations:
         by_file_symbol.setdefault((item.location.path, item.location.symbol.lower()), []).append(item)
         by_language_symbol.setdefault((item.language, item.location.symbol.lower()), []).append(item)
-    resolved_by_declaration = {
-        identity: _resolve_calls(declaration, by_file_symbol, by_language_symbol)
-        for identity, declaration in by_identity.items()
+    selected_declarations, strong_by_declaration, weak_by_declaration = _allocate_schema_three_references(
+        declarations,
+        limits.edge_count,
+        by_file_symbol,
+        by_language_symbol,
+    )
+    selected_by_identity = {
+        _location_identity(item.location): item for item in selected_declarations
     }
-    outgoing = _allocate_schema_three_edges(resolved_by_declaration, limits.edge_count)
+    outgoing = _allocate_schema_three_edges(
+        strong_by_declaration,
+        weak_by_declaration,
+        selected_by_identity,
+        by_language_symbol,
+        limits.edge_count,
+    )
     edge_count = sum(len(edges) for edges in outgoing.values())
     incoming: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {
         identity: [] for identity in by_identity
@@ -893,7 +1052,7 @@ def _build_schema_three_routes(
                     break
             if len(retained) >= limits.route_count:
                 break
-    return tuple(retained.values()), edge_count, incoming, by_identity
+    return tuple(retained.values()), edge_count, incoming, selected_by_identity
 
 
 def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits) -> tuple[tuple[_Route, ...], int]:

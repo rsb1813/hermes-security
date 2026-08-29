@@ -205,6 +205,93 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertTrue(any(row["strength"] == "import-linked" for row in rows))
         self.assertFalse(any(row["strength"] == "name-only" for row in rows))
 
+    def test_schema_three_reference_budget_matches_the_edge_cap(self) -> None:
+        limits = GuidanceLimits(4096, 20, 1, 20, 20, 4096, 4)
+        original = semantic_guidance._allocate_schema_three_references
+        with mock.patch.object(
+            semantic_guidance,
+            "_allocate_schema_three_references",
+            wraps=original,
+        ) as allocator:
+            self._build_with_limits(
+                "reference-budget",
+                {
+                    "api.ts": "export function handle(request) { alpha(request.query.q); beta(request.query.q); gamma(request.query.q); }\n",
+                    "alpha.ts": "export function alpha(value) { return value; }\n",
+                    "beta.ts": "export function beta(value) { return value; }\n",
+                    "gamma.ts": "export function gamma(value) { return value; }\n",
+                },
+                limits,
+                guidance_schema_version=3,
+            )
+        self.assertEqual(allocator.call_args.args[1], limits.edge_count)
+
+    def test_schema_three_zero_edge_budget_keeps_same_declaration_direct_routes(self) -> None:
+        result = self._build_with_limits(
+            "zero-edge-direct",
+            {"app.ts": "export function handle(request) { return child_process.exec(request.query.q); }\n"},
+            GuidanceLimits(4096, 20, 0, 20, 20, 4096, 4),
+            guidance_schema_version=3,
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        self.assertEqual(result.edge_count, 0)
+        self.assertEqual([row["strength"] for row in rows], ["direct"])
+
+    def test_schema_three_weak_target_iteration_stops_at_the_edge_budget(self) -> None:
+        class _ExplodingTargets:
+            def __init__(self, target: object) -> None:
+                self._target = target
+                self.count = 0
+
+            def __iter__(self) -> object:
+                return self
+
+            def __next__(self) -> object:
+                self.count += 1
+                if self.count > 1:
+                    raise AssertionError("weak target iterator exceeded the edge budget")
+                return self._target
+
+        caller_location = semantic_guidance._Location("caller.ts", 1, "caller")
+        target_location = semantic_guidance._Location("target.ts", 1, "target")
+        caller = semantic_guidance._Declaration(
+            caller_location,
+            "typescript",
+            None,
+            (),
+            (),
+            (),
+            (),
+            (semantic_guidance._Call("target", None, 1),),
+        )
+        target = semantic_guidance._Declaration(
+            target_location,
+            "typescript",
+            None,
+            (),
+            (),
+            (),
+            (),
+            (),
+        )
+        targets = _ExplodingTargets(target)
+        outgoing = semantic_guidance._allocate_schema_three_edges(
+            {},
+            {semantic_guidance._location_identity(caller_location): caller.calls},
+            {semantic_guidance._location_identity(caller_location): caller},
+            {("typescript", "target"): targets},
+            1,
+        )
+        self.assertEqual(
+            outgoing,
+            {
+                semantic_guidance._location_identity(caller_location): (
+                    (semantic_guidance._location_identity(target_location), "name-only"),
+                )
+            },
+        )
+        self.assertEqual(targets.count, 1)
+
     def test_schema_three_nested_output_adds_one_exact_import_linked_companion(self) -> None:
         result = self._build_with_limits(
             "nested-companion",
