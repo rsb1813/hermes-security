@@ -850,11 +850,13 @@ def _allocate_schema_three_references(
                 return call, edge
         return None
 
-    strong_active = deque(
-        (index, candidate)
-        for index in range(len(declarations))
-        if (candidate := next_strong(index)) is not None
-    )
+    strong_active = deque()
+    if remaining:
+        strong_active.extend(
+            (index, candidate)
+            for index in range(len(declarations))
+            if (candidate := next_strong(index)) is not None
+        )
     while remaining and strong_active:
         index, (call, edge) = strong_active.popleft()
         identity = _location_identity(declarations[index].location)
@@ -862,9 +864,10 @@ def _allocate_schema_three_references(
         retained[index].append(call)
         strong.setdefault(identity, []).append(edge)
         remaining -= 1
-        candidate = next_strong(index)
-        if candidate is not None:
-            strong_active.append((index, candidate))
+        if remaining:
+            candidate = next_strong(index)
+            if candidate is not None:
+                strong_active.append((index, candidate))
 
     weak_positions = [0] * len(declarations)
     seen_weak = [set() for _ in declarations]
@@ -899,9 +902,10 @@ def _allocate_schema_three_references(
         retained[index].append(call)
         weak.setdefault(identity, []).append(call)
         remaining -= 1
-        next_call = next_weak(index)
-        if next_call is not None:
-            weak_active.append((index, next_call))
+        if remaining:
+            next_call = next_weak(index)
+            if next_call is not None:
+                weak_active.append((index, next_call))
     selected_declarations = tuple(
         replace(declaration, calls=tuple(retained[index]))
         for index, declaration in enumerate(declarations)

@@ -292,6 +292,100 @@ class SemanticGuidanceTests(unittest.TestCase):
         )
         self.assertEqual(targets.count, 1)
 
+    def test_schema_three_reference_cap_does_not_prefetch_after_exact_terminal_edge(self) -> None:
+        location = semantic_guidance._Location("caller.ts", 1, "caller")
+        declaration = semantic_guidance._Declaration(
+            location,
+            "typescript",
+            None,
+            (),
+            (),
+            (),
+            (),
+            (semantic_guidance._Call("exact", None, 1),)
+            + tuple(semantic_guidance._Call(f"later{index}", None, 1) for index in range(1000)),
+        )
+
+        def resolve_exact(
+            item: semantic_guidance._Declaration,
+            call: semantic_guidance._Call,
+            by_file: object,
+            by_language: object,
+        ) -> tuple[tuple[str, int, str], str] | None:
+            if call.name == "exact":
+                return (("target.ts", 1, "target"), "direct")
+            return None
+
+        with mock.patch.object(
+            semantic_guidance,
+            "_resolve_exact_call",
+            side_effect=resolve_exact,
+        ) as resolver:
+            selected, strong, weak = semantic_guidance._allocate_schema_three_references(
+                (declaration,),
+                1,
+                {},
+                {},
+            )
+        identity = semantic_guidance._location_identity(location)
+        self.assertEqual(resolver.call_count, 1)
+        self.assertEqual(selected[0].calls, (semantic_guidance._Call("exact", None, 1),))
+        self.assertEqual(strong, {identity: ((("target.ts", 1, "target"), "direct"),)})
+        self.assertEqual(weak, {})
+
+    def test_schema_three_reference_cap_does_not_prefetch_duplicate_weak_calls(self) -> None:
+        location = semantic_guidance._Location("caller.ts", 1, "caller")
+        call = semantic_guidance._Call("target", None, 1)
+        declaration = semantic_guidance._Declaration(
+            location,
+            "typescript",
+            None,
+            (),
+            (),
+            (),
+            (),
+            (call,) * 1001,
+        )
+        with mock.patch.object(
+            semantic_guidance,
+            "_resolve_exact_call",
+            return_value=None,
+        ) as resolver:
+            selected, strong, weak = semantic_guidance._allocate_schema_three_references(
+                (declaration,),
+                1,
+                {},
+                {},
+            )
+        identity = semantic_guidance._location_identity(location)
+        self.assertEqual(resolver.call_count, 1002)
+        self.assertEqual(selected[0].calls, (call,))
+        self.assertEqual(strong, {})
+        self.assertEqual(weak, {identity: (call,)})
+
+    def test_schema_three_zero_reference_cap_does_not_prefetch_candidates(self) -> None:
+        declaration = semantic_guidance._Declaration(
+            semantic_guidance._Location("caller.ts", 1, "caller"),
+            "typescript",
+            None,
+            (),
+            (),
+            (),
+            (),
+            (semantic_guidance._Call("exact", None, 1),),
+        )
+        with mock.patch.object(semantic_guidance, "_resolve_exact_call") as resolver:
+            selected, strong, weak = semantic_guidance._allocate_schema_three_references(
+                (declaration,),
+                0,
+                {},
+                {},
+            )
+        self.assertEqual(resolver.call_count, 0)
+        self.assertEqual(selected[0].calls, ())
+        self.assertEqual(strong, {})
+        self.assertEqual(weak, {})
+
     def test_schema_three_reference_rounds_do_not_rescan_sparse_declarations(self) -> None:
         target = semantic_guidance._Location("target.ts", 1, "target")
         empty = tuple(
