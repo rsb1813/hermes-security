@@ -292,6 +292,131 @@ class SemanticGuidanceTests(unittest.TestCase):
         )
         self.assertEqual(targets.count, 1)
 
+    def test_schema_three_reference_rounds_do_not_rescan_sparse_declarations(self) -> None:
+        target = semantic_guidance._Location("target.ts", 1, "target")
+        empty = tuple(
+            semantic_guidance._Declaration(
+                semantic_guidance._Location(f"empty-{index}.ts", 1, f"empty{index}"),
+                "typescript",
+                None,
+                (),
+                (),
+                (),
+                (),
+                (),
+            )
+            for index in range(32)
+        )
+        active = semantic_guidance._Declaration(
+            semantic_guidance._Location("active.ts", 1, "active"),
+            "typescript",
+            None,
+            (),
+            (),
+            (),
+            (),
+            tuple(semantic_guidance._Call(f"call{index}", None, 1) for index in range(8)),
+        )
+        declarations = (*empty, active)
+        original_identity = semantic_guidance._location_identity
+        with mock.patch.object(
+            semantic_guidance,
+            "_resolve_exact_call",
+            side_effect=lambda declaration, call, by_file, by_language: (
+                (target.path, int(call.name.removeprefix("call")) + 1, target.symbol),
+                "direct",
+            ),
+        ), mock.patch.object(
+            semantic_guidance,
+            "_location_identity",
+            side_effect=original_identity,
+        ) as location_identity:
+            selected, strong, weak = semantic_guidance._allocate_schema_three_references(
+                declarations,
+                8,
+                {},
+                {},
+            )
+        self.assertEqual(sum(len(item.calls) for item in selected), 8)
+        self.assertEqual(sum(len(edges) for edges in strong.values()), 8)
+        self.assertEqual(weak, {})
+        self.assertLessEqual(location_identity.call_count, len(declarations) + 8 * 3)
+
+    def test_schema_three_edge_dedupe_uses_hashed_membership(self) -> None:
+        class _CountingIdentity:
+            comparisons = 0
+
+            def __init__(self, value: tuple[str, int, str]) -> None:
+                self.value = value
+
+            def __hash__(self) -> int:
+                return hash(self.value)
+
+            def __eq__(self, other: object) -> bool:
+                type(self).comparisons += 1
+                return isinstance(other, _CountingIdentity) and self.value == other.value
+
+        caller_location = semantic_guidance._Location("caller.ts", 1, "caller")
+        caller_identity = semantic_guidance._location_identity(caller_location)
+        caller = semantic_guidance._Declaration(
+            caller_location,
+            "typescript",
+            None,
+            (),
+            (),
+            (),
+            (),
+            (semantic_guidance._Call("target", None, 1),),
+        )
+        targets = tuple(
+            semantic_guidance._Declaration(
+                semantic_guidance._Location(f"target-{index}.ts", 1, "target"),
+                "typescript",
+                None,
+                (),
+                (),
+                (),
+                (),
+                (),
+            )
+            for index in range(16)
+        )
+        original_identity = semantic_guidance._location_identity
+
+        def counting_identity(location: semantic_guidance._Location) -> object:
+            identity = original_identity(location)
+            if location.path.startswith("target-"):
+                return _CountingIdentity(identity)
+            return identity
+
+        with mock.patch.object(semantic_guidance, "_location_identity", side_effect=counting_identity):
+            outgoing = semantic_guidance._allocate_schema_three_edges(
+                {},
+                {caller_identity: caller.calls},
+                {caller_identity: caller},
+                {("typescript", "target"): targets},
+                len(targets),
+            )
+        self.assertEqual(len(outgoing[caller_identity]), len(targets))
+        self.assertLessEqual(_CountingIdentity.comparisons, len(targets) * 2)
+
+    def test_schema_three_sparse_fanout_keeps_the_edge_cap_and_late_strong_route(self) -> None:
+        result = self._build_with_limits(
+            "sparse-fanout",
+            {
+                "early.ts": "export function noise(value) { target(value); target(value); target(value); target(value); }\n",
+                "one.ts": "export function target(value) { return value; }\n",
+                "two.ts": "export function target(value) { return value; }\n",
+                "api.ts": "import { run } from './sink'; export function handle(request) { return run(request.query.q); }\n",
+                "sink.ts": "export function run(value) { return child_process.exec(value); }\n",
+            },
+            GuidanceLimits(4096, 20, 2, 20, 20, 4096, 4),
+            guidance_schema_version=3,
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        self.assertEqual(result.edge_count, 2)
+        self.assertTrue(any(row["strength"] == "import-linked" for row in rows))
+
     def test_schema_three_nested_output_adds_one_exact_import_linked_companion(self) -> None:
         result = self._build_with_limits(
             "nested-companion",

@@ -837,63 +837,71 @@ def _allocate_schema_three_references(
     strong: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {}
     weak: dict[tuple[str, int, str], list[_Call]] = {}
     remaining = max(0, limit)
-    positions = [0] * len(declarations)
+    strong_positions = [0] * len(declarations)
     seen_strong = [set() for _ in declarations]
-    while remaining:
-        selected = False
-        for index, declaration in enumerate(declarations):
-            identity = _location_identity(declaration.location)
-            selected_for_declaration = False
-            while positions[index] < len(declaration.calls):
-                call = declaration.calls[positions[index]]
-                positions[index] += 1
-                edge = _resolve_exact_call(declaration, call, by_file_symbol, by_language_symbol)
-                if edge is None or edge in seen_strong[index]:
-                    continue
-                seen_strong[index].add(edge)
-                retained[index].append(call)
-                strong.setdefault(identity, []).append(edge)
-                selected = True
-                selected_for_declaration = True
-                break
-            if not selected_for_declaration:
-                continue
-            remaining -= 1
-            if not remaining:
-                break
-        if not selected:
-            break
-    positions = [0] * len(declarations)
+
+    def next_strong(index: int) -> tuple[_Call, tuple[tuple[str, int, str], str]] | None:
+        declaration = declarations[index]
+        while strong_positions[index] < len(declaration.calls):
+            call = declaration.calls[strong_positions[index]]
+            strong_positions[index] += 1
+            edge = _resolve_exact_call(declaration, call, by_file_symbol, by_language_symbol)
+            if edge is not None and edge not in seen_strong[index]:
+                return call, edge
+        return None
+
+    strong_active = deque(
+        (index, candidate)
+        for index in range(len(declarations))
+        if (candidate := next_strong(index)) is not None
+    )
+    while remaining and strong_active:
+        index, (call, edge) = strong_active.popleft()
+        identity = _location_identity(declarations[index].location)
+        seen_strong[index].add(edge)
+        retained[index].append(call)
+        strong.setdefault(identity, []).append(edge)
+        remaining -= 1
+        candidate = next_strong(index)
+        if candidate is not None:
+            strong_active.append((index, candidate))
+
+    weak_positions = [0] * len(declarations)
     seen_weak = [set() for _ in declarations]
-    while remaining:
-        selected = False
-        for index, declaration in enumerate(declarations):
-            identity = _location_identity(declaration.location)
-            selected_for_declaration = False
-            while positions[index] < len(declaration.calls):
-                call = declaration.calls[positions[index]]
-                positions[index] += 1
-                if (
-                    call.qualifier is not None
-                    or _resolve_exact_call(declaration, call, by_file_symbol, by_language_symbol) is not None
-                ):
-                    continue
-                key = (declaration.language, call.name)
-                if key in seen_weak[index]:
-                    continue
-                seen_weak[index].add(key)
-                retained[index].append(call)
-                weak.setdefault(identity, []).append(call)
-                selected = True
-                selected_for_declaration = True
-                break
-            if not selected_for_declaration:
+
+    def next_weak(index: int) -> _Call | None:
+        declaration = declarations[index]
+        while weak_positions[index] < len(declaration.calls):
+            call = declaration.calls[weak_positions[index]]
+            weak_positions[index] += 1
+            if (
+                call.qualifier is not None
+                or _resolve_exact_call(declaration, call, by_file_symbol, by_language_symbol) is not None
+            ):
                 continue
-            remaining -= 1
-            if not remaining:
-                break
-        if not selected:
-            break
+            key = (declaration.language, call.name)
+            if key not in seen_weak[index]:
+                return call
+        return None
+
+    weak_active = deque()
+    if remaining:
+        weak_active.extend(
+            (index, call)
+            for index in range(len(declarations))
+            if (call := next_weak(index)) is not None
+        )
+    while remaining and weak_active:
+        index, call = weak_active.popleft()
+        declaration = declarations[index]
+        identity = _location_identity(declaration.location)
+        seen_weak[index].add((declaration.language, call.name))
+        retained[index].append(call)
+        weak.setdefault(identity, []).append(call)
+        remaining -= 1
+        next_call = next_weak(index)
+        if next_call is not None:
+            weak_active.append((index, next_call))
     selected_declarations = tuple(
         replace(declaration, calls=tuple(retained[index]))
         for index, declaration in enumerate(declarations)
@@ -915,62 +923,50 @@ def _allocate_schema_three_edges(
     limit: int,
 ) -> dict[tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]]:
     allocated: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {}
+    allocated_edges: dict[tuple[str, int, str], set[tuple[tuple[str, int, str], str]]] = {}
     remaining = max(0, limit)
-    strong_queues = [
+    strong_active = deque(
         (identity, deque(edges))
         for identity, edges in strong_by_declaration.items()
-    ]
-    while remaining:
-        selected = False
-        for identity, queue in strong_queues:
-            if not queue:
-                continue
-            edge = queue.popleft()
-            if edge in allocated.get(identity, ()):
-                continue
+        if edges
+    )
+    while remaining and strong_active:
+        identity, queue = strong_active.popleft()
+        edge = queue.popleft()
+        seen = allocated_edges.setdefault(identity, set())
+        if edge not in seen:
+            seen.add(edge)
             allocated.setdefault(identity, []).append(edge)
             remaining -= 1
-            selected = True
-            if not remaining:
-                break
-        if not selected:
-            break
-    weak_queues = {
-        identity: deque(calls)
+        if queue:
+            strong_active.append((identity, queue))
+    weak_active = deque(
+        (identity, deque(calls), None)
         for identity, calls in weak_by_declaration.items()
-    }
-    target_iterators: dict[tuple[str, int, str], object] = {}
+        if calls
+    )
     target_checks = remaining
-    while remaining and target_checks:
-        selected = False
-        for identity in declarations:
-            queue = weak_queues.get(identity)
-            if not queue:
+    while remaining and target_checks and weak_active:
+        identity, queue, iterator = weak_active.popleft()
+        while target_checks:
+            if iterator is None:
+                if not queue:
+                    break
+                call = queue.popleft()
+                iterator = iter(by_language_symbol.get((declarations[identity].language, call.name), ()))
+            try:
+                target = next(iterator)
+            except StopIteration:
+                iterator = None
                 continue
-            while target_checks:
-                iterator = target_iterators.get(identity)
-                if iterator is None:
-                    if not queue:
-                        break
-                    call = queue.popleft()
-                    iterator = iter(by_language_symbol.get((declarations[identity].language, call.name), ()))
-                    target_iterators[identity] = iterator
-                try:
-                    target = next(iterator)
-                except StopIteration:
-                    target_iterators.pop(identity, None)
-                    continue
-                target_checks -= 1
-                edge = (_location_identity(target.location), "name-only")
-                if edge in allocated.get(identity, ()):
-                    continue
+            target_checks -= 1
+            edge = (_location_identity(target.location), "name-only")
+            seen = allocated_edges.setdefault(identity, set())
+            if edge not in seen:
+                seen.add(edge)
                 allocated.setdefault(identity, []).append(edge)
                 remaining -= 1
-                selected = True
-                break
-            if not remaining or not target_checks:
-                break
-        if not selected:
+            weak_active.append((identity, queue, iterator))
             break
     return {
         identity: tuple(edges)
