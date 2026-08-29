@@ -165,6 +165,733 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(row["eligible_search_passes"], ["forward"])
         self.assertEqual(row["proof_status"], "investigation_only")
 
+    def test_schema_three_emits_compact_sink_first_index_for_structural_operations(self) -> None:
+        result = self._build(
+            "schema-three-operation-index",
+            {
+                "src/state.ts": (
+                    "export function apply(target, value) {\n"
+                    "  target.custom(value);\n"
+                    "  target.setting = value;\n"
+                    "}\n"
+                )
+            },
+            guidance_schema_version=3,
+            components={"src/state.ts": "component-state"},
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        structural = [row for row in rows if row["hint_kind"] == "operation-index"]
+        self.assertEqual(len(structural), 1)
+        self.assertEqual(structural[0]["component"], "component-state")
+        self.assertEqual(structural[0]["proof_status"], "investigation_only")
+        self.assertEqual(structural[0]["reason_codes"], ["operation_context", "structural_index"])
+        self.assertEqual(
+            structural[0]["entries"],
+            [
+                {
+                    "p": "src/state.ts",
+                    "q": "f",
+                    "s": ["2c", "3m"],
+                }
+            ],
+        )
+
+    def test_schema_three_operation_index_is_byte_deterministic(self) -> None:
+        files = {
+            "src/state.ts": (
+                "export function apply(target, value) {\n"
+                "  target.custom(value);\n"
+                "  target.setting = value;\n"
+                "}\n"
+            )
+        }
+        first = self._build(
+            "schema-three-operation-index-deterministic-first",
+            files,
+            guidance_schema_version=3,
+        )
+        second = self._build(
+            "schema-three-operation-index-deterministic-second",
+            files,
+            guidance_schema_version=3,
+        )
+        self.assertEqual(first.canonical_bytes, second.canonical_bytes)
+
+    def test_schema_three_emits_local_assignment_context_without_duplicate_mutation(self) -> None:
+        result = self._build(
+            "schema-three-assignment-context",
+            {
+                "src/state.ts": (
+                    "export function apply(target, value) {\n"
+                    "  let next = value;\n"
+                    "  target.setting = next;\n"
+                    "}\n"
+                )
+            },
+            guidance_schema_version=3,
+            components={"src/state.ts": "component-state"},
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        structural = [row for row in rows if row["hint_kind"] == "operation-index"]
+        self.assertEqual(
+            structural[0]["entries"][0]["s"],
+            ["2a", "3m"],
+        )
+
+    def test_member_mutation_scanner_keeps_multiple_updates_on_one_line(self) -> None:
+        mutations = semantic_guidance._member_mutations(
+            ["target.first = value; target.second = value;"],
+            1,
+        )
+        self.assertEqual(
+            [(mutation.line, mutation.signature) for mutation in mutations],
+            [(1, "first"), (1, "second")],
+        )
+
+    def test_structural_scanners_mark_only_parameter_linked_operations(self) -> None:
+        calls = semantic_guidance._calls(
+            ["client.use(value); client.idle(constant);"],
+            1,
+            frozenset({"value"}),
+        )
+        mutations = semantic_guidance._member_mutations(
+            ["target.first = constant; other.second = value; plain.third = constant;"],
+            1,
+            frozenset({"target", "value"}),
+        )
+        self.assertEqual([call.parameter_flow for call in calls], [True, False])
+        self.assertEqual(
+            [mutation.parameter_flow for mutation in mutations],
+            [True, True, False],
+        )
+
+    def test_call_scanner_counts_unique_argument_identifiers(self) -> None:
+        calls = semantic_guidance._calls(
+            ["client.use(first, second, first, third);"],
+            1,
+        )
+        self.assertEqual(calls[0].argument_identifier_count, 3)
+
+        nested = semantic_guidance._calls(
+            ["client.use(first, helper(second, third), fourth);"],
+            1,
+        )
+        outer = next(call for call in nested if call.name == "use")
+        self.assertEqual(outer.argument_identifier_count, 5)
+
+    def test_parameter_parser_does_not_treat_python_body_calls_as_parameters(self) -> None:
+        parameters = semantic_guidance._declaration_parameters(
+            [
+                "def handle(request):",
+                "    client.use(value)",
+                "    return request",
+            ],
+            "python",
+        )
+        self.assertEqual(parameters, frozenset({"request"}))
+
+    def test_structural_flow_priority_tracks_one_local_assignment_hop(self) -> None:
+        declaration = semantic_guidance._declaration_from_block(
+            "src/state.ts",
+            "typescript",
+            "apply",
+            1,
+            [
+                "export function apply(value) {",
+                "  let next = value;",
+                "  client.use(next);",
+                "}",
+            ],
+        )
+        call = next(call for call in declaration.calls if call.name == "use")
+        self.assertTrue(call.parameter_flow)
+
+    def test_assignment_context_requires_parameter_flow_on_the_assignment_side(self) -> None:
+        result = self._build(
+            "schema-three-assignment-side-flow",
+            {
+                "src/state.ts": (
+                    "export function apply(value) { let unrelated = 0; client.use(value); }\n"
+                )
+            },
+            guidance_schema_version=3,
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        structural = [row for row in rows if row["hint_kind"] == "operation-index"]
+        self.assertEqual(structural[0]["entries"][0]["s"], ["1c"])
+
+    def test_structural_sites_keep_distinct_operations_on_a_known_sink_line(self) -> None:
+        path = "src/state.ts"
+        location = semantic_guidance._Location(path, 1, "apply")
+        declaration = semantic_guidance._Declaration(
+            location,
+            "typescript",
+            None,
+            (),
+            (("command", semantic_guidance._Location(path, 2, "child_process.exec")),),
+            (),
+            (),
+            (semantic_guidance._Call("custom", "client", 2),),
+            (semantic_guidance._Mutation(2, "flag"),),
+        )
+        sites = semantic_guidance._structural_sites(
+            (declaration,),
+            {path: "component"},
+        )
+        self.assertEqual(
+            {(site.family, site.signature) for site in sites},
+            {("call", "custom"), ("mutation", "flag")},
+        )
+
+    def test_schema_three_assignment_context_ignores_comparisons_arrows_and_object_properties(self) -> None:
+        result = self._build(
+            "schema-three-assignment-context-decoys",
+            {
+                "src/compare.ts": (
+                    "export function compare(left, right) {\n"
+                    "  if (left === right || left <= right || left >= right) return true;\n"
+                    "  const constant = 42;\n"
+                    "  const mapper = (value) => ({ value });\n"
+                    "  return { left, right, mapper };\n"
+                    "}\n"
+                )
+            },
+            guidance_schema_version=3,
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        structural = [row for row in rows if row["hint_kind"] == "operation-index"]
+        self.assertEqual(
+            structural[0]["entries"][0]["s"],
+            ["4a"],
+        )
+
+    def test_schema_three_operation_context_ignores_strings_comments_and_object_literals(self) -> None:
+        result = self._build(
+            "schema-three-operation-context-decoys",
+            {
+                "src/format.ts": (
+                    "export function format(value) {\n"
+                    "  // target.other(value); target.flag = value;\n"
+                    "  return { setting: value, text: 'target.custom(value); target.setting = value' };\n"
+                    "}\n"
+                )
+            },
+            guidance_schema_version=3,
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        self.assertFalse(any(row["hint_kind"] == "operation-index" for row in rows))
+
+    def test_operation_index_is_schema_three_only(self) -> None:
+        files = {"state.ts": "export function apply(target, value) { target.custom(value); target.setting = value; }\n"}
+        legacy = self._build("operation-context-v1", files, guidance_schema_version=1)
+        annotated = self._build("operation-context-v2", files, guidance_schema_version=2)
+        structural = self._build("operation-context-v3", files, guidance_schema_version=3)
+        self.assertEqual(legacy.canonical_bytes, b"")
+        self.assertEqual(annotated.canonical_bytes, b"")
+        self.assertTrue(structural.canonical_bytes)
+
+    def test_schema_three_operation_index_rotates_components_within_the_row_cap(self) -> None:
+        files = {
+            "a/first.ts": "export function first(target, value) { target.alpha(value); }\n",
+            "a/second.ts": "export function second(target, value) { target.beta(value); }\n",
+            "b/third.ts": "export function third(target, value) { target.gamma(value); }\n",
+        }
+        result = self._build_with_limits(
+            "operation-context-component-fairness",
+            files,
+            GuidanceLimits(4096, 20, 20, 20, 2, 4096, 4),
+            guidance_schema_version=3,
+            components={
+                "a/first.ts": "component-a",
+                "a/second.ts": "component-a",
+                "b/third.ts": "component-b",
+            },
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["component"] for row in rows}, {"component-a", "component-b"})
+        self.assertTrue(all(row["hint_kind"] == "operation-index" for row in rows))
+
+    def test_schema_three_operation_index_prefers_reused_signatures_before_singletons(self) -> None:
+        self.assertEqual(
+            semantic_guidance._operation_index_signature_priority(2)[0],
+            semantic_guidance._operation_index_signature_priority(7)[0],
+        )
+        self.assertLess(
+            semantic_guidance._operation_index_signature_priority(7)[0],
+            semantic_guidance._operation_index_signature_priority(8)[0],
+        )
+        self.assertLess(
+            semantic_guidance._operation_index_signature_priority(1)[0],
+            semantic_guidance._operation_index_signature_priority(8)[0],
+        )
+        sites = (
+            semantic_guidance._StructuralSite("component", "a/one.ts", 1, "call", "unique-one"),
+            semantic_guidance._StructuralSite("component", "a/two.ts", 1, "call", "unique-two"),
+            semantic_guidance._StructuralSite("component", "z/first.ts", 1, "call", "shared"),
+            semantic_guidance._StructuralSite("component", "z/second.ts", 1, "call", "shared"),
+        )
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+        )
+        self.assertEqual(
+            [entry["p"] for entry in rows[0]["entries"][:2]],
+            ["z/first.ts", "z/second.ts"],
+        )
+
+    def test_schema_three_operation_index_prefers_calls_within_a_reuse_lane(self) -> None:
+        sites = (
+            semantic_guidance._StructuralSite(
+                "component", "a/assignment-first.ts", 1, "assignment", "shared"
+            ),
+            semantic_guidance._StructuralSite(
+                "component", "a/assignment-second.ts", 1, "assignment", "shared"
+            ),
+            semantic_guidance._StructuralSite(
+                "component", "z/call-first.ts", 1, "call", "shared"
+            ),
+            semantic_guidance._StructuralSite(
+                "component", "z/call-second.ts", 1, "call", "shared"
+            ),
+        )
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+        )
+        self.assertEqual(
+            [entry["p"] for row in rows for entry in row["entries"]],
+            [
+                "z/call-first.ts",
+                "z/call-second.ts",
+                "a/assignment-first.ts",
+                "a/assignment-second.ts",
+            ],
+        )
+
+    def test_schema_three_operation_index_prefers_complex_calls_within_a_lane(self) -> None:
+        sites = (
+            semantic_guidance._StructuralSite(
+                "component", "a/simple-first.ts", 1, "call", "shared"
+            ),
+            semantic_guidance._StructuralSite(
+                "component", "b/simple-second.ts", 1, "call", "shared"
+            ),
+            semantic_guidance._StructuralSite(
+                "component",
+                "z/complex-first.ts",
+                1,
+                "call",
+                "shared",
+                argument_identifier_count=3,
+            ),
+            semantic_guidance._StructuralSite(
+                "component",
+                "z/complex-second.ts",
+                1,
+                "call",
+                "shared",
+                argument_identifier_count=4,
+            ),
+        )
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+        )
+        self.assertEqual(
+            [entry["p"] for row in rows for entry in row["entries"]],
+            [
+                "z/complex-first.ts",
+                "z/complex-second.ts",
+                "a/simple-first.ts",
+                "b/simple-second.ts",
+            ],
+        )
+
+    def test_schema_three_operation_index_rotates_reused_signature_occurrences(self) -> None:
+        sites = (
+            semantic_guidance._StructuralSite(
+                "component", "a/alpha-first.ts", 1, "call", "alpha"
+            ),
+            semantic_guidance._StructuralSite(
+                "component", "b/alpha-second.ts", 1, "call", "alpha"
+            ),
+            semantic_guidance._StructuralSite(
+                "component", "c/beta-first.ts", 1, "call", "beta"
+            ),
+            semantic_guidance._StructuralSite(
+                "component", "d/beta-second.ts", 1, "call", "beta"
+            ),
+        )
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+        )
+        self.assertEqual(
+            [entry["p"] for row in rows for entry in row["entries"]],
+            [
+                "a/alpha-first.ts",
+                "c/beta-first.ts",
+                "b/alpha-second.ts",
+                "d/beta-second.ts",
+            ],
+        )
+
+    def test_schema_three_operation_index_balances_parameter_flow_and_reuse(self) -> None:
+        sites = (
+            semantic_guidance._StructuralSite(
+                "component",
+                "a/singleton.ts",
+                1,
+                "call",
+                "unique",
+                parameter_flow=True,
+            ),
+            semantic_guidance._StructuralSite(
+                "component",
+                "z/linked.ts",
+                1,
+                "call",
+                "shared",
+                parameter_flow=True,
+            ),
+            semantic_guidance._StructuralSite(
+                "component",
+                "z/generic.ts",
+                1,
+                "call",
+                "shared",
+            ),
+        )
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+        )
+        self.assertEqual(
+            [entry["p"] for row in rows for entry in row["entries"]],
+            ["z/linked.ts", "z/generic.ts", "a/singleton.ts"],
+        )
+
+    def test_schema_three_operation_index_interleaves_flow_and_generic_reuse_rows(self) -> None:
+        flow_sites = tuple(
+            semantic_guidance._StructuralSite(
+                "component",
+                path,
+                index + 1,
+                "call",
+                f"flow-{index}",
+                parameter_flow=True,
+            )
+            for path in ("z/flow-first.ts", "z/flow-second.ts")
+            for index in range(300)
+        )
+        generic_sites = (
+            semantic_guidance._StructuralSite(
+                "component", "a/generic-first.ts", 1, "call", "generic"
+            ),
+            semantic_guidance._StructuralSite(
+                "component", "a/generic-second.ts", 1, "call", "generic"
+            ),
+        )
+        sites = (*flow_sites, *generic_sites)
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(128 * 1024, 800, 800, 800, 200, 128 * 1024, 4),
+        )
+        entry_paths = [entry["p"] for row in rows for entry in row["entries"]]
+        lanes = [
+            "flow" if row["entries"][0]["p"].startswith("z/flow-") else "generic"
+            for row in rows[:3]
+        ]
+        self.assertEqual(lanes, ["flow", "flow", "generic"])
+        self.assertLess(
+            entry_paths.index("a/generic-first.ts"),
+            max(
+                index
+                for index, path in enumerate(entry_paths)
+                if path in {"z/flow-first.ts", "z/flow-second.ts"}
+            ),
+        )
+
+    def test_schema_three_operation_index_finishes_reused_chunks_before_singletons(self) -> None:
+        reused = tuple(
+            semantic_guidance._StructuralSite(
+                "component",
+                path,
+                index + 1,
+                "call",
+                f"shared-{index}",
+            )
+            for path in ("z/first.ts", "z/second.ts")
+            for index in range(130)
+        )
+        singleton = semantic_guidance._StructuralSite(
+            "component",
+            "a/singleton.ts",
+            1,
+            "call",
+            "unique",
+        )
+        sites = (*reused, singleton)
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(64 * 1024, 400, 400, 400, 100, 64 * 1024, 4),
+        )
+        entry_paths = [entry["p"] for row in rows for entry in row["entries"]]
+        self.assertGreater(
+            entry_paths.index("a/singleton.ts"),
+            max(
+                index
+                for index, path in enumerate(entry_paths)
+                if path in {"z/first.ts", "z/second.ts"}
+            ),
+        )
+
+    def test_schema_three_operation_index_finishes_reused_component_rows_before_singletons(self) -> None:
+        reused = tuple(
+            semantic_guidance._StructuralSite(
+                "component-reused",
+                path,
+                index + 1,
+                "call",
+                f"shared-{index}",
+            )
+            for path in ("z/first.ts", "z/second.ts")
+            for index in range(300)
+        )
+        singleton = semantic_guidance._StructuralSite(
+            "component-singleton",
+            "a/singleton.ts",
+            1,
+            "call",
+            "unique",
+        )
+        sites = (*reused, singleton)
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(128 * 1024, 800, 800, 800, 200, 128 * 1024, 4),
+        )
+        components = [row["component"] for row in rows]
+        self.assertGreater(
+            components.index("component-singleton"),
+            max(
+                index
+                for index, component in enumerate(components)
+                if component == "component-reused"
+            ),
+        )
+
+    def test_schema_three_structural_site_retention_uses_the_existing_edge_cap(self) -> None:
+        limits = GuidanceLimits(4096, 20, 2, 20, 20, 4096, 4)
+        with mock.patch.object(
+            semantic_guidance,
+            "_operation_index_rows",
+            wraps=semantic_guidance._operation_index_rows,
+        ) as indexer:
+            self._build_with_limits(
+                "operation-index-site-cap",
+                {
+                    "src/state.ts": (
+                        "export function apply(value) {\n"
+                        "  client.first(value);\n"
+                        "  client.second(value);\n"
+                        "  target.first = value;\n"
+                        "  target.second = value;\n"
+                        "  let third = value;\n"
+                        "  let fourth = value;\n"
+                        "}\n"
+                    )
+                },
+                limits,
+                guidance_schema_version=3,
+            )
+        self.assertLessEqual(len(indexer.call_args.args[0]), limits.edge_count)
+
+    def test_schema_three_operation_index_skips_a_site_that_cannot_fit_one_row(self) -> None:
+        path = f"src/{'nested-' * 300}file.ts"
+        rows = semantic_guidance._operation_index_rows(
+            (semantic_guidance._StructuralSite("component", path, 1, "call", "shared"),),
+            {path: ("forward",)},
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+        )
+        self.assertEqual(rows, ())
+
+    def test_schema_three_operation_index_packs_more_sites_than_the_row_cap(self) -> None:
+        files = {
+            f"src/file-{index}.ts": (
+                f"export function item{index}(client, value) {{ client.action{index}(value); }}\n"
+            )
+            for index in range(12)
+        }
+        result = self._build_with_limits(
+            "operation-index-packing",
+            files,
+            GuidanceLimits(16 * 1024, 100, 100, 100, 1, 4096, 4),
+            guidance_schema_version=3,
+            components={path: "component-one" for path in files},
+        )
+        row = json.loads(result.canonical_bytes)
+        self.assertEqual(row["hint_kind"], "operation-index")
+        self.assertEqual(len(row["entries"]), 12)
+        self.assertEqual(sum(len(entry["s"]) for entry in row["entries"]), 12)
+
+    def test_schema_three_operation_index_keeps_late_mutations_in_large_declarations(self) -> None:
+        mutations = "\n".join(
+            f"  target.field{index} = value;" for index in range(10)
+        )
+        result = self._build(
+            "operation-index-late-mutation",
+            {
+                "src/state.ts": (
+                    "export function apply(target, value) {\n"
+                    f"{mutations}\n"
+                    "}\n"
+                )
+            },
+            guidance_schema_version=3,
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        sites = [
+            site
+            for row in rows
+            if row["hint_kind"] == "operation-index"
+            for entry in row["entries"]
+            for site in entry["s"]
+        ]
+        self.assertIn("11m", sites)
+
+    def test_schema_three_operation_index_never_displaces_the_only_high_signal_route(self) -> None:
+        files = {
+            "src/known.ts": (
+                "export function known(request) { return child_process.exec(request.query.q); }\n"
+            ),
+            "src/unknown.ts": (
+                "export function unknown(client, value) { client.custom(value); }\n"
+            ),
+        }
+        result = self._build_with_limits(
+            "operation-index-route-reserve",
+            files,
+            GuidanceLimits(4096, 20, 20, 20, 2, 4096, 4),
+            guidance_schema_version=3,
+            components={
+                "src/known.ts": "component-known",
+                "src/unknown.ts": "component-unknown",
+            },
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        self.assertEqual([row["hint_kind"] for row in rows], ["call-route"])
+        self.assertEqual(rows[0]["strength"], "direct")
+
+    def test_schema_three_operation_index_replaces_weak_routes_within_route_only_budget(self) -> None:
+        files = {
+            "src/known.ts": (
+                "export function known(request) { return child_process.exec(request.query.q); }\n"
+            ),
+            "src/entry.py": "def handle(request):\n    return run(request.args['q'])\n",
+            "src/sink.py": (
+                "import subprocess\ndef run(value):\n    return subprocess.run(value)\n"
+            ),
+            "src/unknown.ts": (
+                "export function unknown(client, value) { client.custom(value); }\n"
+            ),
+        }
+        limits = GuidanceLimits(16 * 1024, 40, 40, 40, 4, 16 * 1024, 4)
+        with mock.patch.object(semantic_guidance, "_operation_index_rows", return_value=()):
+            route_only = self._build_with_limits(
+                "operation-index-route-only-budget-baseline",
+                files,
+                limits,
+                guidance_schema_version=3,
+            )
+        result = self._build_with_limits(
+            "operation-index-route-only-budget",
+            files,
+            limits,
+            guidance_schema_version=3,
+        )
+        baseline_rows = [json.loads(line) for line in route_only.canonical_bytes.splitlines()]
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        self.assertLessEqual(len(result.canonical_bytes), len(route_only.canonical_bytes))
+        self.assertEqual(
+            [
+                line
+                for line in result.canonical_bytes.splitlines(keepends=True)
+                if json.loads(line).get("strength") != "name-only"
+                and json.loads(line)["hint_kind"] != "operation-index"
+            ],
+            [
+                line
+                for line in route_only.canonical_bytes.splitlines(keepends=True)
+                if json.loads(line).get("strength") != "name-only"
+            ],
+        )
+        self.assertTrue(any(row.get("strength") == "direct" for row in rows))
+        self.assertTrue(any(row["hint_kind"] == "operation-index" for row in rows))
+        self.assertLess(
+            sum(row.get("strength") == "name-only" for row in rows),
+            sum(row.get("strength") == "name-only" for row in baseline_rows),
+        )
+
+    def test_schema_three_operation_index_does_not_repeat_a_preserved_nested_location(self) -> None:
+        result = self._build(
+            "operation-index-nested-deduplication",
+            {
+                "src/render.ts": (
+                    "export function render(request, client) {\n"
+                    "  return `<script>${client.custom(request.query.q)}</script>`;\n"
+                    "}\n"
+                )
+            },
+            guidance_schema_version=3,
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        nested = [row for row in rows if row["hint_kind"] == "nested-output-context"]
+        self.assertEqual(len(nested), 1)
+        repeated = [
+            site
+            for row in rows
+            if row["hint_kind"] == "operation-index"
+            for entry in row["entries"]
+            if entry["p"] == nested[0]["operation"]["path"]
+            for site in entry["s"]
+            if site.startswith(f'{nested[0]["operation"]["line"]}')
+        ]
+        self.assertEqual(repeated, [])
+
+    def test_schema_three_structural_only_output_has_a_separate_small_cap(self) -> None:
+        index_rows = tuple(
+            semantic_guidance._canonical_operation_index_row(
+                f"component-{index}",
+                [
+                    {
+                        "p": f"src/file-{index}.ts",
+                        "q": "f",
+                        "s": ["1c"],
+                    }
+                ],
+            )
+            for index in range(40)
+        )
+        canonical, row_count = semantic_guidance._canonical_guidance(
+            (),
+            GuidanceLimits(1024, 1, 1, 1, 100, 1024 * 1024, 1),
+            3,
+            {},
+            {},
+            index_rows,
+        )
+        self.assertEqual(row_count, 32)
+        self.assertLessEqual(len(canonical), 64 * 1024)
+
     def test_nested_output_scanner_skips_sources_without_template_interpolation_markers(self) -> None:
         with mock.patch.object(
             nested_output_guidance,
@@ -965,8 +1692,8 @@ class SemanticGuidanceTests(unittest.TestCase):
             with self.subTest(name=name):
                 first = self._build(f"nested-goal-invalid-class-{name}-first", {"src/render.ts": source}, guidance_schema_version=3)
                 second = self._build(f"nested-goal-invalid-class-{name}-second", {"src/render.ts": source}, guidance_schema_version=3)
-                self.assertEqual(first.canonical_bytes, b"")
-                self.assertEqual(second.canonical_bytes, b"")
+                self.assertNotIn(b"nested-output-context", first.canonical_bytes)
+                self.assertNotIn(b"nested-output-context", second.canonical_bytes)
                 self.assertEqual(first.canonical_bytes, second.canonical_bytes)
 
     def test_nested_output_lexical_goal_accepts_balanced_typescript_class_headers(self) -> None:
@@ -1041,7 +1768,7 @@ class SemanticGuidanceTests(unittest.TestCase):
                 first = self._build(f"nested-token-bound-{name}-first", {"src/render.ts": source}, guidance_schema_version=3)
                 second = self._build(f"nested-token-bound-{name}-second", {"src/render.ts": source}, guidance_schema_version=3)
                 self.assertEqual(first.canonical_bytes, second.canonical_bytes)
-                self.assertEqual(first.canonical_bytes, b"")
+                self.assertNotIn(b"nested-output-context", first.canonical_bytes)
 
     def test_nested_output_keeps_templates_after_division_expressions(self) -> None:
         fixtures = {

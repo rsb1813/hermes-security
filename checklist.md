@@ -166,6 +166,17 @@
   - [x] Preserve preflight-before-start, per-task isolation, manifest-ordered artifacts, and deterministic hashes.
   - [x] Prove overlap and logical equivalence with deterministic fake executors before any paid run.
   - [ ] Measure end-to-end wall time under the new setting before any paid Mini run.
+- [x] Add bounded structural operation guidance before any further paid accuracy run.
+  - [x] Prove the retained discovery candidate ceiling is zero without treating candidates as verified findings.
+  - [x] Separate inventory, frontier, priority, semantic, and candidate coverage with aggregate-only private diagnostics.
+  - [x] Reject risk, component, and pass/component packet reordering after bounded offline comparison.
+  - [x] Prove calls, assignments, member access, and branches cover all retained vulnerable critical operations without using oracle data in generation.
+  - [x] Select a single-call schema-3 `operation-context` architecture after read-only high-effort review.
+  - [x] Add public RED tests for unknown calls, state mutations, simple assignments, decoys, prompt wording, and legacy bytes.
+  - [x] Replace lossy one-event rows with a bounded compact operation index after retained exact-line coverage remains 0/4.
+  - [x] Implement deterministic sink-first structural guidance without increasing semantic caps or model calls.
+  - [x] Rebuild and evaluate retained guidance; record measured 3/4 exact-line coverage and the unmet 4/4 target without overstating recall.
+  - [x] Run focused, full, bridge, compile, diff, and independent review gates.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
 

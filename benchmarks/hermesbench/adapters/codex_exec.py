@@ -518,7 +518,7 @@ def _prompt(
             )
             if hunt_evidence_protocol_version == PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION:
                 return semantic_prompt + pass_instructions
-            return semantic_prompt + pass_instructions + " For `nested-output-context` rows, prioritize actual source inspection of `output_context`; it is investigation only, and neither context nor reason codes are proof."
+            return semantic_prompt + pass_instructions + " For `nested-output-context`, inspect `output_context`; it is investigation only, not proof. For `operation-index`, `p/q/s` mean path/pass-codes/sites; `q` `f/b/g/p/s/x` means `forward/backward/guard/parser/state/general`. Use `q` only if its `p` exactly matches a submitted location; decode `q` to the full `search_pass` name, never the letter code; otherwise query frontier by exact path. Sites `<line><codes>` use `a/c/m` for assignment/call/mutation; trace backward to attacker-controlled input. It is an investigation root, never proof or a proven entry point."
         raise ValueError("Hunt evidence protocol is unsupported")
     candidate_rows = (
         [candidate.to_verification_projection() for candidate in candidates]

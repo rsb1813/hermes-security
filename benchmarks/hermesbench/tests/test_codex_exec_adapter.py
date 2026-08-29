@@ -173,7 +173,7 @@ class CodexExecAdapterTests(unittest.TestCase):
             1: "4713cf562c5efa5bf504b909bac0bf8f18673aca5991fd00b5e89b211d5f2c47",
             2: "8563f2276a113797a5896f1b500198afe519bf5cb497a98a526abbdbcef01dca",
             3: "98906c398f5e15319266983ce30d1b18cf4a45b100f4123956220a2eb447b006",
-            4: "6d565ccd1b04118ac5644054304abfe4dc82ee28ccdcd271edd0469d812b809b",
+            4: "d5f2c66747cea93824899fccaff98dc0ae06634d4529cf470e97c2f0d3e4cb14",
         }
         for version, digest in expected.items():
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
@@ -265,6 +265,22 @@ class CodexExecAdapterTests(unittest.TestCase):
         for instruction in ("nested-output-context", "output_context", "investigation only"):
             with self.subTest(instruction=instruction):
                 self.assertIn(instruction, v4_prompt)
+        for instruction in (
+            "operation-index",
+            "`p/q/s` mean path/pass-codes/sites",
+            "`q` `f/b/g/p/s/x` means `forward/backward/guard/parser/state/general`",
+            "Use `q` only if its `p` exactly matches a submitted location",
+            "decode `q` to the full `search_pass` name",
+            "never the letter code",
+            "otherwise query frontier by exact path",
+            "Sites `<line><codes>` use `a/c/m` for assignment/call/mutation",
+            "trace backward to attacker-controlled input",
+            "investigation root, never proof or a proven entry point",
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertIn(instruction, v4_prompt)
+                self.assertNotIn(instruction, v3_prompt)
+        self.assertLess(len(v4_prompt) - len(v3_prompt), 580)
 
     def test_hunt_discovery_requires_exact_semantic_guidance_reads_and_investigation_only_prompt(self) -> None:
         # Hunt discovery must attest separate priority and semantic guidance reads.

@@ -130,3 +130,15 @@ Verification: partial discovery and partial verification fixtures both produce c
 - Start with two workers. Parallelism is a wall-time optimization; token-cost reductions must come from zero-candidate local verification and fewer paid failures, not from an unsupported billing claim.
 
 Verification: deterministic fake executors prove real overlap, manifest-ordered byte-stable outputs, fail-before-start preflight behavior, isolated failure handling, frozen-control mismatch rejection, and identical logical results between one and two workers.
+
+## Current structural-discovery checkpoint
+
+- Protocol 4 now emits a schema-3-only compact `operation-index` for qualified calls, member mutations, and parameter-linked simple assignments. Compact `p`, `q`, and `s` fields retain path, eligible-pass, and exact structural-site information without source snippets or oracle data.
+- The scanner follows declaration parameters through one local assignment hop, parses balanced same-line call arguments, and counts distinct identifiers. Scheduling favors signatures reused two through seven times, uses a 2:1 parameter-flow lane, prioritizes complex calls, rotates repeated signature occurrences, and rotates components.
+- Existing direct, import-linked, and nested-output rows remain byte-for-byte first-class. Index rows replace only selected name-only rows inside the route-only row and byte footprint; structural-only output remains capped at 32 rows and 64 KiB. The discovery model-call count remains one.
+- Aggregate-only evaluation on four retained vulnerable snapshots improved exact critical-operation guidance from 0/4 before the compact index to 3/4 overall, with 2/4 contributed directly by the structural index. This is host-side guidance coverage, not end-to-end model recall or a vulnerability finding.
+- The final packet used 324,769 semantic bytes, 140 fewer than the 324,909-byte route-only baseline. It retained 144 index rows, 1,609 entries, and 10,144 exact structural sites; the largest row was 2,047 bytes. Snapshot integrity passed with two local preparation workers.
+- A state-transition ranking experiment regressed aggregate coverage to 2/4 overall and 1/4 structural. A later adjacent-row packing experiment produced no retained-data gain. Both were removed instead of stacking benchmark-specific exceptions.
+- Protocols 1 through 3, Standard, receipt validation, snapshot isolation, candidate caps, full-frontier eligibility, and the paid-run boundary remain unchanged. No model, network, container, or paid benchmark invocation was made for this unit.
+
+Verification: 124 semantic-guidance tests and all 458 HermesBench Python tests pass, with three and ten documented platform skips respectively. The Bun bridge passes its real CLI integration test, Python compilation succeeds, and `git diff --check` is clean. The retained 4/4 host-side target remains unmet and must not be represented as end-to-end discovery performance.

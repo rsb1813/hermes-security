@@ -202,10 +202,14 @@ snapshot bytes while retaining semantic guidance row schema `1` and the
 existing semantic discovery prompt. Version `3` uses semantic guidance row
 schema `2`, which adds `eligible_search_passes` derived only from the exact
 source, trace, and operation frontier paths of that row. Version `4` uses
-semantic guidance row schema `3`, which adds `hint_kind`, `output_context`, and
-the operation-path component so bounded nested-output contexts and ordinary
-call routes share one canonical packet. Versions `2`, `3`, and `4` read the
-priority packet exactly once, then read semantic guidance exactly once.
+semantic guidance row schema `3`, which adds component-aware call routes,
+bounded nested-output contexts, and compact `operation-index` rows in one
+canonical packet. An operation-index entry uses `p` for a frontier path, `q`
+for eligible-pass codes, and `s` for structural source sites encoded as a line
+number followed by `a` for assignment, `c` for call, or `m` for mutation. The
+`q` codes `f/b/g/p/s/x` mean `forward/backward/guard/parser/state/general`.
+Versions `2`, `3`, and `4` read the priority packet exactly once, then read
+semantic guidance exactly once.
 
 Semantic guidance is an investigation queue only. Its strength and eligible
 passes order investigation; neither proves attacker control, reachability,
@@ -224,6 +228,22 @@ Schema-3 nested-output rows identify only statically observed `script`,
 provenance. They remain `investigation_only`: an output-context hint is not a
 finding and does not establish exploitability or sanitizer failure. Protocol
 `4` discovery applies the same pass-attestation rules as protocol `3`.
+Schema-3 operation indexes are also `investigation_only`. They identify a
+source-inspection starting point, not an attacker-controlled entry point or a
+finding, and discovery must trace backward before proposing a candidate. When
+ordinary semantic routes are present, direct, import-linked, and nested-output
+rows are retained first. Index rows can replace only selected name-only rows
+inside the route-only row and byte footprint. A structural-only packet is
+separately capped at 32 rows and 64 KiB.
+
+The index reuses the existing edge cap for retained structural sites, limits
+each canonical row to 2 KiB, and rotates rows across components. Signatures
+reused two through seven times are scheduled before one-off or more common
+signatures. Inside that band, parameter-linked and generic rows use a 2:1
+schedule, calls precede assignments and mutations, and first occurrences rotate
+across signatures before later occurrences. Calls with at least three distinct
+argument identifiers are inspected first within their lane. These priorities
+allocate inspection bytes; they are not evidence.
 
 Semantic preparation is deterministic and bounded. Every source file is
 limited to 1 MiB. `hunt-balanced` scans at most 64 MiB, retains at most 50,000

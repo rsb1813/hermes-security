@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from collections import deque
+from collections import Counter, deque
 import hashlib
 import json
 import os
@@ -17,6 +17,32 @@ LEGACY_SEMANTIC_GUIDANCE_SCHEMA_VERSION = 1
 PASS_ANNOTATED_SEMANTIC_GUIDANCE_SCHEMA_VERSION = 2
 SEMANTIC_GUIDANCE_SCHEMA_VERSION = 3
 SUPPORTED_SEMANTIC_GUIDANCE_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+OPERATION_INDEX_FAMILY_CODES = {
+    "assignment": "a",
+    "call": "c",
+    "mutation": "m",
+}
+OPERATION_INDEX_FAMILY_PRIORITY = {
+    "call": 0,
+    "assignment": 1,
+    "mutation": 2,
+}
+OPERATION_INDEX_PASS_CODES = {
+    "forward": "f",
+    "backward": "b",
+    "guard": "g",
+    "parser": "p",
+    "state": "s",
+    "general": "x",
+}
+MAX_OPERATION_INDEX_SITES_PER_ENTRY = 128
+MAX_OPERATION_INDEX_ROW_BYTES = 2 * 1024
+MAX_OPERATION_INDEX_ONLY_ROWS = 32
+MAX_OPERATION_INDEX_ONLY_BYTES = 64 * 1024
+MAX_OPERATION_INDEX_PREFERRED_REUSED_SIGNATURE_FREQUENCY = 7
+MAX_OPERATION_INDEX_REUSED_SIGNATURE_FREQUENCY = 16
+MIN_OPERATION_INDEX_COMPLEX_CALL_IDENTIFIERS = 3
+OPERATION_INDEX_PARAMETER_FLOW_WEIGHT = 2
 MAX_FILE_BYTES = 1024 * 1024
 _CODE = "C"
 _STRING = "S"
@@ -122,6 +148,8 @@ class _Declaration:
     controls: tuple[_Location, ...]
     imports: tuple[_Import, ...]
     calls: tuple[_Call, ...]
+    mutations: tuple[_Mutation, ...] = ()
+    assignments: tuple[_Assignment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -137,6 +165,33 @@ class _Call:
     qualifier: str | None
     line: int
     arguments: str = ""
+    parameter_flow: bool = False
+    argument_identifier_count: int = 0
+
+
+@dataclass(frozen=True)
+class _Mutation:
+    line: int
+    signature: str
+    parameter_flow: bool = False
+
+
+@dataclass(frozen=True)
+class _Assignment:
+    line: int
+    signature: str
+    parameter_flow: bool
+
+
+@dataclass(frozen=True)
+class _StructuralSite:
+    component: str
+    path: str
+    line: int
+    family: str
+    signature: str
+    parameter_flow: bool = False
+    argument_identifier_count: int = 0
 
 
 _ModuleTargetIndex = dict[tuple[str, str, str], tuple[_Declaration, ...]]
@@ -203,15 +258,29 @@ def build_semantic_guidance(
     )
     if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
         routes, edge_count, incoming, by_identity = _build_schema_three_routes(declarations, limits)
-        routes = (*routes, *_nested_output_routes(nested_observations, incoming, by_identity))
+        operation_index_rows = _operation_index_rows(
+            _structural_sites(
+                declarations,
+                frontier_components_by_path,
+                limits.edge_count,
+            ),
+            frontier_passes_by_path,
+            limits,
+        )
+        routes = (
+            *routes,
+            *_nested_output_routes(nested_observations, incoming, by_identity),
+        )
     else:
         routes, edge_count = _build_routes(declarations, limits)
+        operation_index_rows = ()
     canonical_bytes, row_count = _canonical_guidance(
         routes,
         limits,
         guidance_schema_version,
         frontier_passes_by_path,
         frontier_components_by_path,
+        operation_index_rows,
     )
     return SemanticGuidance(
         canonical_bytes,
@@ -288,6 +357,7 @@ def _scan_files(
     skipped = 0
     total_bytes = 0
     retained_references = 0
+    retained_structural_sites = 0
     seen_paths: set[str] = set()
     nested_observations: list[tuple[str, object]] = []
     for raw_path in paths:
@@ -311,16 +381,35 @@ def _scan_files(
         if len(declarations) >= limits.declaration_count:
             continue
         extracted = _extract_declarations(relative_path, source, limits.declaration_count - len(declarations))
-        if retain_all_references:
-            declarations.extend(extracted)
-            continue
         for declaration in extracted:
+            remaining_structural_sites = max(
+                0,
+                limits.edge_count - retained_structural_sites,
+            )
+            mutations = declaration.mutations[:remaining_structural_sites]
+            remaining_structural_sites -= len(mutations)
+            assignments = declaration.assignments[:remaining_structural_sites]
+            retained_structural_sites += len(mutations) + len(assignments)
+            bounded_declaration = replace(
+                declaration,
+                mutations=mutations,
+                assignments=assignments,
+            )
+            if retain_all_references:
+                declarations.append(bounded_declaration)
+                continue
             remaining_references = max(0, limits.edge_count - retained_references)
             calls = declaration.calls[:remaining_references]
             remaining_references -= len(calls)
             imports = declaration.imports[:remaining_references]
             retained_references += len(calls) + len(imports)
-            declarations.append(replace(declaration, calls=calls, imports=imports))
+            declarations.append(
+                replace(
+                    bounded_declaration,
+                    calls=calls,
+                    imports=imports,
+                )
+            )
     return tuple(declarations), _ScanStats(scanned, skipped), tuple(nested_observations)
 
 
@@ -591,6 +680,13 @@ def _declaration_from_block(
     receiver: str | None = None,
 ) -> _Declaration:
     location = _Location(path, line, symbol)
+    parameters = _declaration_parameters(lines, language)
+    assignments = _assignments(lines, line, parameters)
+    flow_names = parameters | frozenset(
+        assignment.signature
+        for assignment in assignments
+        if assignment.parameter_flow
+    )
     source_locations = _anchor_locations(path, symbol, line, lines, SOURCE_ANCHORS)[:1]
     controls = _anchor_locations(path, symbol, line, lines, CONTROL_ANCHORS)
     operations: list[tuple[str, _Location]] = []
@@ -598,7 +694,18 @@ def _declaration_from_block(
         for offset, line_text in enumerate(lines):
             for callee in _operation_callees(line_text, anchors):
                 operations.append((family, _Location(path, line + offset, callee)))
-    return _Declaration(location, language, receiver.lower() if receiver else None, source_locations, tuple(operations), controls, (), _calls(lines, line))
+    return _Declaration(
+        location,
+        language,
+        receiver.lower() if receiver else None,
+        source_locations,
+        tuple(operations),
+        controls,
+        (),
+        _calls(lines, line, flow_names),
+        _member_mutations(lines, line, flow_names),
+        assignments,
+    )
 
 
 def _lexical_state_map(source: str, language: str) -> str:
@@ -711,9 +818,22 @@ def _state_is(states: str, start: int, end: int, state: str) -> bool:
     return start < end and end <= len(states) and all(value == state for value in states[start:end])
 
 
-def _calls(lines: list[str], start_line: int) -> tuple[_Call, ...]:
+def _calls(
+    lines: list[str],
+    start_line: int,
+    parameters: frozenset[str] = frozenset(),
+) -> tuple[_Call, ...]:
     calls: list[_Call] = []
     for offset, line in enumerate(lines):
+        if "(" not in line:
+            continue
+        opening_stack: list[int] = []
+        closing_by_opening: dict[int, int] = {}
+        for index, character in enumerate(line):
+            if character == "(":
+                opening_stack.append(index)
+            elif character == ")" and opening_stack:
+                closing_by_opening[opening_stack.pop()] = index
         for match in re.finditer(r"\b((?:[A-Za-z_$][\w$]*\s*\.\s*)*[A-Za-z_$][\w$]*)\s*\(", line):
             declaration_prefix = line[: match.start()].rstrip()
             if re.search(r"(?:^|\s)(?:def|func|function)\s*$", declaration_prefix):
@@ -721,9 +841,160 @@ def _calls(lines: list[str], start_line: int) -> tuple[_Call, ...]:
             parts = [part.strip().lower() for part in match.group(1).split(".")]
             if parts[-1] in {"def", "func", "function", "if", "for", "while", "switch", "catch"}:
                 continue
-            arguments = line[match.end():].split(")", 1)[0]
-            calls.append(_Call(parts[-1], parts[-2] if len(parts) > 1 else None, start_line + offset, arguments))
+            opening = match.end() - 1
+            closing = closing_by_opening.get(opening, len(line))
+            arguments = line[match.end() : closing]
+            qualifier = parts[-2] if len(parts) > 1 else None
+            identifiers = frozenset(
+                value.lower()
+                for value in re.findall(r"\b[A-Za-z_$][\w$]*\b", arguments)
+            )
+            calls.append(
+                _Call(
+                    parts[-1],
+                    qualifier,
+                    start_line + offset,
+                    arguments,
+                    bool(parameters & identifiers)
+                    or bool(parameters.intersection(parts[:-1])),
+                    len(identifiers),
+                )
+            )
     return tuple(calls)
+
+
+def _member_mutations(
+    lines: list[str],
+    start_line: int,
+    parameters: frozenset[str] = frozenset(),
+) -> tuple[_Mutation, ...]:
+    pattern = re.compile(
+        r"(?P<target>\b[A-Za-z_$][\w$]*(?:(?:\s*\.\s*[A-Za-z_$][\w$]*)|(?:\s*\[[^\]\n]{1,256}\]))+)"
+        r"\s*(?:\?\?=|\|\|=|&&=|<<=|>>=|\*\*=|[+\-*/%&|^]?=(?!=|>))"
+    )
+    mutations: list[_Mutation] = []
+    for offset, line in enumerate(lines):
+        for match in pattern.finditer(line):
+            members = re.findall(r"\.\s*([A-Za-z_$][\w$]*)", match.group("target"))
+            signature = members[-1].lower() if members else "computed-member"
+            target_root = re.match(r"[A-Za-z_$][\w$]*", match.group("target"))
+            right_hand_side = line[match.end() :].split(";", 1)[0]
+            identifiers = frozenset(
+                value.lower()
+                for value in re.findall(r"\b[A-Za-z_$][\w$]*\b", right_hand_side)
+            )
+            parameter_flow = bool(parameters & identifiers) or (
+                target_root is not None
+                and target_root.group(0).lower() in parameters
+            )
+            mutations.append(
+                _Mutation(start_line + offset, signature, parameter_flow)
+            )
+    return tuple(mutations)
+
+
+def _assignments(
+    lines: list[str],
+    start_line: int,
+    parameters: frozenset[str],
+) -> tuple[_Assignment, ...]:
+    pattern = re.compile(
+        r"(?:^|[;{}])\s*(?:(?:const|let|var)\s+)?"
+        r"(?P<target>[A-Za-z_$][\w$]*)"
+        r"(?:\s*:[^=;\n]{1,128})?\s*"
+        r"(?P<operator>\?\?=|\|\|=|&&=|<<=|>>=|\*\*=|:=|[+\-*/%&|^]?=(?!=|>))"
+    )
+    assignments: list[_Assignment] = []
+    for offset, line in enumerate(lines):
+        for match in pattern.finditer(line):
+            target = match.group("target").lower()
+            right_hand_side = line[match.end() :].split(";", 1)[0]
+            identifiers = frozenset(
+                value.lower()
+                for value in re.findall(r"\b[A-Za-z_$][\w$]*\b", right_hand_side)
+            )
+            parameter_flow = bool(parameters & identifiers)
+            if match.group("operator") not in {"=", ":="} and target in parameters:
+                parameter_flow = True
+            assignments.append(
+                _Assignment(
+                    start_line + offset,
+                    target,
+                    parameter_flow,
+                )
+            )
+    return tuple(assignments)
+
+
+def _declaration_parameters(
+    lines: list[str],
+    language: str,
+) -> frozenset[str]:
+    if language == "generic":
+        return frozenset()
+    header = "\n".join(lines[:8])
+    noise = {
+        "any",
+        "async",
+        "bool",
+        "boolean",
+        "const",
+        "def",
+        "export",
+        "float",
+        "func",
+        "function",
+        "int",
+        "interface",
+        "let",
+        "number",
+        "object",
+        "private",
+        "protected",
+        "public",
+        "self",
+        "static",
+        "str",
+        "string",
+        "this",
+        "var",
+        "void",
+    }
+    groups: list[str] = []
+    depth = 0
+    start = 0
+    for index, character in enumerate(header):
+        if depth == 0 and character == "{":
+            break
+        if depth == 0 and character == ":" and groups:
+            break
+        if character == "(":
+            if depth == 0:
+                start = index + 1
+            depth += 1
+        elif character == ")" and depth:
+            depth -= 1
+            if depth == 0:
+                groups.append(header[start:index])
+    if language == "python" and not groups:
+        match = re.search(r"\blambda\s+([^:\n]+):", header)
+        if match:
+            groups.append(match.group(1))
+    parameters: set[str] = set()
+    for group in groups:
+        for segment in group.split(","):
+            identifiers = [
+                value.lower()
+                for value in re.findall(r"\b[A-Za-z_$][\w$]*\b", segment)
+                if value.lower() not in noise
+            ]
+            if not identifiers:
+                continue
+            if segment.lstrip().startswith(("{", "[")):
+                parameters.update(identifiers)
+            else:
+                parameters.add(identifiers[0])
+    return frozenset(parameters)
 
 
 def _anchor_locations(
@@ -1154,6 +1425,423 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
     return tuple(retained.values()), edge_count
 
 
+def _structural_sites(
+    declarations: tuple[_Declaration, ...],
+    components_by_path: dict[str, str],
+    site_limit: int | None = None,
+) -> tuple[_StructuralSite, ...]:
+    retained: dict[tuple[str, int, str, str], _StructuralSite] = {}
+
+    def retain(site: _StructuralSite) -> None:
+        identity = (site.path, site.line, site.family, site.signature)
+        if identity in retained:
+            return
+        if site_limit is None or len(retained) < site_limit:
+            retained[identity] = site
+
+    for declaration in declarations:
+        try:
+            component = components_by_path[declaration.location.path]
+        except KeyError as error:
+            raise SemanticGuidanceError(
+                "operation index has no component"
+            ) from error
+        recognized = {
+            (operation.line, operation.symbol.rsplit(".", 1)[-1].lower())
+            for _, operation in declaration.operations
+        }
+        for call in declaration.calls:
+            if call.qualifier is None or (call.line, call.name.lower()) in recognized:
+                continue
+            site = _StructuralSite(
+                component,
+                declaration.location.path,
+                call.line,
+                "call",
+                call.name.lower(),
+                call.parameter_flow,
+                call.argument_identifier_count,
+            )
+            retain(site)
+        for mutation in declaration.mutations:
+            if (mutation.line, mutation.signature) in recognized:
+                continue
+            site = _StructuralSite(
+                component,
+                declaration.location.path,
+                mutation.line,
+                "mutation",
+                mutation.signature,
+                mutation.parameter_flow,
+            )
+            retain(site)
+        for assignment in declaration.assignments:
+            if (
+                (assignment.line, assignment.signature) in recognized
+                or not assignment.parameter_flow
+            ):
+                continue
+            site = _StructuralSite(
+                component,
+                declaration.location.path,
+                assignment.line,
+                "assignment",
+                assignment.signature,
+                True,
+            )
+            retain(site)
+    return tuple(
+        sorted(
+            retained.values(),
+            key=lambda site: (
+                site.component,
+                site.path,
+                site.line,
+                site.family,
+                site.signature,
+            ),
+        )
+    )
+
+
+def _operation_index_rows(
+    sites: tuple[_StructuralSite, ...],
+    passes_by_path: dict[str, tuple[str, ...]],
+    limits: GuidanceLimits,
+) -> tuple[dict[str, object], ...]:
+    if not sites:
+        return ()
+    frequencies = Counter((site.family, site.signature) for site in sites)
+    frontier_order = {path: index for index, path in enumerate(passes_by_path)}
+    signature_occurrences: dict[
+        tuple[str, str, bool],
+        list[_StructuralSite],
+    ] = {}
+    for site in sites:
+        signature_occurrences.setdefault(
+            (site.family, site.signature, site.parameter_flow),
+            [],
+        ).append(site)
+    occurrence_by_site: dict[tuple[str, str, int, str, str, bool], int] = {}
+    for occurrences in signature_occurrences.values():
+        for index, site in enumerate(
+            sorted(
+                occurrences,
+                key=lambda item: (
+                    frontier_order.get(item.path, len(frontier_order)),
+                    item.component,
+                    item.path,
+                    item.line,
+                ),
+            )
+        ):
+            occurrence_by_site[
+                (
+                    site.component,
+                    site.path,
+                    site.line,
+                    site.family,
+                    site.signature,
+                    site.parameter_flow,
+                )
+            ] = index
+    grouped: dict[str, dict[str, list[_StructuralSite]]] = {}
+    for site in sites:
+        grouped.setdefault(site.component, {}).setdefault(site.path, []).append(site)
+    rows_by_component: dict[
+        str,
+        deque[tuple[tuple[int, int, int, int, int, int], dict[str, object]]],
+    ] = {}
+    maximum_row_bytes = min(MAX_OPERATION_INDEX_ROW_BYTES, limits.output_bytes)
+    for component, paths in grouped.items():
+        prioritized_entries: list[
+            tuple[tuple[int, int, int, int, int, int], int, int, int, str, int, dict[str, object]]
+        ] = []
+        for path, path_sites in paths.items():
+            try:
+                eligible = "".join(
+                    OPERATION_INDEX_PASS_CODES[value]
+                    for value in passes_by_path[path]
+                )
+            except KeyError as error:
+                raise SemanticGuidanceError(
+                    "operation index is absent from frontier passes"
+                ) from error
+            sites_by_line: dict[int, set[str]] = {}
+            priority_by_line: dict[int, tuple[int, int, int, int, int, int]] = {}
+            for site in path_sites:
+                sites_by_line.setdefault(site.line, set()).add(
+                    OPERATION_INDEX_FAMILY_CODES[site.family]
+                )
+                signature_priority = _operation_index_signature_priority(
+                    frequencies[(site.family, site.signature)]
+                )
+                priority = (
+                    signature_priority[0],
+                    0 if site.parameter_flow else 1,
+                    0
+                    if site.family == "call"
+                    and site.argument_identifier_count
+                    >= MIN_OPERATION_INDEX_COMPLEX_CALL_IDENTIFIERS
+                    else 1,
+                    OPERATION_INDEX_FAMILY_PRIORITY[site.family],
+                    occurrence_by_site[
+                        (
+                            site.component,
+                            site.path,
+                            site.line,
+                            site.family,
+                            site.signature,
+                            site.parameter_flow,
+                        )
+                    ],
+                    signature_priority[1],
+                )
+                priority_by_line[site.line] = min(
+                    priority,
+                    priority_by_line.get(site.line, priority),
+                )
+            lines_by_priority_tier: dict[tuple[int, int], list[int]] = {}
+            for line, priority in priority_by_line.items():
+                lines_by_priority_tier.setdefault(priority[:2], []).append(line)
+
+            def entry_for(lines: list[int]) -> dict[str, object]:
+                return {
+                    "p": path,
+                    "q": eligible,
+                    "s": [
+                        f"{line}{''.join(sorted(sites_by_line[line]))}"
+                        for line in sorted(lines)
+                    ],
+                }
+
+            def bounded_entries(lines: list[int]) -> list[dict[str, object]]:
+                entry = entry_for(lines)
+                if len(
+                    _encode_canonical_row(
+                        _canonical_operation_index_row(component, [entry])
+                    )
+                ) <= maximum_row_bytes:
+                    return [entry]
+                if len(lines) == 1:
+                    return []
+                midpoint = len(lines) // 2
+                return [
+                    *bounded_entries(lines[:midpoint]),
+                    *bounded_entries(lines[midpoint:]),
+                ]
+
+            for priority_tier in sorted(lines_by_priority_tier):
+                prioritized = sorted(
+                    lines_by_priority_tier[priority_tier],
+                    key=lambda line: (priority_by_line[line], line),
+                )
+                for offset in range(
+                    0,
+                    len(prioritized),
+                    MAX_OPERATION_INDEX_SITES_PER_ENTRY,
+                ):
+                    chunk_index = offset // MAX_OPERATION_INDEX_SITES_PER_ENTRY
+                    entries = bounded_entries(
+                        prioritized[offset : offset + MAX_OPERATION_INDEX_SITES_PER_ENTRY]
+                    )
+                    for split_index, entry in enumerate(entries):
+                        priority = min(
+                            priority_by_line[line]
+                            for line in prioritized[
+                                offset : offset + MAX_OPERATION_INDEX_SITES_PER_ENTRY
+                            ]
+                        )
+                        prioritized_entries.append(
+                            (
+                                priority,
+                                chunk_index,
+                                len(sites_by_line),
+                                frontier_order[path],
+                                path,
+                                split_index,
+                                entry,
+                            )
+                        )
+        ordered_entries = [
+            (item[0], item[-1])
+            for item in sorted(prioritized_entries, key=lambda item: item[:-1])
+        ]
+        component_rows: deque[
+            tuple[tuple[int, int, int, int, int, int], dict[str, object]]
+        ] = deque()
+        current: list[
+            tuple[tuple[int, int, int, int, int, int], dict[str, object]]
+        ] = []
+        for priority, entry in ordered_entries:
+            if current and priority[:2] != current[0][0][:2]:
+                component_rows.append(
+                    (
+                        current[0][0],
+                        _canonical_operation_index_row(
+                            component,
+                            [item[1] for item in current],
+                        ),
+                    )
+                )
+                current = [(priority, entry)]
+                continue
+            candidate = _canonical_operation_index_row(
+                component,
+                [item[1] for item in current] + [entry],
+            )
+            encoded = _encode_canonical_row(candidate)
+            if current and len(encoded) > maximum_row_bytes:
+                component_rows.append(
+                    (
+                        current[0][0],
+                        _canonical_operation_index_row(
+                            component,
+                            [item[1] for item in current],
+                        ),
+                    )
+                )
+                current = [(priority, entry)]
+            else:
+                current.append((priority, entry))
+        if current:
+            component_rows.append(
+                (
+                    current[0][0],
+                    _canonical_operation_index_row(
+                        component,
+                        [item[1] for item in current],
+                    ),
+                )
+            )
+        rows_by_component[component] = component_rows
+    ordered_rows: list[
+        tuple[int, int, int, int, int, int, int, str, dict[str, object]]
+    ] = []
+    for component, queue in rows_by_component.items():
+        lane_positions: dict[tuple[int, int], int] = {}
+        for priority, row in queue:
+            lane = priority[:2]
+            lane_position = lane_positions.get(lane, 0)
+            lane_positions[lane] = lane_position + 1
+            cycle_size = OPERATION_INDEX_PARAMETER_FLOW_WEIGHT + 1
+            if priority[1] == 0:
+                scheduled_position = (
+                    lane_position // OPERATION_INDEX_PARAMETER_FLOW_WEIGHT
+                ) * cycle_size + lane_position % OPERATION_INDEX_PARAMETER_FLOW_WEIGHT
+            else:
+                scheduled_position = lane_position * cycle_size + OPERATION_INDEX_PARAMETER_FLOW_WEIGHT
+            ordered_rows.append(
+                (
+                    priority[0],
+                    scheduled_position,
+                    priority[1],
+                    priority[2],
+                    priority[3],
+                    priority[4],
+                    priority[5],
+                    component,
+                    row,
+                )
+            )
+    return tuple(item[-1] for item in sorted(ordered_rows, key=lambda item: item[:-1]))
+
+
+def _operation_index_signature_priority(frequency: int) -> tuple[int, int]:
+    if 2 <= frequency <= MAX_OPERATION_INDEX_PREFERRED_REUSED_SIGNATURE_FREQUENCY:
+        return (0, 0)
+    if frequency == 1:
+        return (1, 0)
+    if frequency <= MAX_OPERATION_INDEX_REUSED_SIGNATURE_FREQUENCY:
+        return (2, frequency)
+    return (3, frequency)
+
+
+def _canonical_operation_index_row(
+    component: str,
+    entries: list[dict[str, object]],
+) -> dict[str, object]:
+    identity = json.dumps(
+        [component, entries],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    row: dict[str, object] = {
+        "schema_version": SEMANTIC_GUIDANCE_SCHEMA_VERSION,
+        "hint_id": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
+        "hint_kind": "operation-index",
+        "component": component,
+        "entries": entries,
+        "reason_codes": ["operation_context", "structural_index"],
+        "proof_status": "investigation_only",
+    }
+    _validate_operation_index_row(row)
+    return row
+
+
+def _encode_canonical_row(row: dict[str, object]) -> bytes:
+    return json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def _validate_operation_index_row(row: dict[str, object]) -> None:
+    if (
+        set(row)
+        != {
+            "schema_version",
+            "hint_id",
+            "hint_kind",
+            "component",
+            "entries",
+            "reason_codes",
+            "proof_status",
+        }
+        or row.get("schema_version") != SEMANTIC_GUIDANCE_SCHEMA_VERSION
+        or not isinstance(row.get("hint_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{16}", row["hint_id"])
+        or row.get("hint_kind") != "operation-index"
+        or not isinstance(row.get("component"), str)
+        or not row["component"]
+        or "\x00" in row["component"]
+        or row.get("reason_codes") != ["operation_context", "structural_index"]
+        or row.get("proof_status") != "investigation_only"
+        or not isinstance(row.get("entries"), list)
+        or not row["entries"]
+    ):
+        raise SemanticGuidanceError("semantic guidance operation index is invalid")
+    for entry in row["entries"]:
+        if not isinstance(entry, dict) or set(entry) != {"p", "q", "s"}:
+            raise SemanticGuidanceError("semantic guidance operation index is invalid")
+        path = entry["p"]
+        eligible = entry["q"]
+        sites = entry["s"]
+        if (
+            not isinstance(path, str)
+            or _canonical_relative_path(path) != path
+            or not isinstance(eligible, str)
+            or not eligible
+            or eligible
+            != "".join(
+                code
+                for code in OPERATION_INDEX_PASS_CODES.values()
+                if code in eligible
+            )
+            or len(eligible) != len(set(eligible))
+            or not isinstance(sites, list)
+            or not 1 <= len(sites) <= MAX_OPERATION_INDEX_SITES_PER_ENTRY
+        ):
+            raise SemanticGuidanceError("semantic guidance operation index is invalid")
+        identities: list[tuple[int, str]] = []
+        for site in sites:
+            if not isinstance(site, str) or not re.fullmatch(r"[1-9]\d*[acm]{1,3}", site):
+                raise SemanticGuidanceError("semantic guidance operation index is invalid")
+            match = re.fullmatch(r"([1-9]\d*)([acm]{1,3})", site)
+            if match is None or match.group(2) != "".join(sorted(set(match.group(2)))):
+                raise SemanticGuidanceError("semantic guidance operation index is invalid")
+            identities.append((int(match.group(1)), match.group(2)))
+        if identities != sorted(identities) or len(identities) != len(set(identities)):
+            raise SemanticGuidanceError("semantic guidance operation index is invalid")
+
+
 def _nested_output_routes(
     observations: tuple[tuple[str, object], ...],
     incoming: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] | None = None,
@@ -1449,14 +2137,12 @@ def _canonical_guidance(
     guidance_schema_version: int,
     frontier_passes_by_path: dict[str, tuple[str, ...]],
     frontier_components_by_path: dict[str, str],
+    operation_index_rows: tuple[dict[str, object], ...] = (),
 ) -> tuple[bytes, int]:
     if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
         ordered = _schema_three_row_order(routes, frontier_components_by_path)
-        lines: list[bytes] = []
-        used_bytes = 0
+        route_rows: list[tuple[_Route, bytes]] = []
         for route in ordered:
-            if len(lines) >= limits.row_count:
-                break
             row = _canonical_row(
                 route,
                 guidance_schema_version,
@@ -1464,11 +2150,54 @@ def _canonical_guidance(
                 frontier_components_by_path,
             )
             _validate_row(row)
-            encoded = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
-            if used_bytes + len(encoded) > limits.output_bytes:
-                continue
-            lines.append(encoded)
-            used_bytes += len(encoded)
+            route_rows.append((route, _encode_canonical_row(row)))
+        index_lines = []
+        for row in operation_index_rows:
+            _validate_operation_index_row(row)
+            index_lines.append(_encode_canonical_row(row))
+        if not route_rows:
+            lines, _ = _select_encoded_rows(
+                index_lines,
+                min(limits.row_count, MAX_OPERATION_INDEX_ONLY_ROWS),
+                min(limits.output_bytes, MAX_OPERATION_INDEX_ONLY_BYTES),
+            )
+            return b"".join(lines), len(lines)
+        route_only: list[tuple[_Route, bytes]] = []
+        route_only_bytes = 0
+        for route, encoded in route_rows:
+            if (
+                len(route_only) < limits.row_count
+                and route_only_bytes + len(encoded) <= limits.output_bytes
+            ):
+                route_only.append((route, encoded))
+                route_only_bytes += len(encoded)
+        if not route_only:
+            return b"", 0
+        strong_lines = [
+            encoded
+            for route, encoded in route_only
+            if route.strength != "name-only"
+        ]
+        weak_lines = [
+            encoded
+            for route, encoded in route_only
+            if route.strength == "name-only"
+        ]
+        remaining_rows = len(route_only) - len(strong_lines)
+        remaining_bytes = route_only_bytes - sum(map(len, strong_lines))
+        index_selected, _ = _select_encoded_rows(
+            index_lines,
+            remaining_rows,
+            remaining_bytes,
+        )
+        remaining_rows -= len(index_selected)
+        remaining_bytes -= sum(map(len, index_selected))
+        weak_selected, _ = _select_encoded_rows(
+            weak_lines,
+            remaining_rows,
+            remaining_bytes,
+        )
+        lines = [*strong_lines, *index_selected, *weak_selected]
         return b"".join(lines), len(lines)
     ordered = sorted(routes, key=_route_sort_key)
     lines: list[bytes] = []
@@ -1480,11 +2209,28 @@ def _canonical_guidance(
             frontier_components_by_path,
         )
         _validate_row(row)
-        encoded = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        encoded = _encode_canonical_row(row)
         if len(lines) >= limits.row_count or sum(map(len, lines)) + len(encoded) > limits.output_bytes:
             break
         lines.append(encoded)
     return b"".join(lines), len(lines)
+
+
+def _select_encoded_rows(
+    lines: list[bytes],
+    row_limit: int,
+    byte_limit: int,
+) -> tuple[list[bytes], list[bytes]]:
+    selected: list[bytes] = []
+    remaining: list[bytes] = []
+    used_bytes = 0
+    for line in lines:
+        if len(selected) < row_limit and used_bytes + len(line) <= byte_limit:
+            selected.append(line)
+            used_bytes += len(line)
+        else:
+            remaining.append(line)
+    return selected, remaining
 
 
 def _schema_three_row_order(
@@ -1671,9 +2417,16 @@ def _validate_row(row: dict[str, object]) -> None:
     if schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
         nested = row["hint_kind"] == "nested-output-context"
         if (
-            row["hint_kind"] not in {"call-route", "nested-output-context"}
+            row["hint_kind"]
+            not in {"call-route", "nested-output-context"}
             or (nested and (row["operation_family"] != "output-context" or row["output_context"] not in {"script", "style", "url_attribute", "event_handler"}))
-            or (not nested and (row["operation_family"] not in OPERATION_ANCHORS or row["output_context"] is not None))
+            or (
+                not nested
+                and (
+                    row["operation_family"] not in OPERATION_ANCHORS
+                    or row["output_context"] is not None
+                )
+            )
             or not isinstance(row["component"], str)
             or not row["component"]
             or "\x00" in row["component"]
