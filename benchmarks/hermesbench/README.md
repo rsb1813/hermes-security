@@ -179,8 +179,11 @@ prompt. Version `2` adds the immutable `semantic-guidance.jsonl` packet from
 snapshot bytes while retaining semantic guidance row schema `1` and the
 existing semantic discovery prompt. Version `3` uses semantic guidance row
 schema `2`, which adds `eligible_search_passes` derived only from the exact
-source, trace, and operation frontier paths of that row. Versions `2` and `3`
-read the priority packet exactly once, then read semantic guidance exactly once.
+source, trace, and operation frontier paths of that row. Version `4` uses
+semantic guidance row schema `3`, which adds `hint_kind`, `output_context`, and
+the operation-path component so bounded nested-output contexts and ordinary
+call routes share one canonical packet. Versions `2`, `3`, and `4` read the
+priority packet exactly once, then read semantic guidance exactly once.
 
 Semantic guidance is an investigation queue only. Its strength and eligible
 passes order investigation; neither proves attacker control, reachability,
@@ -194,6 +197,12 @@ look up `frontier.jsonl` by each exact submitted path and use only a pass listed
 for a submitted location. There is no `general` fallback: the host never
 invents, generalizes, substitutes, defaults, or repairs a model response.
 
+Schema-3 nested-output rows identify only statically observed `script`,
+`style`, `url_attribute`, or `event_handler` contexts and bounded local
+provenance. They remain `investigation_only`: an output-context hint is not a
+finding and does not establish exploitability or sanitizer failure. Protocol
+`4` discovery applies the same pass-attestation rules as protocol `3`.
+
 Semantic preparation is deterministic and bounded. Every source file is
 limited to 1 MiB. `hunt-balanced` scans at most 64 MiB, retains at most 50,000
 declarations, 200,000 call/import references, 200,000 resolved edges, and 1,024
@@ -203,10 +212,13 @@ declarations, 400,000 references, 400,000 resolved edges, and 2,048 route work
 items or candidates at graph depth `6`, then emits at most 512 rows or 1 MiB.
 An empty guidance packet is valid. Truncation, skipped files, priority order, or
 guidance strength never make a frontier path ineligible and never count as
-reviewed closure.
+reviewed closure. Schema `3` changes allocation order, not these caps: strong
+direct, import-linked, and nested-output evidence is allocated before weak
+name-only evidence, with deterministic family and component rounds. Name-only
+targets are resolved lazily only inside the remaining edge budget.
 
 Each successful Hunt discovery task stores path-free `evidence.json`, and the
-phase stores ordered `evidence.jsonl` rows. Protocol versions `2` and `3` add
+phase stores ordered `evidence.jsonl` rows. Protocol versions `2`, `3`, and `4` add
 only the semantic packet hash and row, edge, scanned-file, and skipped-file
 counts to the existing inventory, rank-input, frontier, priority-packet,
 candidate-link, and coverage-debt evidence. Relative paths remain inside the
@@ -215,7 +227,7 @@ than source paths, previews, candidate prose, or work IDs.
 
 Standard workflow receipts remain schema version `2` with their unchanged
 field set. Hunt receipts remain schema version `3` and explicitly bind evidence
-protocol version `1`, `2`, or `3`. Every receipt reconstructs using its recorded
+protocol version `1`, `2`, `3`, or `4`. Every receipt reconstructs using its recorded
 protocol, including incomplete discovery, rather than current defaults or
 evidence rows. The Hunt workflow receipt schema remains `3`, and frozen controls
 schema remains `2`. The two-call ceiling, 480-second phase timeout, resource bounds,
@@ -223,6 +235,14 @@ complete frontier, coverage debt, independent verifier, scorer, sandbox,
 authentication boundary, network isolation, and public-data boundary are
 unchanged. Discovery preparation remains inside the task budget, and the
 container receives only the positive whole-second remainder.
+
+Protocol `4` Hunt verification receives only each candidate ID, entry point,
+critical operation, and trace. The verifier independently reconstructs control,
+reachability, impact, guard failure, evidence, counterevidence, and proof gaps
+from immutable source. The private discovery-to-verification transfer remains
+the complete canonical candidate for host attestation and terminal-decision
+validation. Protocols `1` through `3` retain their rich verification prompt
+bytes, and Standard verification is unchanged. Protocol `4` adds no model call.
 
 ## Run paired repeats
 

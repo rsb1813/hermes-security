@@ -49,9 +49,9 @@ The required state progression is `discovered -> evidence_built -> challenged ->
 ## HermesBench Host Guidance
 
 When HermesBench wraps this workflow, evidence protocol version `1` prepares
-only the immutable priority packet. Versions `2` and `3` prepare that packet
+only the immutable priority packet. Versions `2`, `3`, and `4` prepare that packet
 plus immutable `semantic-guidance.jsonl` from the snapshot before the container
-starts. For versions `2` and `3`, read the priority packet exactly once, then
+starts. For versions `2`, `3`, and `4`, read the priority packet exactly once, then
 read semantic guidance exactly once. Do not author, rewrite, or treat either
 packet as closure evidence.
 
@@ -74,6 +74,13 @@ exact submitted path and use only a listed pass on a submitted location. Do not
 invent, generalize, substitute, default, or repair a pass. In particular, there
 is no `general` fallback.
 
+Evidence protocol version `4` uses semantic guidance row schema `3`. Schema `3`
+adds `hint_kind`, `output_context`, and the operation-path component. A
+`nested-output-context` row records only a bounded static `script`, `style`,
+`url_attribute`, or `event_handler` context and local provenance. It remains
+`investigation_only` and never proves exploitability, sanitizer failure, or a
+missing guard. Protocol `4` keeps the protocol-3 pass-attestation rules.
+
 The host scans each source file only up to 1 MiB. `hunt-balanced` scans at most
 64 MiB, retains at most 50,000 declarations, 200,000 call/import references,
 200,000 resolved edges, and 1,024 route work items or candidates at depth 4,
@@ -81,13 +88,17 @@ then emits at most 256 rows or 512 KiB. `hunt-max` scans at most 128 MiB,
 retains at most 100,000 declarations, 400,000 references, 400,000 resolved
 edges, and 2,048 route work items or candidates at depth 6, then emits at most
 512 rows or 1 MiB. Empty or truncated guidance is valid and never removes
-frontier work or coverage debt.
+frontier work or coverage debt. Schema `3` changes no numeric limit. It allocates
+strong direct, import-linked, and nested-output evidence before weak name-only
+evidence, rotates deterministically across family and component, and resolves
+name-only targets lazily only inside the remaining edge budget.
 
 Retained evidence protocol version `1` has the five legacy artifacts and the
 priority-only discovery prompt. Version `2` binds the semantic packet hash and
 path-free counts, retains semantic guidance row schema `1`, and uses the
 existing semantic discovery prompt. Version `3` uses semantic guidance row
-schema `2` with `eligible_search_passes`. All versions reconstruct from the
+schema `2` with `eligible_search_passes`. Version `4` uses schema `3` with
+nested-output context and fair allocation. All versions reconstruct from the
 receipt's recorded protocol, including incomplete discovery; workflow receipt
 schema remains `3` and frozen controls schema remains `2`. The two-call ceiling,
 480-second phase timeout, resource bounds, complete frontier, coverage debt,
@@ -156,6 +167,14 @@ hunt_workflow.py close-frontier --work-dir <work-dir> --repository <repo> --fron
 ```
 
 ## Independent Validation Contract
+
+For HermesBench Hunt evidence protocol `4`, the verifier prompt receives only
+the candidate ID, entry point, critical operation, and trace. Independently
+reconstruct attacker control, reachability, impact, guard failure, evidence,
+counterevidence, and proof gaps from immutable source. The private transfer
+retains the complete canonical candidate for host attestation and terminal
+decision validation. Protocols `1` through `3` retain their rich candidate
+prompt, Standard verification is unchanged, and no protocol adds a model call.
 
 Create blinded hypotheses first.
 
