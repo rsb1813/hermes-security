@@ -291,6 +291,24 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertTrue(any(row["strength"] == "import-linked" for row in rows))
         self.assertFalse(any(row["strength"] == "name-only" for row in rows))
 
+    def test_schema_three_import_resolution_uses_prebuilt_module_index(self) -> None:
+        with mock.patch.object(
+            semantic_guidance,
+            "_module_matches",
+            side_effect=AssertionError("schema three should not scan module candidates"),
+        ):
+            result = self._build_with_limits(
+                "indexed-import-resolution",
+                {
+                    "api.ts": "import { run } from './sink'; export function handle(request) { return run(request.query.q); }\n",
+                    "sink.ts": "export function run(value) { return child_process.exec(value); }\n",
+                },
+                GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+                guidance_schema_version=3,
+            )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        self.assertTrue(any(row["strength"] == "import-linked" for row in rows))
+
     def test_schema_three_reference_budget_matches_the_edge_cap(self) -> None:
         limits = GuidanceLimits(4096, 20, 1, 20, 20, 4096, 4)
         original = semantic_guidance._allocate_schema_three_references
@@ -419,7 +437,7 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual(strong, {identity: ((("target.ts", 1, "target"), "direct"),)})
         self.assertEqual(weak, {})
 
-    def test_schema_three_reference_cap_does_not_prefetch_duplicate_weak_calls(self) -> None:
+    def test_schema_three_duplicate_weak_calls_reuse_exact_resolution(self) -> None:
         location = semantic_guidance._Location("caller.ts", 1, "caller")
         call = semantic_guidance._Call("target", None, 1)
         declaration = semantic_guidance._Declaration(
@@ -444,7 +462,7 @@ class SemanticGuidanceTests(unittest.TestCase):
                 {},
             )
         identity = semantic_guidance._location_identity(location)
-        self.assertEqual(resolver.call_count, 1002)
+        self.assertEqual(resolver.call_count, 1)
         self.assertEqual(selected[0].calls, (call,))
         self.assertEqual(strong, {})
         self.assertEqual(weak, {identity: (call,)})

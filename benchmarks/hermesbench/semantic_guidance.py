@@ -139,6 +139,9 @@ class _Call:
     arguments: str = ""
 
 
+_ModuleTargetIndex = dict[tuple[str, str, str], tuple[_Declaration, ...]]
+
+
 @dataclass(frozen=True)
 class _Route:
     strength: str
@@ -755,11 +758,12 @@ def _resolve_exact_call(
     call: _Call,
     by_file_symbol: dict[tuple[str, str], list[_Declaration]],
     by_language_symbol: dict[tuple[str, str], list[_Declaration]],
+    module_targets: _ModuleTargetIndex | None = None,
 ) -> tuple[tuple[str, int, str], str] | None:
     direct = _unique_same_file_call_target(declaration, call, by_file_symbol)
     if direct is not None:
         return (_location_identity(direct.location), "direct")
-    imported = _unique_import_call_target(declaration, call, by_language_symbol)
+    imported = _unique_import_call_target(declaration, call, by_language_symbol, module_targets)
     if imported is not None:
         return (_location_identity(imported.location), "import-linked")
     return None
@@ -784,6 +788,7 @@ def _unique_import_call_target(
     declaration: _Declaration,
     call: _Call,
     by_language_symbol: dict[tuple[str, str], list[_Declaration]],
+    module_targets: _ModuleTargetIndex | None = None,
 ) -> _Declaration | None:
     selected: _Declaration | None = None
     seen_imports: set[tuple[str, str | None]] = set()
@@ -798,8 +803,21 @@ def _unique_import_call_target(
             continue
         seen_imports.add(import_key)
         symbol = imported.symbol or call.name
-        for candidate in by_language_symbol.get((declaration.language, symbol), ()):
-            if not _module_matches(
+        if module_targets is not None:
+            candidates = (
+                candidate
+                for module_key in _module_lookup_keys(
+                    declaration.location.path,
+                    imported.module,
+                    declaration.language,
+                    imported.symbol,
+                )
+                for candidate in module_targets.get((declaration.language, symbol, module_key), ())
+            )
+        else:
+            candidates = by_language_symbol.get((declaration.language, symbol), ())
+        for candidate in candidates:
+            if module_targets is None and not _module_matches(
                 declaration.location.path,
                 imported.module,
                 candidate.location.path,
@@ -818,6 +836,7 @@ def _allocate_schema_three_references(
     limit: int,
     by_file_symbol: dict[tuple[str, str], list[_Declaration]],
     by_language_symbol: dict[tuple[str, str], list[_Declaration]],
+    module_targets: _ModuleTargetIndex | None = None,
 ) -> tuple[
     tuple[_Declaration, ...],
     dict[tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]],
@@ -829,13 +848,33 @@ def _allocate_schema_three_references(
     remaining = max(0, limit)
     strong_positions = [0] * len(declarations)
     seen_strong = [set() for _ in declarations]
+    resolution_cache: list[
+        dict[tuple[str, str | None], tuple[tuple[str, int, str], str] | None] | None
+    ] = [None] * len(declarations)
+
+    def resolve(index: int, call: _Call) -> tuple[tuple[str, int, str], str] | None:
+        cache = resolution_cache[index]
+        if cache is None:
+            cache = {}
+            resolution_cache[index] = cache
+        key = (call.name, call.qualifier)
+        if key not in cache:
+            if module_targets is None:
+                cache[key] = _resolve_exact_call(
+                    declarations[index], call, by_file_symbol, by_language_symbol
+                )
+            else:
+                cache[key] = _resolve_exact_call(
+                    declarations[index], call, by_file_symbol, by_language_symbol, module_targets
+                )
+        return cache[key]
 
     def next_strong(index: int) -> tuple[_Call, tuple[tuple[str, int, str], str]] | None:
         declaration = declarations[index]
         while strong_positions[index] < len(declaration.calls):
             call = declaration.calls[strong_positions[index]]
             strong_positions[index] += 1
-            edge = _resolve_exact_call(declaration, call, by_file_symbol, by_language_symbol)
+            edge = resolve(index, call)
             if edge is not None and edge not in seen_strong[index]:
                 return call, edge
         return None
@@ -869,7 +908,7 @@ def _allocate_schema_three_references(
             weak_positions[index] += 1
             if (
                 call.qualifier is not None
-                or _resolve_exact_call(declaration, call, by_file_symbol, by_language_symbol) is not None
+                or resolve(index, call) is not None
             ):
                 continue
             key = (declaration.language, call.name)
@@ -981,14 +1020,24 @@ def _build_schema_three_routes(
     by_identity = {_location_identity(item.location): item for item in declarations}
     by_file_symbol: dict[tuple[str, str], list[_Declaration]] = {}
     by_language_symbol: dict[tuple[str, str], list[_Declaration]] = {}
+    module_targets: dict[tuple[str, str, str], list[_Declaration]] = {}
     for item in declarations:
         by_file_symbol.setdefault((item.location.path, item.location.symbol.lower()), []).append(item)
         by_language_symbol.setdefault((item.language, item.location.symbol.lower()), []).append(item)
+        module_targets.setdefault(
+            (
+                item.language,
+                item.location.symbol.lower(),
+                _module_target_key(item.location.path, item.language),
+            ),
+            [],
+        ).append(item)
     selected_declarations, strong_by_declaration, weak_by_declaration = _allocate_schema_three_references(
         declarations,
         limits.edge_count,
         by_file_symbol,
         by_language_symbol,
+        {key: tuple(values) for key, values in module_targets.items()},
     )
     selected_by_identity = {
         _location_identity(item.location): item for item in selected_declarations
@@ -1311,6 +1360,20 @@ def _resolve_import_targets(
 
 
 def _module_matches(caller_path: str, module: str, target_path: str, language: str, imported_symbol: str | None) -> bool:
+    return _module_target_key(target_path, language) in _module_lookup_keys(
+        caller_path,
+        module,
+        language,
+        imported_symbol,
+    )
+
+
+def _module_lookup_keys(
+    caller_path: str,
+    module: str,
+    language: str,
+    imported_symbol: str | None,
+) -> tuple[str, ...]:
     caller_parent = PurePosixPath(caller_path).parent
     normalized = module.replace("\\", "/")
     if language == "python":
@@ -1325,21 +1388,25 @@ def _module_matches(caller_path: str, module: str, target_path: str, language: s
             normalized = normalized.replace(".", "/")
     elif normalized.startswith("."):
         normalized = posixpath.normpath(f"{caller_parent.as_posix()}/{normalized}")
+    if language == "python":
+        candidates = [normalized, f"{normalized}/__init__"]
+        if imported_symbol is not None:
+            candidates.append(f"{normalized}/{imported_symbol}")
+        return tuple(dict.fromkeys(candidates))
+    if language == "typescript":
+        return tuple(dict.fromkeys((normalized, f"{normalized}/index")))
+    return (normalized,)
+
+
+def _module_target_key(target_path: str, language: str) -> str:
+    if language == "go":
+        return PurePosixPath(target_path).parent.as_posix()
     target = PurePosixPath(target_path).as_posix()
     if target.endswith(".d.ts"):
         target = target[: -len(".d.ts")]
     else:
         target = PurePosixPath(target).with_suffix("").as_posix()
-    if language == "python":
-        candidates = {normalized, f"{normalized}/__init__"}
-        if imported_symbol is not None:
-            candidates.add(f"{normalized}/{imported_symbol}")
-        return target in candidates
-    if language == "typescript":
-        return target == normalized or target == f"{normalized}/index"
-    if language == "go":
-        return PurePosixPath(target_path).parent.as_posix() == normalized
-    return target == normalized
+    return target
 
 
 def _trace_controls(
