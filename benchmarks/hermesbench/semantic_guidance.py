@@ -136,6 +136,7 @@ class _Call:
     name: str
     qualifier: str | None
     line: int
+    arguments: str = ""
 
 
 @dataclass(frozen=True)
@@ -195,10 +196,17 @@ def build_semantic_guidance(
         limits,
         nested_scanner,
         nested_extensions,
+        guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION,
     )
-    routes, edge_count = _build_routes(declarations, limits)
     if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
-        routes = (*routes, *_nested_output_routes(nested_observations))
+        declarations = _allocate_schema_three_references(
+            declarations,
+            sum(len(declaration.calls) for declaration in declarations),
+        )
+        routes, edge_count, incoming, by_identity = _build_schema_three_routes(declarations, limits)
+        routes = (*routes, *_nested_output_routes(nested_observations, incoming, by_identity))
+    else:
+        routes, edge_count = _build_routes(declarations, limits)
     canonical_bytes, row_count = _canonical_guidance(
         routes,
         limits,
@@ -274,6 +282,7 @@ def _scan_files(
     limits: GuidanceLimits,
     nested_scanner: Callable[[str], tuple[object, ...]] | None = None,
     nested_extensions: frozenset[str] = frozenset(),
+    retain_all_references: bool = False,
 ) -> tuple[tuple[_Declaration, ...], _ScanStats, tuple[tuple[str, object], ...]]:
     declarations: list[_Declaration] = []
     scanned = 0
@@ -313,6 +322,9 @@ def _scan_files(
         if len(declarations) >= limits.declaration_count:
             continue
         extracted = _extract_declarations(relative_path, source, limits.declaration_count - len(declarations))
+        if retain_all_references:
+            declarations.extend(extracted)
+            continue
         for declaration in extracted:
             remaining_references = max(0, limits.edge_count - retained_references)
             calls = declaration.calls[:remaining_references]
@@ -720,7 +732,8 @@ def _calls(lines: list[str], start_line: int) -> tuple[_Call, ...]:
             parts = [part.strip().lower() for part in match.group(1).split(".")]
             if parts[-1] in {"def", "func", "function", "if", "for", "while", "switch", "catch"}:
                 continue
-            calls.append(_Call(parts[-1], parts[-2] if len(parts) > 1 else None, start_line + offset))
+            arguments = line[match.end():].split(")", 1)[0]
+            calls.append(_Call(parts[-1], parts[-2] if len(parts) > 1 else None, start_line + offset, arguments))
     return tuple(calls)
 
 
@@ -749,6 +762,138 @@ def _operation_callees(line: str, anchors: set[str]) -> tuple[str, ...]:
         if normalized in anchors or preserved in anchors:
             callees.append(preserved)
     return tuple(dict.fromkeys(callees))
+
+
+def _allocate_schema_three_references(
+    declarations: tuple[_Declaration, ...],
+    limit: int,
+) -> tuple[_Declaration, ...]:
+    queues = [deque(declaration.calls) for declaration in declarations]
+    retained = [[] for _ in declarations]
+    remaining = max(0, limit)
+    while remaining:
+        selected = False
+        for index, queue in enumerate(queues):
+            if not queue:
+                continue
+            retained[index].append(queue.popleft())
+            remaining -= 1
+            selected = True
+            if not remaining:
+                break
+        if not selected:
+            break
+    return tuple(
+        replace(declaration, calls=tuple(retained[index]))
+        for index, declaration in enumerate(declarations)
+    )
+
+
+def _allocate_schema_three_edges(
+    resolved_by_declaration: dict[
+        tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]
+    ],
+    limit: int,
+) -> dict[tuple[str, int, str], tuple[tuple[tuple[str, int, str], str], ...]]:
+    allocated: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {
+        identity: [] for identity in resolved_by_declaration
+    }
+    remaining = max(0, limit)
+    for strengths in (("direct", "import-linked"), ("name-only",)):
+        queues: list[tuple[tuple[str, int, str], deque[tuple[tuple[str, int, str], str]]]] = []
+        for identity, edges in resolved_by_declaration.items():
+            seen: set[tuple[tuple[str, int, str], str]] = set()
+            queue = deque()
+            for edge in edges:
+                if edge[1] not in strengths or edge in seen:
+                    continue
+                seen.add(edge)
+                queue.append(edge)
+            queues.append((identity, queue))
+        while remaining:
+            selected = False
+            for identity, queue in queues:
+                if not queue:
+                    continue
+                allocated[identity].append(queue.popleft())
+                remaining -= 1
+                selected = True
+                if not remaining:
+                    break
+            if not selected:
+                break
+        if not remaining:
+            break
+    return {
+        identity: tuple(edges)
+        for identity, edges in allocated.items()
+        if edges
+    }
+
+
+def _build_schema_three_routes(
+    declarations: tuple[_Declaration, ...],
+    limits: GuidanceLimits,
+) -> tuple[
+    tuple[_Route, ...],
+    int,
+    dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]],
+    dict[tuple[str, int, str], _Declaration],
+]:
+    by_identity = {_location_identity(item.location): item for item in declarations}
+    by_file_symbol: dict[tuple[str, str], list[_Declaration]] = {}
+    by_language_symbol: dict[tuple[str, str], list[_Declaration]] = {}
+    for item in declarations:
+        by_file_symbol.setdefault((item.location.path, item.location.symbol.lower()), []).append(item)
+        by_language_symbol.setdefault((item.language, item.location.symbol.lower()), []).append(item)
+    resolved_by_declaration = {
+        identity: _resolve_calls(declaration, by_file_symbol, by_language_symbol)
+        for identity, declaration in by_identity.items()
+    }
+    outgoing = _allocate_schema_three_edges(resolved_by_declaration, limits.edge_count)
+    edge_count = sum(len(edges) for edges in outgoing.values())
+    incoming: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] = {
+        identity: [] for identity in by_identity
+    }
+    for caller, edges in outgoing.items():
+        for target, strength in edges:
+            incoming[target].append((caller, strength))
+    retained: dict[tuple[_Location, _Location], _Route] = {}
+    forward_limit, reverse_quota = _route_direction_quotas(limits.route_count)
+    forward_work = [forward_limit]
+    for declaration in declarations:
+        if not declaration.sources:
+            continue
+        identity = _location_identity(declaration.location)
+        for source in declaration.sources:
+            _traverse_routes(source, identity, by_identity, outgoing, limits, retained, forward_limit, forward_work)
+            if len(retained) >= forward_limit:
+                break
+        if len(retained) >= forward_limit:
+            break
+    if reverse_quota:
+        reverse_work = [reverse_quota]
+        for declaration in declarations:
+            identity = _location_identity(declaration.location)
+            for family, operation in declaration.operations:
+                if declaration.sources and all((source, operation) in retained for source in declaration.sources):
+                    continue
+                _traverse_reverse_routes(
+                    family,
+                    operation,
+                    identity,
+                    by_identity,
+                    incoming,
+                    reverse_work,
+                    limits,
+                    retained,
+                    limits.route_count,
+                )
+                if len(retained) >= limits.route_count:
+                    break
+            if len(retained) >= limits.route_count:
+                break
+    return tuple(retained.values()), edge_count, incoming, by_identity
 
 
 def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits) -> tuple[tuple[_Route, ...], int]:
@@ -811,7 +956,11 @@ def _build_routes(declarations: tuple[_Declaration, ...], limits: GuidanceLimits
     return tuple(retained.values()), edge_count
 
 
-def _nested_output_routes(observations: tuple[tuple[str, object], ...]) -> tuple[_Route, ...]:
+def _nested_output_routes(
+    observations: tuple[tuple[str, object], ...],
+    incoming: dict[tuple[str, int, str], list[tuple[tuple[str, int, str], str]]] | None = None,
+    declarations: dict[tuple[str, int, str], _Declaration] | None = None,
+) -> tuple[_Route, ...]:
     routes: list[_Route] = []
     for path, observation in observations:
         declaration_line = getattr(observation, "declaration_line")
@@ -823,13 +972,25 @@ def _nested_output_routes(observations: tuple[tuple[str, object], ...]) -> tuple
         reason_codes = getattr(observation, "reason_codes")
         context = getattr(observation, "context")
         declaration = _Location(path, declaration_line, declaration_symbol)
+        trace = (declaration,)
+        if incoming is not None and declarations is not None:
+            candidates = [
+                declarations[caller]
+                for caller, strength in incoming.get(_location_identity(declaration), ())
+                if strength == "import-linked"
+                and _caller_passes_source_derived_argument(declarations[caller], declaration)
+            ]
+            if candidates:
+                caller = min(candidates, key=lambda item: _location_identity(item.location))
+                trace = (caller.location, declaration)
+                reason_codes = tuple(dict.fromkeys((*reason_codes, "explicit_import")))
         routes.append(
             _Route(
                 "direct",
                 "output-context",
                 _Location(path, source_line, source_symbol),
                 _Location(path, operation_line, "nested-output-context"),
-                (declaration,),
+                trace,
                 tuple(_Location(path, line, "outer-html-sanitizer") for line in control_lines),
                 reason_codes,
                 "nested-output-context",
@@ -837,6 +998,14 @@ def _nested_output_routes(observations: tuple[tuple[str, object], ...]) -> tuple
             )
         )
     return tuple(routes)
+
+
+def _caller_passes_source_derived_argument(caller: _Declaration, target: _Location) -> bool:
+    pattern = re.compile(r"\b(?:" + "|".join(sorted(map(re.escape, SOURCE_ANCHORS))) + r")\b", re.IGNORECASE)
+    return any(
+        call.name == target.symbol.lower() and pattern.search(call.arguments)
+        for call in caller.calls
+    )
 
 
 def _route_direction_quotas(route_count: int) -> tuple[int, int]:
@@ -1065,6 +1234,26 @@ def _canonical_guidance(
     frontier_passes_by_path: dict[str, tuple[str, ...]],
     frontier_components_by_path: dict[str, str],
 ) -> tuple[bytes, int]:
+    if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
+        ordered = _schema_three_row_order(routes, frontier_components_by_path)
+        lines: list[bytes] = []
+        used_bytes = 0
+        for route in ordered:
+            if len(lines) >= limits.row_count:
+                break
+            row = _canonical_row(
+                route,
+                guidance_schema_version,
+                frontier_passes_by_path,
+                frontier_components_by_path,
+            )
+            _validate_row(row)
+            encoded = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+            if used_bytes + len(encoded) > limits.output_bytes:
+                continue
+            lines.append(encoded)
+            used_bytes += len(encoded)
+        return b"".join(lines), len(lines)
     ordered = sorted(routes, key=_route_sort_key)
     lines: list[bytes] = []
     for route in ordered:
@@ -1080,6 +1269,52 @@ def _canonical_guidance(
             break
         lines.append(encoded)
     return b"".join(lines), len(lines)
+
+
+def _schema_three_row_order(
+    routes: tuple[_Route, ...],
+    components_by_path: dict[str, str],
+) -> tuple[_Route, ...]:
+    ordered: list[_Route] = []
+    for strong in (True, False):
+        families: dict[tuple[str, str], dict[str, list[_Route]]] = {}
+        for route in routes:
+            if (route.strength != "name-only") != strong:
+                continue
+            try:
+                component = components_by_path[route.operation.path]
+            except KeyError as error:
+                raise SemanticGuidanceError("semantic guidance route has no component") from error
+            families.setdefault((route.hint_kind, route.operation_family), {}).setdefault(component, []).append(route)
+        family_queues: dict[tuple[str, str], deque[_Route]] = {}
+        for family, components in families.items():
+            component_queues = {
+                component: deque(sorted(component_routes, key=_route_sort_key))
+                for component, component_routes in components.items()
+            }
+            family_queue: deque[_Route] = deque()
+            while True:
+                selected = False
+                for component in sorted(component_queues):
+                    queue = component_queues[component]
+                    if not queue:
+                        continue
+                    family_queue.append(queue.popleft())
+                    selected = True
+                if not selected:
+                    break
+            family_queues[family] = family_queue
+        while True:
+            selected = False
+            for family in sorted(family_queues):
+                queue = family_queues[family]
+                if not queue:
+                    continue
+                ordered.append(queue.popleft())
+                selected = True
+            if not selected:
+                break
+    return tuple(ordered)
 
 
 def _route_sort_key(route: _Route) -> tuple[object, ...]:

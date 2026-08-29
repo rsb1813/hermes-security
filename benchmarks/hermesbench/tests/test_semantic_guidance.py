@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -72,9 +73,18 @@ class SemanticGuidanceTests(unittest.TestCase):
         name: str,
         files: dict[str, str | bytes],
         limits: GuidanceLimits,
+        *,
+        guidance_schema_version: int = 1,
+        components: dict[str, str] | None = None,
     ) -> SemanticGuidance:
         with mock.patch.dict(PROFILE_LIMITS, {"test-limits": limits}):
-            return self._build(name, files, "test-limits")
+            return self._build(
+                name,
+                files,
+                "test-limits",
+                guidance_schema_version=guidance_schema_version,
+                components=components,
+            )
 
     def _single_row(self, files: dict[str, str | bytes]) -> dict[str, object]:
         rows = self._rows(files)
@@ -175,6 +185,152 @@ class SemanticGuidanceTests(unittest.TestCase):
                 self.assertEqual(nested[0]["output_context"], context)
                 self.assertEqual(nested[0]["operation_family"], "output-context")
                 self.assertEqual(nested[0]["proof_status"], "investigation_only")
+
+    def test_schema_three_strong_edge_survives_earlier_name_only_fanout(self) -> None:
+        result = self._build_with_limits(
+            "fair-strong-edge",
+            {
+                "early.ts": "export function noise(value) { alpha(value); beta(value); gamma(value); }\n",
+                "alpha.ts": "export function alpha(value) { return value; }\n",
+                "beta.ts": "export function beta(value) { return value; }\n",
+                "gamma.ts": "export function gamma(value) { return value; }\n",
+                "api.ts": "import { run } from './sink'; export function handle(request) { return run(request.query.q); }\n",
+                "sink.ts": "export function run(value) { return child_process.exec(value); }\n",
+            },
+            GuidanceLimits(4096, 20, 1, 20, 20, 4096, 4),
+            guidance_schema_version=3,
+        )
+        rows = [json.loads(line) for line in result.canonical_bytes.splitlines()]
+        self.assertEqual(result.edge_count, 1)
+        self.assertTrue(any(row["strength"] == "import-linked" for row in rows))
+        self.assertFalse(any(row["strength"] == "name-only" for row in rows))
+
+    def test_schema_three_nested_output_adds_one_exact_import_linked_companion(self) -> None:
+        result = self._build_with_limits(
+            "nested-companion",
+            {
+                "caller-z.ts": "import { render } from './render'; export function later(request) { return render(request.query.value); }\n",
+                "caller-a.ts": "import { render } from './render'; export function earlier(request) { return render(request.query.value); }\n",
+                "ambiguous.ts": "export function maybe(request) { return render(request.query.value); }\n",
+                "render.ts": "export function render(value) { return `<script>${value}</script>`; }\n",
+            },
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+            guidance_schema_version=3,
+        )
+        nested = next(
+            json.loads(line)
+            for line in result.canonical_bytes.splitlines()
+            if b"nested-output-context" in line
+        )
+        self.assertEqual(
+            [(item["path"], item["symbol"]) for item in nested["trace"]],
+            [("caller-a.ts", "earlier"), ("render.ts", "render")],
+        )
+        self.assertIn("explicit_import", nested["reason_codes"])
+
+    def test_schema_three_companion_requires_a_source_derived_call_argument(self) -> None:
+        result = self._build_with_limits(
+            "nested-companion-static-argument",
+            {
+                "caller.ts": "import { render } from './render'; export function handle(request) { audit(request.query.value); return render('static'); }\n",
+                "render.ts": "export function render(value) { return `<script>${value}</script>`; }\n",
+            },
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+            guidance_schema_version=3,
+        )
+        nested = next(
+            json.loads(line)
+            for line in result.canonical_bytes.splitlines()
+            if b"nested-output-context" in line
+        )
+        self.assertEqual(
+            [(item["path"], item["symbol"]) for item in nested["trace"]],
+            [("render.ts", "render")],
+        )
+        self.assertNotIn("explicit_import", nested["reason_codes"])
+
+    def test_schema_three_companion_does_not_create_a_nested_output_hint(self) -> None:
+        result = self._build_with_limits(
+            "nested-companion-no-local-hint",
+            {
+                "caller.ts": "import { render } from './render'; export function handle(request) { return render(request.query.value); }\n",
+                "render.ts": "export function render(value) { return value; }\n",
+            },
+            GuidanceLimits(4096, 20, 20, 20, 20, 4096, 4),
+            guidance_schema_version=3,
+        )
+        self.assertFalse(
+            any(b"nested-output-context" in line for line in result.canonical_bytes.splitlines())
+        )
+
+    def test_schema_three_row_rounds_preserve_strong_families_and_components(self) -> None:
+        family_result = self._build_with_limits(
+            "family-rounds",
+            {
+                "api.ts": (
+                    "export function first(request) { return child_process.exec(request.query.q); }\n"
+                    "export function second(request) { return child_process.exec(request.query.q); }\n"
+                ),
+                "render.ts": "export function render(value) { return `<script>${value}</script>`; }\n",
+            },
+            GuidanceLimits(4096, 20, 20, 20, 2, 4096, 4),
+            guidance_schema_version=3,
+            components={"api.ts": "component-api", "render.ts": "component-render"},
+        )
+        family_rows = [json.loads(line) for line in family_result.canonical_bytes.splitlines()]
+        self.assertEqual(
+            [(row["hint_kind"], row["operation_family"]) for row in family_rows],
+            [("call-route", "command"), ("nested-output-context", "output-context")],
+        )
+
+        component_result = self._build_with_limits(
+            "component-rounds",
+            {
+                "api.ts": (
+                    "export function first(request) { return child_process.exec(request.query.q); }\n"
+                    "export function second(request) { return child_process.exec(request.query.q); }\n"
+                ),
+                "worker.ts": "export function execute(request) { return child_process.exec(request.query.q); }\n",
+            },
+            GuidanceLimits(4096, 20, 20, 20, 2, 4096, 4),
+            guidance_schema_version=3,
+            components={"api.ts": "component-api", "worker.ts": "component-worker"},
+        )
+        component_rows = [json.loads(line) for line in component_result.canonical_bytes.splitlines()]
+        self.assertEqual(
+            [row["component"] for row in component_rows],
+            ["component-api", "component-worker"],
+        )
+
+    def test_schema_three_skips_oversized_row_and_remains_deterministic(self) -> None:
+        long_path = "a.ts"
+        files = {
+            long_path: "export function oversized(request) { return child_process.exec(request.query.q); }\n",
+            "z.ts": "export function short(request) { return child_process.exec(request.query.q); }\n",
+        }
+        limits = GuidanceLimits(4096, 20, 20, 20, 20, 700, 4)
+        components = {long_path: "x" * 500, "z.ts": "component-short"}
+        first = self._build_with_limits(
+            "byte-skip-one",
+            files,
+            limits,
+            guidance_schema_version=3,
+            components=components,
+        )
+        second = self._build_with_limits(
+            "byte-skip-two",
+            files,
+            limits,
+            guidance_schema_version=3,
+            components=components,
+        )
+        self.assertEqual(first.canonical_bytes, second.canonical_bytes)
+        self.assertEqual(
+            hashlib.sha256(first.canonical_bytes).hexdigest(),
+            hashlib.sha256(second.canonical_bytes).hexdigest(),
+        )
+        rows = [json.loads(line) for line in first.canonical_bytes.splitlines()]
+        self.assertEqual([row["operation"]["path"] for row in rows], ["z.ts"])
 
     def test_nested_output_records_bounded_observed_provenance(self) -> None:
         source = (
