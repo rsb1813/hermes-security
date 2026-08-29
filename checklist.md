@@ -153,7 +153,7 @@
   - [x] Prove unchanged target rows, legacy bytes, link/race rejection, and lower no-target work with RED/GREEN tests.
 - [x] Preserve exact protocol-v1 through protocol-v3 artifact, prompt, and receipt reconstruction.
 - [x] Pass the label-independent retained-snapshot artifact build and separate private coverage gate.
-- [ ] Complete independent review and all full no-model verification gates.
+- [x] Complete independent review and all full no-model verification gates.
 - [ ] Run exactly one fixed paid Protocol-v4 Canary diagnostic with no automatic retry.
 - [ ] Report localized accuracy, separated phase cost, integrity, and public-boundary evidence.
 - [ ] Run HermesBench when Mini is inconclusive.
