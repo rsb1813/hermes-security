@@ -7,6 +7,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -725,6 +726,225 @@ class SuiteExecutionTests(unittest.TestCase):
                 json.loads((run_dir / "commands.jsonl").read_text(encoding="utf-8")),
                 {"task_id": "nested/task-a", "argv": ["python", "-m", "unittest"]},
             )
+
+    def test_bounded_parallel_tasks_overlap_and_publish_manifest_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for(
+                "task-a",
+                "task-b",
+                "task-c",
+                snapshots_root=snapshots,
+            )
+            policy = ExecutionPolicy((("python",),))
+            barrier = threading.Barrier(2, timeout=2)
+            release_first = threading.Event()
+            completion_order: list[str] = []
+            active_tasks = 0
+            max_active_tasks = 0
+            active_lock = threading.Lock()
+
+            def executor(request: object, *_: object) -> ExecutorResult:
+                nonlocal active_tasks, max_active_tasks
+                with active_lock:
+                    active_tasks += 1
+                    max_active_tasks = max(max_active_tasks, active_tasks)
+                try:
+                    if request.task_id in {"task-a", "task-b"}:
+                        barrier.wait()
+                    if request.task_id == "task-a":
+                        if not release_first.wait(2):
+                            raise RuntimeError("parallel peer did not complete")
+                    elif request.task_id == "task-b":
+                        completion_order.append(request.task_id)
+                        release_first.set()
+                    else:
+                        completion_order.append(request.task_id)
+                    if request.task_id == "task-a":
+                        completion_order.append(request.task_id)
+                    evidence = hunt_evidence()
+                    evidence["inventory_sha256"] = {
+                        "task-a": "1" * 64,
+                        "task-b": "2" * 64,
+                        "task-c": "3" * 64,
+                    }[request.task_id]
+                    return ExecutorResult(
+                        hunt_discovery_response(request.task_id),
+                        ({"event": "done"},),
+                        (("python", "-m", "unittest"),),
+                        evidence,
+                    )
+                finally:
+                    with active_lock:
+                        active_tasks -= 1
+
+            receipt = run_suite(
+                manifest,
+                snapshots,
+                output,
+                "parallel",
+                "hunt",
+                "hunt-balanced",
+                config_for(manifest, policy).replace(max_parallel_tasks=2),
+                policy,
+                executor,
+                "hunt-discovery",
+                1,
+            )
+            run_directory = output / "parallel"
+            prediction_rows = [
+                json.loads(line)
+                for line in (run_directory / "predictions.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            receipt_rows = [
+                json.loads(line)
+                for line in (run_directory / "task-receipts.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            command_rows = [
+                json.loads(line)
+                for line in (run_directory / "commands.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+            evidence_rows = [
+                json.loads(line)
+                for line in (run_directory / "evidence.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+
+        self.assertEqual("completed", receipt.status)
+        self.assertEqual("task-b", completion_order[0])
+        self.assertEqual({"task-a", "task-b", "task-c"}, set(completion_order))
+        self.assertEqual(2, max_active_tasks)
+        self.assertEqual(
+            ["task-a", "task-b", "task-c"],
+            [row["task_id"] for row in prediction_rows],
+        )
+        self.assertEqual(
+            ["task-a", "task-b", "task-c"],
+            [row["task_id"] for row in receipt_rows],
+        )
+        self.assertEqual(
+            ["task-a", "task-b", "task-c"],
+            [row["task_id"] for row in command_rows],
+        )
+        self.assertEqual(
+            ["1" * 64, "2" * 64, "3" * 64],
+            [row["inventory_sha256"] for row in evidence_rows],
+        )
+
+    def test_parallel_preflight_failure_starts_no_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for("task-a", "task-b", snapshots_root=snapshots)
+            policy = ExecutionPolicy((("python",),))
+            (snapshots / "task-b" / "source.py").write_text(
+                "value = 2\n",
+                encoding="utf-8",
+            )
+            executor_calls: list[str] = []
+
+            with self.assertRaisesRegex(RunnerError, "snapshot hash mismatch"):
+                run_suite(
+                    manifest,
+                    snapshots,
+                    output,
+                    "parallel-preflight",
+                    "standard",
+                    "baseline",
+                    config_for(manifest, policy).replace(max_parallel_tasks=2),
+                    policy,
+                    lambda request, *_: executor_calls.append(request.task_id),
+                )
+
+        self.assertEqual([], executor_calls)
+
+    def test_parallel_internal_abort_cancels_queued_tasks(self) -> None:
+        class Future:
+            def __init__(self, error: Exception | None = None) -> None:
+                self.error = error
+                self.cancel_calls = 0
+
+            def result(self) -> object:
+                if self.error is not None:
+                    raise self.error
+                return object()
+
+            def cancel(self) -> bool:
+                self.cancel_calls += 1
+                return True
+
+        class Pool:
+            def __init__(self) -> None:
+                self.futures = (
+                    Future(RuntimeError("internal worker failure")),
+                    Future(),
+                    Future(),
+                )
+                self.submit_count = 0
+                self.shutdown_calls: list[tuple[bool, bool]] = []
+
+            def __enter__(self) -> "Pool":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def submit(self, *_: object) -> Future:
+                future = self.futures[self.submit_count]
+                self.submit_count += 1
+                return future
+
+            def shutdown(self, wait: bool, *, cancel_futures: bool) -> None:
+                self.shutdown_calls.append((wait, cancel_futures))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshots = root / "snapshots"
+            output = root / "output"
+            snapshots.mkdir()
+            output.mkdir()
+            manifest = manifest_for(
+                "task-a",
+                "task-b",
+                "task-c",
+                snapshots_root=snapshots,
+            )
+            policy = ExecutionPolicy((("python",),))
+            pool = Pool()
+
+            with (
+                patch.object(runner, "ThreadPoolExecutor", return_value=pool),
+                self.assertRaisesRegex(RuntimeError, "internal worker failure"),
+            ):
+                run_suite(
+                    manifest,
+                    snapshots,
+                    output,
+                    "parallel-abort",
+                    "standard",
+                    "baseline",
+                    config_for(manifest, policy).replace(max_parallel_tasks=2),
+                    policy,
+                    lambda *_: self.fail("fake pool must not execute the task"),
+                )
+
+        self.assertEqual([1, 1, 1], [future.cancel_calls for future in pool.futures])
+        self.assertEqual([(True, True)], pool.shutdown_calls)
+        self.assertFalse((output / "parallel-abort" / "receipt.json").exists())
 
     def test_malformed_response_and_sensitive_event_are_not_written(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

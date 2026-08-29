@@ -9,9 +9,10 @@ import re
 import stat
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 
 from .adapter_contract import AdapterTaskRequest, parse_adapter_response
 from .contracts import BenchmarkManifest, TaskDescriptor
@@ -159,6 +160,14 @@ class _PreflightTask:
     snapshot_sha256: str
 
 
+_TaskResult = tuple[
+    TaskRunReceipt,
+    dict[str, object] | None,
+    tuple[dict[str, object], ...],
+    dict[str, object] | None,
+]
+
+
 def run_suite(
     manifest: BenchmarkManifest,
     snapshots_root: Path,
@@ -215,21 +224,22 @@ def run_suite(
     tasks_directory = run_directory / "tasks"
     tasks_directory.mkdir()
 
+    task_results = _run_preflight_tasks(
+        preflight,
+        tasks_directory,
+        execution_policy,
+        executor,
+        response_kind,
+        profile,
+        evidence_protocol_version,
+        config.max_parallel_tasks,
+    )
     records: list[TaskRunReceipt] = []
     predictions: list[dict[str, object]] = []
     commands: list[dict[str, object]] = []
     evidence_rows: list[dict[str, object]] = []
     total_usage = _ZERO_USAGE
-    for prepared in preflight:
-        record, prediction, task_commands, task_evidence = _run_task(
-            prepared,
-            tasks_directory,
-            execution_policy,
-            executor,
-            response_kind,
-            profile,
-            evidence_protocol_version,
-        )
+    for record, prediction, task_commands, task_evidence in task_results:
         records.append(record)
         commands.extend(task_commands)
         if task_evidence is not None:
@@ -257,6 +267,48 @@ def run_suite(
     )
     _write_json(run_directory / "receipt.json", receipt.to_json())
     return receipt
+
+
+def _run_preflight_tasks(
+    preflight: Sequence[_PreflightTask],
+    tasks_directory: Path,
+    execution_policy: ExecutionPolicy,
+    executor: Executor,
+    response_kind: str,
+    profile: str,
+    evidence_protocol_version: int | None,
+    max_parallel_tasks: int,
+) -> tuple[_TaskResult, ...]:
+    arguments = (
+        (
+            prepared,
+            tasks_directory,
+            execution_policy,
+            executor,
+            response_kind,
+            profile,
+            evidence_protocol_version,
+        )
+        for prepared in preflight
+    )
+    if max_parallel_tasks == 1:
+        return tuple(_run_task(*task_arguments) for task_arguments in arguments)
+    pool = ThreadPoolExecutor(
+        max_workers=max_parallel_tasks,
+        thread_name_prefix="hermesbench-task",
+    )
+    futures = []
+    try:
+        for task_arguments in arguments:
+            futures.append(pool.submit(_run_task, *task_arguments))
+        results = tuple(future.result() for future in futures)
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True, cancel_futures=False)
+    return results
 
 
 def execution_policy_sha256(policy: ExecutionPolicy) -> str:
@@ -319,7 +371,7 @@ def _run_task(
     response_kind: str,
     profile: str,
     evidence_protocol_version: int | None,
-) -> tuple[TaskRunReceipt, dict[str, object] | None, tuple[dict[str, object], ...], dict[str, object] | None]:
+) -> _TaskResult:
     descriptor = prepared.descriptor
     task_directory = tasks_directory / _task_directory_name(descriptor.task_id)
     task_directory.mkdir()

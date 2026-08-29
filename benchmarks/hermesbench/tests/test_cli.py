@@ -410,11 +410,11 @@ class RunCommandTests(unittest.TestCase):
             snapshots.mkdir()
             outputs.mkdir()
             write_json(controls, {
-                "schema_version": 2, "model": "fake", "reasoning_effort": "low",
+                "schema_version": 3, "model": "fake", "reasoning_effort": "low",
                 "seed_supported": True, "seed": "1", "image_digest": "sha256:" + "a" * 64,
                 "tool_versions": [["fake", "1"]], "time_limit_seconds": 10,
                 "max_findings": 5, "grader_version": "test", "phase_protocol_version": 1, "hunt_candidate_protocol_version": 1,
-                "invocations_per_task": 2,
+                "invocations_per_task": 2, "max_parallel_tasks": 2,
             })
             write_json(policy, {"allowed_command_prefixes": [["python"]]})
             write_json(manifest, {"schema_version": 1, "suite": "canary", "manifest_id": "cli-test", "tasks": []})
@@ -437,6 +437,10 @@ class RunCommandTests(unittest.TestCase):
                 ])
         self.assertEqual(exit_code, 0)
         self.assertEqual(run_workflow.call_args.kwargs["workflow"], "standard")
+        self.assertEqual(
+            run_workflow.call_args.kwargs["controls"].max_parallel_tasks,
+            2,
+        )
         self.assertNotIn("oracle", repr(run_workflow.call_args.kwargs))
         self.assertEqual(
             adapter.call_args.kwargs["allowed_command_prefixes"],

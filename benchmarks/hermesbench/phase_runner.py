@@ -82,10 +82,11 @@ class FrozenControls:
     phase_protocol_version: int
     hunt_candidate_protocol_version: int
     invocations_per_task: int
+    max_parallel_tasks: int = 1
 
     def __post_init__(self) -> None:
-        if self.schema_version != 2 or isinstance(self.schema_version, bool):
-            raise PhaseRunnerError("controls schema_version must be 2")
+        if self.schema_version not in {2, 3} or isinstance(self.schema_version, bool):
+            raise PhaseRunnerError("controls schema_version must be 2 or 3")
         _required_text(self.model, "model")
         _required_text(self.reasoning_effort, "reasoning_effort")
         if not isinstance(self.seed_supported, bool):
@@ -111,11 +112,20 @@ class FrozenControls:
             raise PhaseRunnerError("hunt_candidate_protocol_version is unsupported")
         if self.invocations_per_task != 2:
             raise PhaseRunnerError("invocations_per_task must be exactly 2")
+        _positive_int(self.max_parallel_tasks, "max_parallel_tasks")
+        if self.schema_version == 2 and self.max_parallel_tasks != 1:
+            raise PhaseRunnerError(
+                "max_parallel_tasks must be exactly 1 for controls schema 2"
+            )
+        if self.schema_version == 3 and self.max_parallel_tasks > 2:
+            raise PhaseRunnerError("max_parallel_tasks must be at most 2")
 
     @classmethod
     def from_json(cls, value: object) -> "FrozenControls":
         data = _object(value, "controls")
-        expected = {field.name for field in fields(cls)}
+        expected = {field.name for field in fields(cls)} - {"max_parallel_tasks"}
+        if data.get("schema_version") == 3:
+            expected.add("max_parallel_tasks")
         _exact_fields(data, expected, "controls")
         raw_tools = data["tool_versions"]
         if not isinstance(raw_tools, list):
@@ -139,10 +149,11 @@ class FrozenControls:
             phase_protocol_version=data["phase_protocol_version"],
             hunt_candidate_protocol_version=data["hunt_candidate_protocol_version"],
             invocations_per_task=data["invocations_per_task"],
+            max_parallel_tasks=data.get("max_parallel_tasks", 1),
         )
 
     def to_json(self) -> dict[str, object]:
-        return {
+        value = {
             "schema_version": self.schema_version,
             "model": self.model,
             "reasoning_effort": self.reasoning_effort,
@@ -157,6 +168,9 @@ class FrozenControls:
             "hunt_candidate_protocol_version": self.hunt_candidate_protocol_version,
             "invocations_per_task": self.invocations_per_task,
         }
+        if self.schema_version == 3:
+            value["max_parallel_tasks"] = self.max_parallel_tasks
+        return value
 
     def sha256(self) -> str:
         return _canonical_sha256(self.to_json())
@@ -174,6 +188,7 @@ class FrozenControls:
             tool_versions=self.tool_versions,
             time_limit_seconds=self.time_limit_seconds,
             max_findings=self.max_findings,
+            max_parallel_tasks=self.max_parallel_tasks,
         )
 
 

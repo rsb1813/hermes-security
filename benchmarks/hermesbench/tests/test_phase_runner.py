@@ -81,6 +81,16 @@ def _controls() -> FrozenControls:
     )
 
 
+def _parallel_controls(max_parallel_tasks: int = 2) -> FrozenControls:
+    return FrozenControls.from_json(
+        _controls().to_json()
+        | {
+            "schema_version": 3,
+            "max_parallel_tasks": max_parallel_tasks,
+        }
+    )
+
+
 def _prediction(task_id: str, *, finding_id: str = "model-id") -> dict[str, object]:
     return {
         "prediction": {
@@ -214,6 +224,27 @@ class FrozenControlsTests(unittest.TestCase):
         self.assertEqual(config.task_order_sha256, task_order_sha256(manifest))
         self.assertEqual(config.execution_policy_sha256, execution_policy_sha256(policy))
 
+    def test_parallel_controls_are_versioned_and_legacy_bytes_stay_stable(self) -> None:
+        legacy = _controls()
+        parallel = _parallel_controls()
+
+        self.assertEqual(
+            "5cfed0c9b199f2009592c79afe8bcf5669b3018124dc07469c2c09148122c155",
+            legacy.sha256(),
+        )
+        self.assertNotIn("max_parallel_tasks", legacy.to_json())
+        self.assertEqual(1, legacy.max_parallel_tasks)
+        self.assertEqual(2, parallel.to_json()["max_parallel_tasks"])
+        self.assertEqual(2, parallel.max_parallel_tasks)
+        self.assertNotEqual(legacy.sha256(), parallel.sha256())
+        self.assertEqual(1, _parallel_controls(1).max_parallel_tasks)
+
+        invalid_legacy = legacy.to_json() | {"max_parallel_tasks": 2}
+        with self.assertRaisesRegex(PhaseRunnerError, "controls"):
+            FrozenControls.from_json(invalid_legacy)
+        with self.assertRaisesRegex(PhaseRunnerError, "max_parallel_tasks"):
+            FrozenControls.from_json(parallel.to_json() | {"max_parallel_tasks": 3})
+
     def test_workflow_rejects_manifest_time_that_differs_from_frozen_controls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -278,6 +309,97 @@ class CandidateCanonicalizationTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_parallel_workflow_matches_serial_outputs_and_revalidates_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            policy = ExecutionPolicy((("python",),))
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                return ExecutorResult(
+                    _prediction(request.task_id),
+                    ({"event": "done"},),
+                    (),
+                )
+
+            def verification_factory(candidate_sets: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    candidate = candidate_sets[request.task_id][0]
+                    return ExecutorResult(
+                        _prediction(
+                            request.task_id,
+                            finding_id=candidate.candidate_id,
+                        ),
+                        ({"event": "done"},),
+                        (),
+                    )
+
+                return verification
+
+            run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "serial",
+                "standard",
+                "baseline",
+                _controls(),
+                policy,
+                discovery,
+                verification_factory,
+            )
+            parallel = run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "parallel",
+                "standard",
+                "baseline",
+                _parallel_controls(),
+                policy,
+                discovery,
+                verification_factory,
+            )
+            validated = validate_workflow_receipt(
+                manifest,
+                root / "snapshots",
+                outputs,
+                outputs / "parallel-workflow-receipt.json",
+                _parallel_controls(),
+                policy,
+            )
+            discovery_receipt = json.loads(
+                (outputs / "parallel-discovery" / "receipt.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+            for suffix in (
+                "candidates.jsonl",
+                "discovery/predictions.jsonl",
+                "verification/predictions.jsonl",
+            ):
+                with self.subTest(suffix=suffix):
+                    self.assertEqual(
+                        (outputs / f"serial-{suffix}").read_bytes(),
+                        (outputs / f"parallel-{suffix}").read_bytes(),
+                    )
+            with self.assertRaisesRegex(PhaseRunnerError, "controls"):
+                validate_workflow_receipt(
+                    manifest,
+                    root / "snapshots",
+                    outputs,
+                    outputs / "parallel-workflow-receipt.json",
+                    _controls(),
+                    policy,
+                )
+
+        self.assertEqual("completed", parallel.receipt.status)
+        self.assertEqual("completed", validated.status)
+        self.assertEqual(2, discovery_receipt["config"]["max_parallel_tasks"])
+
     def test_hunt_schema_three_receipt_accepts_each_supported_evidence_protocol(self) -> None:
         for version in (1, 2, 3, 4):
             with self.subTest(version=version):
@@ -411,7 +533,7 @@ class WorkflowTests(unittest.TestCase):
                 "partial-v4",
                 "hunt",
                 "hunt-balanced",
-                _controls(),
+                _parallel_controls(),
                 policy,
                 discovery,
                 verification_factory,
@@ -428,7 +550,7 @@ class WorkflowTests(unittest.TestCase):
                 root / "snapshots",
                 outputs,
                 outputs / "partial-v4-workflow-receipt.json",
-                _controls(),
+                _parallel_controls(),
                 policy,
             )
             candidates = [

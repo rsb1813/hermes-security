@@ -87,6 +87,13 @@ class ComparisonTests(unittest.TestCase):
             ["model", "seed", "time_limit_seconds"],
         )
 
+    def test_comparison_rejects_different_parallel_task_limits(self) -> None:
+        parallel = CONFIG.replace(max_parallel_tasks=2)
+        self.assertEqual(
+            comparison_mismatches(CONFIG, parallel),
+            ["max_parallel_tasks"],
+        )
+
     def test_workflow_and_profile_do_not_change_the_control_config(self) -> None:
         hunt_receipt = RECEIPT.replace(workflow="hunt", profile="hunt-max")
         self.assertEqual(
@@ -128,6 +135,15 @@ class ReceiptSerializationTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), first)
             self.assertTrue(first.endswith(b"\n"))
             self.assertEqual(load_receipt(output), RECEIPT)
+
+    def test_parallel_config_is_additive_and_legacy_shape_round_trips(self) -> None:
+        legacy = CONFIG.to_json()
+        parallel = CONFIG.replace(max_parallel_tasks=2)
+
+        self.assertNotIn("max_parallel_tasks", legacy)
+        self.assertEqual(CONFIG, RunConfig.from_json(legacy))
+        self.assertEqual(2, parallel.to_json()["max_parallel_tasks"])
+        self.assertEqual(parallel, RunConfig.from_json(parallel.to_json()))
 
     def test_file_hash_is_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

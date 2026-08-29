@@ -509,3 +509,14 @@
 - Three alternatives were compared. Container reuse risks task and authentication isolation, discovery-to-verification pipelining changes the phase contract, and shared authentication caching introduces mutable secret state. The selected minimal design is bounded phase-local parallelism with two isolated workers.
 - Every snapshot must still preflight before any executor begins. Workers retain distinct scratch directories, containers, and authentication runtimes; aggregate artifacts remain byte-stable in manifest order rather than completion order.
 - Parallelism is expected to lower wall time, not model-token billing. Cost claims remain limited to the already implemented zero-candidate verification skip and any measured reduction in paid timeout or attestation failures.
+
+### Task 43 bounded phase-local task parallelism
+
+- Frozen controls schema 2 remains the exact sequential contract and retains its recorded SHA-256. New schema 3 requires an explicit worker limit of one or two and binds it through the aggregate controls hash.
+- `RunConfig` defaults to one worker and omits that default during serialization, so retained phase receipt bytes still round-trip. A two-worker config serializes the field and `comparison_mismatches` rejects a different limit.
+- `run_suite` completes every snapshot preflight before task submission, uses at most two threads inside one phase, and collects completed futures in manifest order. Per-task scratch directories and task artifact directories remain disjoint; the discovery-to-verification phase barrier is unchanged.
+- Deterministic tests force reverse completion order and prove actual overlap, a maximum of two active tasks, manifest-ordered Hunt predictions, task receipts, commands, and evidence, and zero executor starts after a late preflight hash mismatch.
+- Serial and parallel workflows emit identical candidate, discovery-prediction, and verification-prediction bytes. Protocol-v4 partial discovery also completes and independently revalidates with the two-worker controls.
+- Independent review found one parallel-only abort gap. Submit or worker-boundary exceptions now cancel every queued future, wait only for already started work, preserve the original exception, and intentionally omit an aggregate receipt. The one allowed re-review found no remaining Critical or Important issue.
+- Fresh verification passes 97 focused receipt, runner, phase, and CLI tests; all 428 HermesBench Python tests with ten documented skips; the Bun bridge with one pass and zero failures; compileall; and `git diff --check`.
+- Receipt elapsed time intentionally remains aggregate task time for legacy reconstruction. End-to-end wall speed must be measured around the CLI before claiming a production speedup.

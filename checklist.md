@@ -162,9 +162,10 @@
   - [x] Bind post-response failure token usage for Protocol v4 without changing Protocols 1 through 3.
   - [x] Prove complete ordered final rows, miss-inclusive scoring, zero extra model calls, and legacy compatibility.
 - [ ] Reduce the measured sequential tail before any 48-task paid run.
-  - [ ] Add a frozen and hash-bound two-worker phase-local execution limit with legacy sequential compatibility.
-  - [ ] Preserve preflight-before-start, per-task isolation, manifest-ordered artifacts, and deterministic hashes.
-  - [ ] Prove overlap and logical equivalence with deterministic fake executors before any paid run.
+  - [x] Add a frozen and hash-bound two-worker phase-local execution limit with legacy sequential compatibility.
+  - [x] Preserve preflight-before-start, per-task isolation, manifest-ordered artifacts, and deterministic hashes.
+  - [x] Prove overlap and logical equivalence with deterministic fake executors before any paid run.
+  - [ ] Measure end-to-end wall time under the new setting before any paid Mini run.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
 

@@ -142,6 +142,28 @@ immutable lowercase digest, and its invocation budget is exactly two per task.
 }
 ```
 
+Controls schema `2` remains the exact legacy sequential contract and implies
+`max_parallel_tasks = 1` without adding a JSON field. Controls schema `3`
+requires `max_parallel_tasks` and accepts only `1` or `2`. A value of `2` runs
+at most two tasks concurrently inside one phase while preserving the discovery
+to verification barrier.
+
+```json
+{
+  "schema_version": 3,
+  "max_parallel_tasks": 2
+}
+```
+
+The abbreviated schema-3 example changes only those two fields from the full
+schema-2 document above. The worker limit is projected into each phase
+`RunConfig`, frozen by the aggregate controls hash, and compared between runs.
+All snapshots complete preflight before any worker starts. Each worker retains
+its own scratch directory, authentication runtime, and container, while task
+receipts, predictions, commands, and evidence are published in manifest order.
+Receipt `elapsed_seconds` remains aggregate task time for compatibility; measure
+end-to-end wall time around the CLI when evaluating the parallel speedup.
+
 The execution-policy document contains only a frozen command-prefix list.
 
 ```json
@@ -229,8 +251,9 @@ Standard workflow receipts remain schema version `2` with their unchanged
 field set. Hunt receipts remain schema version `3` and explicitly bind evidence
 protocol version `1`, `2`, `3`, or `4`. Every receipt reconstructs using its recorded
 protocol, including incomplete discovery, rather than current defaults or
-evidence rows. The Hunt workflow receipt schema remains `3`, and frozen controls
-schema remains `2`. The two-call ceiling, 480-second phase timeout, resource bounds,
+evidence rows. The Hunt workflow receipt schema remains `3`. Frozen controls
+schema `2` remains sequential and byte-compatible, while schema `3` adds only
+the bounded phase-local worker limit. The two-call ceiling, 480-second phase timeout, resource bounds,
 complete frontier, coverage debt, independent verifier, scorer, sandbox,
 authentication boundary, network isolation, and public-data boundary are
 unchanged. Discovery preparation remains inside the task budget, and the

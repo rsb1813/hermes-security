@@ -66,6 +66,7 @@ class RunConfig:
     tool_versions: tuple[tuple[str, str], ...]
     time_limit_seconds: int
     max_findings: int = 5
+    max_parallel_tasks: int = 1
 
     def __post_init__(self) -> None:
         _require_sha256(self.manifest_sha256, "manifest_sha256")
@@ -89,12 +90,15 @@ class RunConfig:
             raise ValueError("tool_versions must contain unique tool names")
         _require_positive_integer(self.time_limit_seconds, "time_limit_seconds")
         _require_positive_integer(self.max_findings, "max_findings")
+        _require_positive_integer(self.max_parallel_tasks, "max_parallel_tasks")
+        if self.max_parallel_tasks > 2:
+            raise ValueError("max_parallel_tasks must be at most 2")
 
     def replace(self, **changes: object) -> "RunConfig":
         return replace(self, **changes)
 
     def to_json(self) -> dict[str, object]:
-        return {
+        value = {
             "manifest_sha256": self.manifest_sha256,
             "task_order_sha256": self.task_order_sha256,
             "execution_policy_sha256": self.execution_policy_sha256,
@@ -107,11 +111,16 @@ class RunConfig:
             "time_limit_seconds": self.time_limit_seconds,
             "max_findings": self.max_findings,
         }
+        if self.max_parallel_tasks != 1:
+            value["max_parallel_tasks"] = self.max_parallel_tasks
+        return value
 
     @classmethod
     def from_json(cls, value: object) -> "RunConfig":
         data = _require_object(value, "config")
-        expected = {field.name for field in fields(cls)}
+        expected = {field.name for field in fields(cls)} - {"max_parallel_tasks"}
+        if "max_parallel_tasks" in data:
+            expected.add("max_parallel_tasks")
         _require_exact_fields(data, expected, "config")
         raw_tools = data["tool_versions"]
         if not isinstance(raw_tools, list):
@@ -133,6 +142,7 @@ class RunConfig:
             tool_versions=tuple(tools),
             time_limit_seconds=data["time_limit_seconds"],  # type: ignore[arg-type]
             max_findings=data["max_findings"],  # type: ignore[arg-type]
+            max_parallel_tasks=data.get("max_parallel_tasks", 1),  # type: ignore[arg-type]
         )
 
 
