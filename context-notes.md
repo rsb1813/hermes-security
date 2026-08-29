@@ -439,3 +439,11 @@
 - Systematic root-cause review found that the failure originates when lexical goal state mutates on the `class` token before the following tokens prove a class header. The selected correction defers the state transition until a bounded token sequence confirms the class body brace, and cancels the candidate on property, computed, malformed, or otherwise incompatible syntax.
 - The selected design remains dependency-free and single-pass. It avoids a per-file JavaScript parser process and preserves schema-1 and schema-2 isolation, keeping runtime and token costs low while protecting recall and false-positive precision.
 - On 2026-08-29, the user authorized the main agent to make non-destructive architecture decisions and continue implementation with the explicit objective of materially higher finding performance at lower cost.
+
+### Task 36 bounded nested-output detector
+
+- Task 2 adds a schema-3-only, dependency-free JavaScript and TypeScript nested-output detector for script, style, URL-attribute, and event-handler contexts. It records only canonical identifiers and fixed reason codes, with no raw expression or source snippet in observations.
+- Public RED/GREEN and independent review rounds closed wildcard and dynamic policy suppression, regex and division ambiguity, malformed HTML quote handling, sanitizer control bounds, two-hop alias rejection, nested-template recursion and exact depth semantics, block and class lexical goals, and class-header span accounting.
+- The final class architecture defers classification until a bounded balanced header reaches its body brace. This prevents object, destructuring, member, method, and computed `class` keys from contaminating later slash classification while supporting JavaScript and TypeScript class forms without an external parser process.
+- Final verification passed 74 semantic-guidance tests with three documented Windows directory-link permission skips. Compile and diff checks passed, and the final independent review reported no Critical or Important finding.
+- One Minor test-only item is deferred: permanently encode the multibyte UTF-8 16 KiB candidate-span boundary. The reviewer independently observed correct 16 KiB acceptance and +1 rejection, so no production behavior gap was found.
