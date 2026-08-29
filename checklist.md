@@ -144,7 +144,7 @@
 - [x] Add the explicit Protocol-v4 and semantic-schema-3 compatibility spine while retaining the Protocol-v3 live default.
 - [x] Approve the dependency-free bounded-tokenizer architecture correction after repeated lexical-boundary failures.
 - [x] Implement schema-3 nested-output guidance with vulnerable, guarded, and decoy tests first.
-- [ ] Implement deterministic strong-edge and family/component row allocation with budget tests first.
+- [x] Implement deterministic strong-edge and family/component row allocation with budget tests first.
 - [ ] Implement the v4 blind verifier projection and prompt golden test first.
 - [ ] Preserve exact protocol-v1 through protocol-v3 artifact, prompt, and receipt reconstruction.
 - [ ] Pass the label-independent retained-snapshot artifact build and separate private coverage gate.

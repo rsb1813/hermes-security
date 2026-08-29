@@ -447,3 +447,11 @@
 - The final class architecture defers classification until a bounded balanced header reaches its body brace. This prevents object, destructuring, member, method, and computed `class` keys from contaminating later slash classification while supporting JavaScript and TypeScript class forms without an external parser process.
 - Final verification passed 74 semantic-guidance tests with three documented Windows directory-link permission skips. Compile and diff checks passed, and the final independent review reported no Critical or Important finding.
 - One Minor test-only item is deferred: permanently encode the multibyte UTF-8 16 KiB candidate-span boundary. The reviewer independently observed correct 16 KiB acceptance and +1 rejection, so no production behavior gap was found.
+
+### Task 37 fair and bounded semantic allocation
+
+- Task 3 keeps every profile limit unchanged while making schema-3 allocation strong-first and breadth-aware. Late direct or import-linked evidence now survives earlier name-only fanout, and strong rows rotate across family and component before any dominant queue repeats.
+- Reference selection now occurs before resolution at the actual edge budget. Exact strong calls are allocated first, while unresolved name-only targets are consumed lazily only from the remaining global budget. This removes the prior calls-by-targets intermediate expansion.
+- Active declaration deques avoid repeated sparse full scans, list-plus-set edge storage removes per-caller quadratic membership, and terminal-cap guards stop all candidate prefetch immediately when the final edge is selected.
+- Optional caller companions come only from already allocated exact import-linked edges with source-bearing arguments, extend an existing local nested-output hint, and never create a hint or attach name-only/static callers.
+- Final verification passed 89 semantic-guidance tests with three documented Windows directory-link permission skips. Compile and diff checks passed, and the final independent review reported no Critical, Important, or Minor finding.
