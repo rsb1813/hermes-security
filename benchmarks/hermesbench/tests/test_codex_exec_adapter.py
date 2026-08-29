@@ -411,6 +411,72 @@ class CodexExecAdapterTests(unittest.TestCase):
             self.assertNotIn(sentinel, prompt)
         self.assertIn("inspect the immutable source independently", prompt)
 
+    def test_rich_hunt_verification_prompts_match_versioned_golden_hashes(self) -> None:
+        expected = {
+            1: "acfbe735024db238a1d0ffad74dee6205a31a785ad7b9277a80166584a9ffb37",
+            2: "acfbe735024db238a1d0ffad74dee6205a31a785ad7b9277a80166584a9ffb37",
+            3: "acfbe735024db238a1d0ffad74dee6205a31a785ad7b9277a80166584a9ffb37",
+            4: "6e2157b58a268bec00cc762564363373da5ec4c1bbb0b35f5d93b62794d2791f",
+        }
+        candidate = CanonicalCandidate(
+            candidate_id="candidate-rich",
+            entry_point=Location("source.py", 1, 1),
+            critical_operation=Location("source.py", 3, 3),
+            trace=(Location("source.py", 2, 2),),
+            confidence=0.81,
+            vulnerability_family="family-sentinel",
+            search_pass="pass-sentinel",
+            hypothesis="hypothesis-sentinel",
+            evidence="evidence-sentinel",
+            counterevidence="counterevidence-sentinel",
+            expected_control="control-sentinel",
+        )
+        rich_fields = {
+            "confidence",
+            "vulnerability_family",
+            "search_pass",
+            "hypothesis",
+            "evidence",
+            "counterevidence",
+            "expected_control",
+        }
+        sentinels = (
+            "0.81",
+            "family-sentinel",
+            "pass-sentinel",
+            "hypothesis-sentinel",
+            "evidence-sentinel",
+            "counterevidence-sentinel",
+            "control-sentinel",
+        )
+        for version, digest in expected.items():
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                runtime = _Runtime(_stream(), final_message=_HUNT_VERIFICATION_RESPONSE)
+                self._adapter(
+                    "hunt",
+                    "hunt-balanced",
+                    runtime,
+                    hunt_evidence_protocol_version=version,
+                ).for_verification({"task-001": (candidate,)})(
+                    _request(), Path(directory), 60
+                )
+                prompt = runtime.calls[0]["command_argv"][-1]
+                candidate_row = json.loads(prompt.rsplit("Candidate set: ", 1)[1])[0]
+                if version < 4:
+                    self.assertTrue(rich_fields.issubset(candidate_row))
+                    for sentinel in sentinels:
+                        self.assertIn(sentinel, prompt)
+                else:
+                    self.assertEqual(
+                        set(candidate_row),
+                        {"candidate_id", "entry_point", "critical_operation", "trace"},
+                    )
+                    for sentinel in sentinels:
+                        self.assertNotIn(sentinel, prompt)
+                self.assertEqual(
+                    hashlib.sha256(prompt.encode("utf-8")).hexdigest(), digest
+                )
+
     def test_default_hunt_verification_prompt_matches_explicit_protocol_four(self) -> None:
         default_runtime = _Runtime(_stream(), final_message=_HUNT_VERIFICATION_RESPONSE)
         explicit_runtime = _Runtime(_stream(), final_message=_HUNT_VERIFICATION_RESPONSE)
