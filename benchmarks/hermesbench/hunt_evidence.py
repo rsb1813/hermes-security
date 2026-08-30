@@ -39,6 +39,7 @@ PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION = 5
 HUNT_EVIDENCE_PROTOCOL_VERSION = NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
 SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({1, 2, 3, 4})
 _PREPARATION_HUNT_EVIDENCE_PROTOCOL_VERSIONS = SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS | frozenset({PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION})
+_ATTESTATION_HUNT_EVIDENCE_PROTOCOL_VERSIONS = _PREPARATION_HUNT_EVIDENCE_PROTOCOL_VERSIONS
 _SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({2, 3, 4, 5})
 MAX_INVENTORY_ROWS = 100_000
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
@@ -48,12 +49,16 @@ MAX_FRONTIER_BYTES = 32 * 1024 * 1024
 MAX_FRONTIER_RECEIPT_BYTES = 64 * 1024
 MAX_PRIORITY_PACKET_BYTES = 1024 * 1024
 MAX_SEMANTIC_GUIDANCE_BYTES = 1024 * 1024
+MAX_PAIRED_FLOW_SEEDS_BYTES = 128 * 1024
+MAX_PAIRED_FLOW_SEED_ROWS = 256
 PRIORITY_ROW_LIMITS = {"hunt-balanced": 512, "hunt-max": 1024}
 PRIORITY_PREVIEW_BYTES = 384
 _REQUIRED_PACKET_READ = ("cat", "/workspace/scratch/hermesbench-hunt/priority-packet.jsonl")
 _REQUIRED_SEMANTIC_READ = ("cat", "/workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl")
+_REQUIRED_PAIRED_FLOW_SEEDS_READ = ("cat", "/workspace/scratch/hermesbench-hunt/paired-flow-seeds.jsonl")
 _PLUGIN_SCRIPTS = Path(__file__).resolve().parents[2] / "sdk" / "typescript" / "_bundled_plugin" / "scripts"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_PAIRED_FLOW_SEED_ID = re.compile(r"seed-[0-9a-f]{32}\Z")
 HUNT_EVIDENCE_FIELDS_V1 = frozenset({
     "schema_version", "profile", "inventory_sha256", "inventory_count", "rank_input_sha256",
     "frontier_sha256", "frontier_count", "frontier_pass_count", "priority_packet_sha256",
@@ -69,7 +74,14 @@ HUNT_EVIDENCE_FIELDS_V2 = HUNT_EVIDENCE_FIELDS_V1 | frozenset({
 })
 HUNT_EVIDENCE_FIELDS_V3 = HUNT_EVIDENCE_FIELDS_V2
 HUNT_EVIDENCE_FIELDS_V4 = HUNT_EVIDENCE_FIELDS_V3
-HUNT_EVIDENCE_FIELDS_V5 = HUNT_EVIDENCE_FIELDS_V4
+HUNT_EVIDENCE_FIELDS_V5 = HUNT_EVIDENCE_FIELDS_V4 | frozenset({
+    "paired_flow_seed_sha256",
+    "paired_flow_seed_count",
+    "paired_flow_candidate_count",
+    "sink_only_candidate_count",
+    "fallback_candidate_count",
+    "seed_links_sha256",
+})
 HUNT_EVIDENCE_FIELDS = HUNT_EVIDENCE_FIELDS_V3
 HUNT_EVIDENCE_FAILURE_CODES = frozenset({
     "hunt_evidence_packet_missing",
@@ -79,6 +91,9 @@ HUNT_EVIDENCE_FAILURE_CODES = frozenset({
     "hunt_evidence_candidate_search_pass",
     "hunt_semantic_guidance_missing",
     "hunt_semantic_guidance_duplicate",
+    "hunt_paired_flow_seed_missing",
+    "hunt_paired_flow_seed_duplicate",
+    "hunt_paired_flow_candidate_mismatch",
 })
 
 
@@ -155,6 +170,12 @@ class HuntEvidence:
     semantic_guidance_edge_count: int | None
     semantic_guidance_scanned_file_count: int | None
     semantic_guidance_skipped_file_count: int | None
+    paired_flow_seed_sha256: str | None
+    paired_flow_seed_count: int | None
+    paired_flow_candidate_count: int | None
+    sink_only_candidate_count: int | None
+    fallback_candidate_count: int | None
+    seed_links_sha256: str | None
 
     @property
     def validated_closure_count(self) -> int:
@@ -187,6 +208,15 @@ class HuntEvidence:
                 "semantic_guidance_scanned_file_count": self.semantic_guidance_scanned_file_count,
                 "semantic_guidance_skipped_file_count": self.semantic_guidance_skipped_file_count,
             }
+        if self.protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+            value |= {
+                "paired_flow_seed_sha256": self.paired_flow_seed_sha256,
+                "paired_flow_seed_count": self.paired_flow_seed_count,
+                "paired_flow_candidate_count": self.paired_flow_candidate_count,
+                "sink_only_candidate_count": self.sink_only_candidate_count,
+                "fallback_candidate_count": self.fallback_candidate_count,
+                "seed_links_sha256": self.seed_links_sha256,
+            }
         return value
 
 
@@ -200,10 +230,10 @@ def parse_hunt_evidence(
     if not isinstance(value, dict):
         raise HuntEvidenceError("Hunt evidence fields are invalid")
     version = value.get("schema_version")
-    if not _supported_protocol_version(version):
+    if not _supported_attestation_protocol_version(version):
         raise HuntEvidenceError("Hunt evidence schema version is invalid")
     if evidence_protocol_version is not None and (
-        not _supported_protocol_version(evidence_protocol_version) or version != evidence_protocol_version
+        not _supported_attestation_protocol_version(evidence_protocol_version) or version != evidence_protocol_version
     ):
         raise HuntEvidenceError("Hunt evidence schema version is invalid")
     fields = _evidence_fields(version)
@@ -217,6 +247,8 @@ def parse_hunt_evidence(
     )
     if _uses_semantic_guidance(version):
         hashes += ("semantic_guidance_sha256",)
+    if version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        hashes += ("paired_flow_seed_sha256", "seed_links_sha256")
     for field in hashes:
         if not isinstance(value[field], str) or _SHA256.fullmatch(value[field]) is None:
             raise HuntEvidenceError("Hunt evidence hash is invalid")
@@ -231,11 +263,24 @@ def parse_hunt_evidence(
             "semantic_guidance_scanned_file_count",
             "semantic_guidance_skipped_file_count",
         )
+    if version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        counts += (
+            "paired_flow_seed_count",
+            "paired_flow_candidate_count",
+            "sink_only_candidate_count",
+            "fallback_candidate_count",
+        )
     for field in counts:
         if isinstance(value[field], bool) or not isinstance(value[field], int) or value[field] < 0:
             raise HuntEvidenceError("Hunt evidence count is invalid")
     if value["validated_closure_count"] != 0 or value["linked_location_count"] < value["candidate_count"]:
         raise HuntEvidenceError("Hunt evidence closure state is invalid")
+    if version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION and (
+        value["paired_flow_candidate_count"] + value["sink_only_candidate_count"] + value["fallback_candidate_count"] != value["candidate_count"]
+        or value["paired_flow_candidate_count"] + value["sink_only_candidate_count"] > value["paired_flow_seed_count"]
+        or value["fallback_candidate_count"] > 4
+    ):
+        raise HuntEvidenceError("Hunt evidence seed counts are invalid")
     return dict(value)
 
 
@@ -357,13 +402,18 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
     """Checks prepared bytes and binds a valid discovery result without source paths."""
     if not isinstance(prepared, PreparedHuntArtifacts):
         raise HuntEvidenceError("prepared Hunt artifacts are invalid")
-    if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
-        raise HuntEvidenceError("Protocol 5 attestation is unavailable")
     if not isinstance(observed_argv, tuple) or observed_argv.count(_REQUIRED_PACKET_READ) == 0:
         raise HuntEvidenceError("priority packet was not read", category="hunt_evidence_packet_missing")
     if observed_argv.count(_REQUIRED_PACKET_READ) != 1:
         raise HuntEvidenceError("priority packet was read more than once", category="hunt_evidence_packet_duplicate")
-    if _uses_semantic_guidance(prepared.evidence_protocol_version):
+    if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        if observed_argv.count(_REQUIRED_PAIRED_FLOW_SEEDS_READ) == 0:
+            raise HuntEvidenceError("paired flow seeds were not read", category="hunt_paired_flow_seed_missing")
+        if observed_argv.count(_REQUIRED_PAIRED_FLOW_SEEDS_READ) != 1:
+            raise HuntEvidenceError("paired flow seeds were read more than once", category="hunt_paired_flow_seed_duplicate")
+        if observed_argv.index(_REQUIRED_PACKET_READ) > observed_argv.index(_REQUIRED_PAIRED_FLOW_SEEDS_READ):
+            raise HuntEvidenceError("Hunt packet reads are out of order")
+    elif _uses_semantic_guidance(prepared.evidence_protocol_version):
         if observed_argv.count(_REQUIRED_SEMANTIC_READ) == 0:
             raise HuntEvidenceError("semantic guidance was not read", category="hunt_semantic_guidance_missing")
         if observed_argv.count(_REQUIRED_SEMANTIC_READ) != 1:
@@ -379,6 +429,7 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
         rank_by_path = _validate_rank_rows(rank_rows, inventory_paths)
         frontier_by_path = _validate_frontier_rows(frontier_rows, set(rank_by_path))
         _validate_frontier_receipt(_read_pinned_bytes(prepared.frontier_receipt, "frontier receipt", MAX_FRONTIER_RECEIPT_BYTES), prepared.profile, prepared.rank_input.sha256, len(frontier_rows))
+        paired_flow_seeds_by_id: dict[str, dict[str, object]] = {}
         if _uses_semantic_guidance(prepared.evidence_protocol_version):
             if prepared.semantic_guidance is None or any(value is None for value in (
                 prepared.semantic_guidance_row_count,
@@ -389,17 +440,53 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
                 raise HuntEvidenceError("semantic guidance is unavailable")
             _verify_record(prepared.semantic_guidance, "semantic guidance")
             _read_pinned_bytes(prepared.semantic_guidance, "semantic guidance", MAX_SEMANTIC_GUIDANCE_BYTES)
+        if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+            if prepared.paired_flow_seeds is None or any(value is None for value in (
+                prepared.paired_flow_seeds_row_count,
+                prepared.paired_flow_seeds_paired_count,
+                prepared.paired_flow_seeds_sink_only_count,
+            )):
+                raise HuntEvidenceError("paired flow seeds are unavailable")
+            _verify_record(prepared.paired_flow_seeds, "paired flow seeds")
+            paired_flow_seeds_by_id = _paired_flow_seed_rows(
+                _read_pinned_bytes(prepared.paired_flow_seeds, "paired flow seeds", MAX_PAIRED_FLOW_SEEDS_BYTES)
+            )
+            if (
+                len(paired_flow_seeds_by_id) != prepared.paired_flow_seeds_row_count
+                or sum(row["seed_kind"] == "paired-flow" for row in paired_flow_seeds_by_id.values()) != prepared.paired_flow_seeds_paired_count
+                or sum(row["seed_kind"] == "sink-only" for row in paired_flow_seeds_by_id.values()) != prepared.paired_flow_seeds_sink_only_count
+            ):
+                raise HuntEvidenceError("paired flow seed counts are invalid")
     except HuntEvidenceError as error:
         raise HuntEvidenceError("prepared Hunt artifacts are invalid", category="hunt_evidence_artifact_integrity") from error
     candidates = getattr(prediction, "candidates", None)
     if not isinstance(candidates, tuple):
         raise HuntEvidenceError("Hunt discovery prediction is invalid")
     links: list[dict[str, object]] = []
+    seed_links: list[dict[str, object]] = []
+    paired_flow_candidate_count = 0
+    sink_only_candidate_count = 0
+    fallback_candidate_count = 0
     for candidate in candidates:
         candidate_id = getattr(candidate, "finding_id", None)
         search_pass = getattr(candidate, "search_pass", None)
         locations = (("entry_point", 0, getattr(candidate, "entry_point", None)), ("critical_operation", 0, getattr(candidate, "critical_operation", None)))
         trace = tuple(("trace", index, location) for index, location in enumerate(getattr(candidate, "trace", ())))
+        seed = None
+        if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+            seed = paired_flow_seeds_by_id.get(candidate_id) if isinstance(candidate_id, str) else None
+            if seed is None:
+                if not isinstance(candidate_id, str) or candidate_id.startswith("seed-"):
+                    _paired_flow_candidate_mismatch()
+                fallback_candidate_count += 1
+            elif seed["seed_kind"] == "paired-flow":
+                if not _seed_endpoint_matches(getattr(candidate, "entry_point", None), seed["entry"]) or not _seed_endpoint_matches(getattr(candidate, "critical_operation", None), seed["critical"]) or search_pass not in seed["eligible_search_passes"]:
+                    _paired_flow_candidate_mismatch()
+                paired_flow_candidate_count += 1
+            else:
+                if not _seed_endpoint_matches(getattr(candidate, "critical_operation", None), seed["critical"]) or search_pass not in seed["eligible_search_passes"]:
+                    _paired_flow_candidate_mismatch()
+                sink_only_candidate_count += 1
         matching_pass = False
         for role, trace_index, location in (*locations, *trace):
             path = getattr(location, "path", None)
@@ -411,8 +498,15 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
             if search_pass in row["passes"]:
                 matching_pass = True
             links.append({"candidate_id": candidate_id, "role": role, "trace_index": trace_index, "start_line": start_line, "end_line": end_line, "work_id": row["work_id"], "matching_pass_work_id": row["work_id"] if search_pass in row["passes"] else None})
+            if seed is not None and role in {"entry_point", "critical_operation"}:
+                endpoint = seed["entry"] if role == "entry_point" else seed["critical"]
+                if endpoint is not None:
+                    seed_links.append({"candidate_id": candidate_id, "seed_id": seed["seed_id"], "seed_kind": seed["seed_kind"], "endpoint_role": role, "start_line": start_line, "end_line": end_line, "work_id": row["work_id"], "matching_pass_work_id": row["work_id"] if search_pass in row["passes"] else None})
         if not matching_pass:
             raise HuntEvidenceError("candidate search pass is absent from linked frontier rows", category="hunt_evidence_candidate_search_pass")
+    if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        if fallback_candidate_count > 4 or (paired_flow_seeds_by_id and candidates and paired_flow_candidate_count + sink_only_candidate_count == 0):
+            _paired_flow_candidate_mismatch()
     debt = [{"work_id": row["work_id"], "pass": review_pass} for row in frontier_rows for review_pass in row["passes"]]
     return HuntEvidence(
         prepared.evidence_protocol_version, prepared.profile, prepared.inventory.sha256, prepared.inventory_count, prepared.rank_input.sha256,
@@ -421,6 +515,12 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
         prepared.semantic_guidance.sha256 if prepared.semantic_guidance is not None else None,
         prepared.semantic_guidance_row_count, prepared.semantic_guidance_edge_count,
         prepared.semantic_guidance_scanned_file_count, prepared.semantic_guidance_skipped_file_count,
+        prepared.paired_flow_seeds.sha256 if prepared.paired_flow_seeds is not None else None,
+        prepared.paired_flow_seeds_row_count,
+        paired_flow_candidate_count if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION else None,
+        sink_only_candidate_count if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION else None,
+        fallback_candidate_count if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION else None,
+        _canonical_sha256(seed_links) if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION else None,
     )
 
 
@@ -432,8 +532,6 @@ def reproduce_hunt_evidence(
     evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
 ) -> HuntEvidence:
     """Rebuilds canonical Hunt evidence without invoking a model runtime."""
-    if evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
-        raise HuntEvidenceError("Protocol 5 evidence reproduction is unavailable")
     with tempfile.TemporaryDirectory(prefix="hermesbench-hunt-evidence-") as directory:
         prepared = prepare_hunt_artifacts(
             snapshot_path,
@@ -442,7 +540,9 @@ def reproduce_hunt_evidence(
             evidence_protocol_version=evidence_protocol_version,
         )
         observed = (_REQUIRED_PACKET_READ,)
-        if _uses_semantic_guidance(evidence_protocol_version):
+        if evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+            observed += (_REQUIRED_PAIRED_FLOW_SEEDS_READ,)
+        elif _uses_semantic_guidance(evidence_protocol_version):
             observed += (_REQUIRED_SEMANTIC_READ,)
         return attest_hunt_discovery(prepared, prediction, observed)
 
@@ -453,6 +553,10 @@ def _supported_protocol_version(value: object) -> bool:
 
 def _supported_preparation_protocol_version(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value in _PREPARATION_HUNT_EVIDENCE_PROTOCOL_VERSIONS
+
+
+def _supported_attestation_protocol_version(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value in _ATTESTATION_HUNT_EVIDENCE_PROTOCOL_VERSIONS
 
 
 def _uses_semantic_guidance(version: int) -> bool:
@@ -602,6 +706,71 @@ def _read_pinned_bytes(artifact: _Artifact, label: str, maximum: int) -> bytes:
 def _inventory_paths(path: Path) -> set[str]:
     value = _read_bounded(path, "inventory", MAX_INVENTORY_BYTES)
     return _inventory_paths_value(value)
+
+
+def _paired_flow_seed_rows(value: bytes) -> dict[str, dict[str, object]]:
+    rows = _jsonl_rows_value(value, "paired flow seeds", MAX_PAIRED_FLOW_SEED_ROWS)
+    if value != b"".join(_canonical_json(row) for row in rows):
+        raise HuntEvidenceError("paired flow seeds are not canonical")
+    result: dict[str, dict[str, object]] = {}
+    for row in rows:
+        _validate_paired_flow_seed_row(row)
+        seed_id = str(row["seed_id"])
+        if seed_id in result:
+            raise HuntEvidenceError("paired flow seed IDs are duplicated")
+        result[seed_id] = row
+    return result
+
+
+def _validate_paired_flow_seed_row(row: dict[str, object]) -> None:
+    expected = {
+        "component", "critical", "eligible_search_passes", "entry", "proof_status",
+        "reason_codes", "schema_version", "seed_id", "seed_kind", "trace",
+    }
+    if set(row) != expected or row["schema_version"] != 1 or row["proof_status"] != "investigation_only":
+        raise HuntEvidenceError("paired flow seed row is invalid")
+    if not isinstance(row["component"], str) or not row["component"] or not isinstance(row["seed_id"], str) or _PAIRED_FLOW_SEED_ID.fullmatch(row["seed_id"]) is None:
+        raise HuntEvidenceError("paired flow seed row is invalid")
+    kind = row["seed_kind"]
+    if kind not in {"paired-flow", "sink-only"}:
+        raise HuntEvidenceError("paired flow seed row is invalid")
+    _validate_seed_location(row["critical"], critical=True)
+    entry = row["entry"]
+    if (kind == "paired-flow" and entry is None) or (kind == "sink-only" and entry is not None):
+        raise HuntEvidenceError("paired flow seed row is invalid")
+    if entry is not None:
+        _validate_seed_location(entry, critical=False)
+    eligible = row["eligible_search_passes"]
+    if not isinstance(eligible, list) or not eligible or any(not isinstance(item, str) or item not in HUNT_SEARCH_PASSES for item in eligible) or len(eligible) != len(set(eligible)):
+        raise HuntEvidenceError("paired flow seed row is invalid")
+    trace = row["trace"]
+    if not isinstance(trace, list) or len(trace) > 4:
+        raise HuntEvidenceError("paired flow seed row is invalid")
+    for location in trace:
+        _validate_seed_location(location, critical=False)
+    if not isinstance(row["reason_codes"], list) or any(not isinstance(code, str) or not code for code in row["reason_codes"]):
+        raise HuntEvidenceError("paired flow seed row is invalid")
+
+
+def _validate_seed_location(value: object, *, critical: bool) -> None:
+    expected = {"path", "line", "symbol"} | ({"family"} if critical else set())
+    if not isinstance(value, dict) or set(value) != expected or not _relative_path(value.get("path")) or isinstance(value.get("line"), bool) or not isinstance(value.get("line"), int) or value["line"] <= 0 or not isinstance(value.get("symbol"), str):
+        raise HuntEvidenceError("paired flow seed endpoint is invalid")
+    if critical and (not isinstance(value.get("family"), str) or not value["family"]):
+        raise HuntEvidenceError("paired flow seed endpoint is invalid")
+
+
+def _seed_endpoint_matches(location: object, endpoint: object) -> bool:
+    return (
+        isinstance(endpoint, dict)
+        and getattr(location, "path", None) == endpoint.get("path")
+        and getattr(location, "start_line", None) == endpoint.get("line")
+        and getattr(location, "end_line", None) == endpoint.get("line")
+    )
+
+
+def _paired_flow_candidate_mismatch() -> None:
+    raise HuntEvidenceError("paired flow candidate does not match its seed", category="hunt_paired_flow_candidate_mismatch")
 
 
 def _inventory_paths_value(value: bytes) -> set[str]:

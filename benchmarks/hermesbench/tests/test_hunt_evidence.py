@@ -90,6 +90,15 @@ class HuntEvidencePreparationTests(unittest.TestCase):
                 "semantic_guidance_scanned_file_count": 3,
                 "semantic_guidance_skipped_file_count": 0,
             }
+        if version == 5:
+            payload |= {
+                "paired_flow_seed_sha256": "7" * 64,
+                "paired_flow_seed_count": 1,
+                "paired_flow_candidate_count": 1,
+                "sink_only_candidate_count": 0,
+                "fallback_candidate_count": 0,
+                "seed_links_sha256": "8" * 64,
+            }
         return payload
 
     def _semantic_snapshot(self, root: Path) -> Path:
@@ -284,6 +293,8 @@ class HuntEvidencePreparationTests(unittest.TestCase):
 class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
     """Proves that post-execution artifact and provenance changes fail closed."""
 
+    _SEED_READ = ("cat", "/workspace/scratch/hermesbench-hunt/paired-flow-seeds.jsonl")
+
     def _prepared_prediction(self, root: Path):
         snapshot = self._snapshot(root)
         prepared = prepare_hunt_artifacts(
@@ -304,33 +315,219 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
         )
         return prepared, self._prediction()
 
-    def test_protocol_five_preparation_is_not_attestable(self) -> None:
+    def _protocol_five_prediction(self, candidate: dict[str, object]):
+        return parse_hunt_discovery_prediction(
+            {"schema_version": 1, "task_id": "task-1", "candidates": [candidate]},
+            "task-1",
+        )
+
+    def _candidate(self, finding_id: str, entry: dict[str, object], critical: dict[str, object], search_pass: str) -> dict[str, object]:
+        return {
+            "finding_id": finding_id,
+            "entry_point": entry,
+            "critical_operation": critical,
+            "trace": [],
+            "confidence": 0.5,
+            "vulnerability_family": "injection",
+            "search_pass": search_pass,
+            "hypothesis": "bounded hypothesis",
+            "evidence": "bounded evidence",
+            "counterevidence": "bounded counterevidence",
+            "expected_control": "bounded control",
+        }
+
+    def _protocol_five_prepared(self, root: Path, snapshot: Path | None = None):
+        prepared = prepare_hunt_artifacts(
+            self._snapshot(root) if snapshot is None else snapshot,
+            root / "scratch",
+            "hunt-balanced",
+            evidence_protocol_version=5,
+        )
+        rows = [json.loads(line) for line in prepared.paired_flow_seeds.path.read_text(encoding="utf-8").splitlines()]
+        return prepared, rows
+
+    def _seed_snapshot(self, root: Path) -> Path:
+        snapshot = root / "seed-snapshot"
+        (snapshot / "src").mkdir(parents=True)
+        (snapshot / "src" / "routes.ts").write_text(
+            "export function handle(request, value) {\n  request.client.run(value);\n}\n",
+            encoding="utf-8",
+        )
+        (snapshot / "src" / "state.ts").write_text(
+            "export function apply(value) {\n  target.setting = value;\n  target.custom('safe');\n}\n",
+            encoding="utf-8",
+        )
+        return snapshot
+
+    @staticmethod
+    def _endpoint(location: dict[str, object]) -> dict[str, object]:
+        return {"file": location["path"], "line": location["line"]}
+
+    def test_protocol_five_attests_paired_seed_and_serializes_seed_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            prepared = prepare_hunt_artifacts(
-                self._snapshot(root),
-                root / "scratch",
-                "hunt-balanced",
-                evidence_protocol_version=5,
+            prepared, rows = self._protocol_five_prepared(root, self._semantic_snapshot(root))
+            seed = next(row for row in rows if row["seed_kind"] == "paired-flow")
+            prediction = self._protocol_five_prediction(
+                self._candidate(
+                    seed["seed_id"],
+                    self._endpoint(seed["entry"]),
+                    self._endpoint(seed["critical"]),
+                    seed["eligible_search_passes"][0],
+                )
             )
-            self.assertIsNotNone(prepared.paired_flow_seeds)
-            with self.assertRaisesRegex(HuntEvidenceError, "Protocol 5"):
+            evidence = attest_hunt_discovery(
+                prepared,
+                prediction,
+                (self._PACKET_READ, self._SEED_READ),
+            )
+        self.assertEqual(evidence.protocol_version, 5)
+        self.assertEqual(evidence.paired_flow_candidate_count, 1)
+        self.assertEqual(evidence.sink_only_candidate_count, 0)
+        self.assertEqual(evidence.fallback_candidate_count, 0)
+        self.assertEqual(set(evidence.to_json()), hunt_evidence.HUNT_EVIDENCE_FIELDS_V5)
+        self.assertEqual(
+            parse_hunt_evidence(evidence.to_json(), "hunt-balanced", evidence_protocol_version=5),
+            evidence.to_json(),
+        )
+
+    def test_protocol_five_attests_sink_only_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared, rows = self._protocol_five_prepared(root, self._seed_snapshot(root))
+            seed = next(row for row in rows if row["seed_kind"] == "sink-only")
+            entry = {"file": "src/state.ts", "line": 1}
+            prediction = self._protocol_five_prediction(
+                self._candidate(
+                    seed["seed_id"],
+                    entry,
+                    self._endpoint(seed["critical"]),
+                    seed["eligible_search_passes"][0],
+                )
+            )
+            evidence = attest_hunt_discovery(
+                prepared,
+                prediction,
+                (self._PACKET_READ, self._SEED_READ),
+            )
+        self.assertEqual(evidence.sink_only_candidate_count, 1)
+
+    def test_protocol_five_attests_unseeded_fallback_when_seeded_candidate_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared, rows = self._protocol_five_prepared(root, self._semantic_snapshot(root))
+            seed = next(row for row in rows if row["seed_kind"] == "paired-flow")
+            paired = self._candidate(seed["seed_id"], self._endpoint(seed["entry"]), self._endpoint(seed["critical"]), seed["eligible_search_passes"][0])
+            fallback = self._candidate("candidate-fallback", {"file": "app.py", "line": 2}, {"file": "app.py", "line": 3}, "forward")
+            prediction = parse_hunt_discovery_prediction(
+                {"schema_version": 1, "task_id": "task-1", "candidates": [paired, fallback]},
+                "task-1",
+            )
+            evidence = attest_hunt_discovery(
+                prepared,
+                prediction,
+                (self._PACKET_READ, self._SEED_READ),
+            )
+        self.assertEqual(evidence.fallback_candidate_count, 1)
+
+    def test_protocol_five_rejects_missing_or_duplicate_seed_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared, rows = self._protocol_five_prepared(root, self._semantic_snapshot(root))
+            seed = next(row for row in rows if row["seed_kind"] == "paired-flow")
+            prediction = self._protocol_five_prediction(self._candidate(seed["seed_id"], self._endpoint(seed["entry"]), self._endpoint(seed["critical"]), seed["eligible_search_passes"][0]))
+            for reads, expected in (
+                ((self._PACKET_READ,), "hunt_paired_flow_seed_missing"),
+                ((self._PACKET_READ, self._SEED_READ, self._SEED_READ), "hunt_paired_flow_seed_duplicate"),
+            ):
+                with self.subTest(reads=reads), self.assertRaises(HuntEvidenceError) as caught:
+                    attest_hunt_discovery(prepared, prediction, reads)
+                self.assertEqual(caught.exception.category, expected)
+
+    def test_protocol_five_rejects_seed_linkage_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared, rows = self._protocol_five_prepared(root, self._semantic_snapshot(root))
+            paired = next(row for row in rows if row["seed_kind"] == "paired-flow")
+            base = self._candidate(paired["seed_id"], self._endpoint(paired["entry"]), self._endpoint(paired["critical"]), paired["eligible_search_passes"][0])
+            mutations = (
+                {**base, "finding_id": "seed-00000000000000000000000000000000"},
+                {**base, "entry_point": {"file": base["entry_point"]["file"], "line": base["entry_point"]["line"] + 1}},
+                {**base, "search_pass": "backward"},
+                {**base, "finding_id": "seed-shaped-fallback"},
+            )
+            for candidate in mutations:
+                with self.subTest(candidate=candidate["finding_id"]), self.assertRaises(HuntEvidenceError) as caught:
+                    attest_hunt_discovery(
+                        prepared,
+                        self._protocol_five_prediction(candidate),
+                        (self._PACKET_READ, self._SEED_READ),
+                    )
+                self.assertEqual(caught.exception.category, "hunt_paired_flow_candidate_mismatch")
+
+    def test_protocol_five_rejects_unseeded_only_or_more_than_four_fallbacks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared, rows = self._protocol_five_prepared(root, self._semantic_snapshot(root))
+            seed = next(row for row in rows if row["seed_kind"] == "paired-flow")
+            seeded = self._candidate(seed["seed_id"], self._endpoint(seed["entry"]), self._endpoint(seed["critical"]), seed["eligible_search_passes"][0])
+            fallback = self._candidate("candidate-fallback", {"file": "app.py", "line": 2}, {"file": "app.py", "line": 3}, "forward")
+            cases = (
+                [fallback],
+                [seeded, *[{**fallback, "finding_id": f"candidate-fallback-{number}"} for number in range(5)]],
+            )
+            for candidates in cases:
+                with self.subTest(candidate_count=len(candidates)), self.assertRaises(HuntEvidenceError) as caught:
+                    prediction = parse_hunt_discovery_prediction({"schema_version": 1, "task_id": "task-1", "candidates": candidates}, "task-1")
+                    attest_hunt_discovery(prepared, prediction, (self._PACKET_READ, self._SEED_READ))
+                self.assertEqual(caught.exception.category, "hunt_paired_flow_candidate_mismatch")
+
+    def test_protocol_five_seed_artifact_replacement_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared, rows = self._protocol_five_prepared(root, self._semantic_snapshot(root))
+            seed = next(row for row in rows if row["seed_kind"] == "paired-flow")
+            prediction = self._protocol_five_prediction(self._candidate(seed["seed_id"], self._endpoint(seed["entry"]), self._endpoint(seed["critical"]), seed["eligible_search_passes"][0]))
+            prepared.paired_flow_seeds.path.write_bytes(b"{}\n")
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(prepared, prediction, (self._PACKET_READ, self._SEED_READ))
+        self.assertEqual(caught.exception.category, "hunt_evidence_artifact_integrity")
+
+    def test_protocol_five_rejects_cross_seed_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared, rows = self._protocol_five_prepared(root, self._seed_snapshot(root))
+            paired = [row for row in rows if row["seed_kind"] == "paired-flow"]
+            candidate = self._candidate(
+                paired[0]["seed_id"],
+                self._endpoint(paired[1]["entry"]),
+                self._endpoint(paired[0]["critical"]),
+                paired[0]["eligible_search_passes"][0],
+            )
+            with self.assertRaises(HuntEvidenceError) as caught:
                 attest_hunt_discovery(
                     prepared,
-                    self._prediction(),
-                    (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
+                    self._protocol_five_prediction(candidate),
+                    (self._PACKET_READ, self._SEED_READ),
                 )
+        self.assertEqual(caught.exception.category, "hunt_paired_flow_candidate_mismatch")
 
-    def test_protocol_five_reproduction_is_rejected(self) -> None:
+    def test_protocol_five_reproduces_seeded_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with self.assertRaisesRegex(HuntEvidenceError, "Protocol 5"):
-                hunt_evidence.reproduce_hunt_evidence(
-                    self._snapshot(root),
-                    "hunt-balanced",
-                    self._prediction(),
-                    evidence_protocol_version=5,
-                )
+            snapshot = self._semantic_snapshot(root)
+            prepared, rows = self._protocol_five_prepared(root, snapshot)
+            seed = next(row for row in rows if row["seed_kind"] == "paired-flow")
+            prediction = self._protocol_five_prediction(
+                self._candidate(seed["seed_id"], self._endpoint(seed["entry"]), self._endpoint(seed["critical"]), seed["eligible_search_passes"][0])
+            )
+            evidence = hunt_evidence.reproduce_hunt_evidence(
+                snapshot,
+                "hunt-balanced",
+                prediction,
+                evidence_protocol_version=5,
+            )
+        self.assertEqual(evidence.protocol_version, 5)
 
     def test_missing_artifact_fails_closed(self) -> None:
         # Removing a trusted artifact after preparation must invalidate attestation.
@@ -480,7 +677,7 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 self.assertEqual(set(evidence.to_json()), hunt_evidence.HUNT_EVIDENCE_FIELDS_V2)
 
     def test_parser_accepts_literal_evidence_for_each_supported_protocol(self) -> None:
-        for version in (1, 2, 3, 4):
+        for version in (1, 2, 3, 4, 5):
             with self.subTest(version=version):
                 payload = self._evidence_payload(version)
                 self.assertEqual(
@@ -513,14 +710,14 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
 
     def test_parser_rejects_unsupported_and_mismatched_protocol_versions(self) -> None:
         # Unsupported schema values and receipt-version disagreement must both fail.
-        for version in (0, 5):
+        for version in (0, 6):
             with self.subTest(unsupported=version):
                 unsupported = self._evidence_payload(1)
                 unsupported["schema_version"] = version
                 with self.assertRaises(HuntEvidenceError):
                     parse_hunt_evidence(unsupported, "hunt-balanced")
-        for row_version in (1, 2, 3, 4):
-            for expected_version in (1, 2, 3, 4):
+        for row_version in (1, 2, 3, 4, 5):
+            for expected_version in (1, 2, 3, 4, 5):
                 if row_version == expected_version:
                     continue
                 with self.subTest(row_version=row_version, expected_version=expected_version), self.assertRaises(HuntEvidenceError):
