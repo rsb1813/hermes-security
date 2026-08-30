@@ -171,3 +171,15 @@ Final verification passes 125 focused semantic tests, 54 adapter tests, all 459 
 Verification: a public RED test must prove that Protocol 4 still selects the standalone skill before implementation. GREEN tests must prove phase-specific managed-skill selection for discovery and verification, exact legacy prompt hashes, shipped plugin contents, unchanged invocation counts and candidate projection, focused and full test success, compile success, and a clean diff.
 
 Outcome: the managed phase contract is 2,852 bytes and no longer links the 12,666-byte standalone contract. Protocol 4 alone selects it in discovery and verification, while exact legacy prompt hashes and every two-call, candidate, projection, attestation, and packaging boundary remain covered by passing public tests. No model, network, container, or paid invocation was made, so end-to-end recall and billed-cost effects remain unmeasured.
+
+## Current managed-skill paid Canary checkpoint
+
+- Use the user's fresh authorization for exactly one Hunt-only Protocol-v4 Canary process. Automatic retry remains disabled, and any preflight failure must stop before a model invocation.
+- Reuse the unique private live index and its immutable manifest, snapshots, oracles, frozen controls, execution policy, and managed authentication. Infer the comparison profile from the latest valid private aggregate receipt instead of changing a benchmark variable silently.
+- Require protocol version 4, schema-3 controls, two phase-local parallel tasks, at most two model invocations per task, valid snapshot hashes, an existing safe output root, and a fresh path-safe non-existent run directory before starting.
+- Keep private task identities, paths, labels, findings, raw model text, and credentials out of public artifacts and console summaries. Record only aggregate, path-free evidence in the tracked notes.
+- After the single process exits, independently revalidate the aggregate receipt, task receipts, invocation count, usage totals, score fields, snapshot immutability, public projection boundary, and benchmark-container cleanup before making any performance claim.
+
+Verification: focused public gates and the private no-model preflight pass first; the private start ledger proves one launched process; the immutable receipt and independent revalidation agree on completion status, aggregate metrics, and frozen controls; repository state remains reviewable and no second model attempt occurs.
+
+The first guarded CLI process stopped before creating an output directory, container, model invocation, or receipt because the private launcher incorrectly passed a non-existent directory as `output-root`. The exact reproduced error is `PhaseRunnerError: output root is unavailable`. The corrected launcher now reuses the existing safe root and proves only its `run-id` child is absent. The consumed local process is retained in the private ledger, and no paid rerun is permitted without fresh authorization.
