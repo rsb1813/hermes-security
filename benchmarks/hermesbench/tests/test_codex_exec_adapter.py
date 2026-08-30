@@ -314,6 +314,13 @@ class CodexExecAdapterTests(unittest.TestCase):
             ).for_verification({"task-001": (candidate,)})(
                 _request(), verification_scratch, 60
             )
+            self.assertFalse(
+                (
+                    discovery_scratch
+                    / "hermesbench-hunt"
+                    / "semantic-guidance.jsonl"
+                ).exists()
+            )
 
         self.assertIsNotNone(result.hunt_evidence)
         self.assertEqual(
@@ -341,9 +348,8 @@ class CodexExecAdapterTests(unittest.TestCase):
         ):
             with self.subTest(instruction=instruction):
                 self.assertIn(instruction, discovery_prompt)
-        self.assertIn("Paired-flow seeds are the only seed packet for this phase", discovery_prompt)
-        self.assertIn("do not read semantic-guidance", discovery_prompt)
-        self.assertNotIn("semantic-guidance.jsonl", discovery_prompt)
+        self.assertIn("Only the priority packet and paired-flow seed packet are permitted", discovery_prompt)
+        self.assertNotIn("semantic-guidance", discovery_prompt)
         verification_command = verification.calls[0]["command_argv"]
         verification_prompt = verification_command[-1]
         self.assertEqual(
@@ -383,6 +389,40 @@ class CodexExecAdapterTests(unittest.TestCase):
                     _request(), Path(directory), 60
                 )
         self.assertEqual(caught.exception.failure_code, "command_redirect")
+        self.assertEqual(len(runtime.calls), 1)
+
+    def test_protocol_five_rejects_a_semantic_guidance_read(self) -> None:
+        encode = lambda row: json.dumps(row).encode("utf-8") + b"\n"
+        priority = {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl",
+            },
+        }
+        semantic = {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "cat /workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl",
+            },
+        }
+        runtime = _Runtime(
+            encode(priority)
+            + encode(semantic)
+            + _stream(
+                command="cat /workspace/scratch/hermesbench-hunt/paired-flow-seeds.jsonl"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter(
+                    "hunt",
+                    "hunt-balanced",
+                    runtime,
+                    hunt_evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+                )(_request(), Path(directory), 60)
+        self.assertEqual(caught.exception.failure_code, "hunt_evidence_invalid")
         self.assertEqual(len(runtime.calls), 1)
 
     def test_hunt_discovery_protocol_three_adds_pass_selection_instructions(self) -> None:

@@ -287,6 +287,9 @@ class HuntEvidencePreparationTests(unittest.TestCase):
                 first.paired_flow_seeds.path.read_bytes(),
                 second.paired_flow_seeds.path.read_bytes(),
             )
+            self.assertIsNone(first.semantic_guidance)
+            self.assertIsNotNone(first.semantic_guidance_sha256)
+            self.assertFalse((first.plan_directory / "semantic-guidance.jsonl").exists())
             self.assertIn("paired-flow-seeds.jsonl", {path.name for path in first.plan_directory.iterdir()})
 
 
@@ -294,6 +297,7 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
     """Proves that post-execution artifact and provenance changes fail closed."""
 
     _SEED_READ = ("cat", "/workspace/scratch/hermesbench-hunt/paired-flow-seeds.jsonl")
+    _SEMANTIC_READ = ("cat", "/workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl")
 
     def _prepared_prediction(self, root: Path):
         snapshot = self._snapshot(root)
@@ -443,6 +447,34 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 with self.subTest(reads=reads), self.assertRaises(HuntEvidenceError) as caught:
                     attest_hunt_discovery(prepared, prediction, reads)
                 self.assertEqual(caught.exception.category, expected)
+
+    def test_protocol_five_rejects_semantic_read_and_seed_before_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared, rows = self._protocol_five_prepared(root, self._semantic_snapshot(root))
+            seed = next(row for row in rows if row["seed_kind"] == "paired-flow")
+            prediction = self._protocol_five_prediction(
+                self._candidate(
+                    seed["seed_id"],
+                    self._endpoint(seed["entry"]),
+                    self._endpoint(seed["critical"]),
+                    seed["eligible_search_passes"][0],
+                )
+            )
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(
+                    prepared,
+                    prediction,
+                    (self._PACKET_READ, self._SEED_READ, self._SEMANTIC_READ),
+                )
+            self.assertIsNone(caught.exception.category)
+            with self.assertRaises(HuntEvidenceError) as caught:
+                attest_hunt_discovery(
+                    prepared,
+                    prediction,
+                    (self._SEED_READ, self._PACKET_READ),
+                )
+            self.assertIsNone(caught.exception.category)
 
     def test_protocol_five_rejects_seed_linkage_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

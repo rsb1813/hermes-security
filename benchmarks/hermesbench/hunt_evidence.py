@@ -128,6 +128,7 @@ class PreparedHuntArtifacts:
     frontier_receipt: _Artifact
     priority_packet: _Artifact
     semantic_guidance: _Artifact | None
+    semantic_guidance_sha256: str | None
     paired_flow_seeds: _Artifact | None
     inventory_count: int
     frontier_count: int
@@ -337,6 +338,7 @@ def prepare_hunt_artifacts(
         "priority_packet": _record(priority_packet, "priority packet"),
     }
     semantic_guidance = None
+    semantic_guidance_sha256 = None
     semantic_counts = (None, None, None, None)
     paired_flow_seeds = None
     paired_flow_seed_counts = (None, None, None)
@@ -348,9 +350,12 @@ def prepare_hunt_artifacts(
             guidance_schema_version=_semantic_guidance_schema_version(evidence_protocol_version),
             include_paired_flow_seeds=evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
         )
-        semantic_guidance_path.write_bytes(guidance.canonical_bytes)
-        semantic_guidance = _record(semantic_guidance_path, "semantic guidance")
-        artifacts["semantic_guidance"] = semantic_guidance
+        semantic_guidance_sha256 = hashlib.sha256(guidance.canonical_bytes).hexdigest()
+        if evidence_protocol_version != PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+            semantic_guidance_path.write_bytes(guidance.canonical_bytes)
+            semantic_guidance = _record(semantic_guidance_path, "semantic guidance")
+            artifacts["semantic_guidance"] = semantic_guidance
+            semantic_guidance_sha256 = semantic_guidance.sha256
         semantic_counts = (
             guidance.row_count,
             guidance.edge_count,
@@ -369,7 +374,10 @@ def prepare_hunt_artifacts(
                 guidance.paired_flow_seeds.sink_only_count,
             )
     passes = {(str(row["work_id"]), value) for row in frontier_rows for value in row["passes"]}
-    fingerprint = _canonical_sha256({name: artifact.sha256 for name, artifact in artifacts.items()} | {"profile": profile})
+    fingerprint_artifacts = {name: artifact.sha256 for name, artifact in artifacts.items()}
+    if semantic_guidance_sha256 is not None:
+        fingerprint_artifacts["semantic_guidance"] = semantic_guidance_sha256
+    fingerprint = _canonical_sha256(fingerprint_artifacts | {"profile": profile})
     return PreparedHuntArtifacts(
         plan_directory=plan,
         profile=profile,
@@ -380,6 +388,7 @@ def prepare_hunt_artifacts(
         frontier_receipt=artifacts["frontier_receipt"],
         priority_packet=artifacts["priority_packet"],
         semantic_guidance=semantic_guidance,
+        semantic_guidance_sha256=semantic_guidance_sha256,
         paired_flow_seeds=paired_flow_seeds,
         inventory_count=len(inventory_paths),
         frontier_count=len(frontier_rows),
@@ -407,6 +416,8 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
     if observed_argv.count(_REQUIRED_PACKET_READ) != 1:
         raise HuntEvidenceError("priority packet was read more than once", category="hunt_evidence_packet_duplicate")
     if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        if observed_argv.count(_REQUIRED_SEMANTIC_READ):
+            raise HuntEvidenceError("semantic guidance is not permitted for paired flow")
         if observed_argv.count(_REQUIRED_PAIRED_FLOW_SEEDS_READ) == 0:
             raise HuntEvidenceError("paired flow seeds were not read", category="hunt_paired_flow_seed_missing")
         if observed_argv.count(_REQUIRED_PAIRED_FLOW_SEEDS_READ) != 1:
@@ -431,15 +442,22 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
         _validate_frontier_receipt(_read_pinned_bytes(prepared.frontier_receipt, "frontier receipt", MAX_FRONTIER_RECEIPT_BYTES), prepared.profile, prepared.rank_input.sha256, len(frontier_rows))
         paired_flow_seeds_by_id: dict[str, dict[str, object]] = {}
         if _uses_semantic_guidance(prepared.evidence_protocol_version):
-            if prepared.semantic_guidance is None or any(value is None for value in (
+            if prepared.semantic_guidance_sha256 is None or any(value is None for value in (
                 prepared.semantic_guidance_row_count,
                 prepared.semantic_guidance_edge_count,
                 prepared.semantic_guidance_scanned_file_count,
                 prepared.semantic_guidance_skipped_file_count,
             )):
                 raise HuntEvidenceError("semantic guidance is unavailable")
-            _verify_record(prepared.semantic_guidance, "semantic guidance")
-            _read_pinned_bytes(prepared.semantic_guidance, "semantic guidance", MAX_SEMANTIC_GUIDANCE_BYTES)
+            if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+                semantic_guidance_path = prepared.plan_directory / SEMANTIC_GUIDANCE_NAME
+                if prepared.semantic_guidance is not None or semantic_guidance_path.exists() or semantic_guidance_path.is_symlink() or _SHA256.fullmatch(prepared.semantic_guidance_sha256) is None:
+                    raise HuntEvidenceError("semantic guidance is invalid")
+            else:
+                if prepared.semantic_guidance is None:
+                    raise HuntEvidenceError("semantic guidance is unavailable")
+                _verify_record(prepared.semantic_guidance, "semantic guidance")
+                _read_pinned_bytes(prepared.semantic_guidance, "semantic guidance", MAX_SEMANTIC_GUIDANCE_BYTES)
         if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
             if prepared.paired_flow_seeds is None or any(value is None for value in (
                 prepared.paired_flow_seeds_row_count,
@@ -512,7 +530,7 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
         prepared.evidence_protocol_version, prepared.profile, prepared.inventory.sha256, prepared.inventory_count, prepared.rank_input.sha256,
         prepared.frontier.sha256, prepared.frontier_count, prepared.frontier_pass_count, prepared.priority_packet.sha256,
         prepared.priority_count, _canonical_sha256(links), len(candidates), len(links), _canonical_sha256(debt), len(debt),
-        prepared.semantic_guidance.sha256 if prepared.semantic_guidance is not None else None,
+        prepared.semantic_guidance_sha256,
         prepared.semantic_guidance_row_count, prepared.semantic_guidance_edge_count,
         prepared.semantic_guidance_scanned_file_count, prepared.semantic_guidance_skipped_file_count,
         prepared.paired_flow_seeds.sha256 if prepared.paired_flow_seeds is not None else None,
