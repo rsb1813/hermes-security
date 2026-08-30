@@ -326,6 +326,22 @@ class SemanticGuidanceTests(unittest.TestCase):
                 with self.assertRaises(semantic_guidance.SemanticGuidanceError):
                     semantic_guidance.decode_paired_flow_seeds(packet, "hunt-balanced")
 
+    def test_factorized_decoder_rejects_duplicate_entry_and_critical_endpoints(self) -> None:
+        duplicate_entry = (
+            b'{"c":[[1,"component-api"]],"p":[[1,"src/app.ts"]],"t":"d","v":2}\n'
+            b'{"e":[[1,1,1,"handle"],[2,1,1,"handle"]],"t":"e","v":2}\n'
+            b'{"t":"x","v":2,"x":[[1,1,2,"run","c",1,"f",[[1,"f"]]]]}\n'
+        )
+        duplicate_critical = (
+            b'{"c":[[1,"component-api"]],"p":[[1,"src/app.ts"]],"t":"d","v":2}\n'
+            b'{"e":[[1,1,1,"handle"]],"t":"e","v":2}\n'
+            b'{"t":"x","v":2,"x":[[1,1,2,"run","c",1,"f",[[1,"f"]]],[2,1,2,"run","c",1,"f",[]]]}\n'
+        )
+        for packet in (duplicate_entry, duplicate_critical):
+            with self.subTest(packet=packet):
+                with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+                    semantic_guidance.decode_paired_flow_seeds(packet, "hunt-balanced")
+
     def test_factorized_decoder_rejects_boolean_ids_noncanonical_rows_and_five_adjacencies(self) -> None:
         valid = (
             b'{"c":[[1,"component-api"]],"p":[[1,"src/app.ts"]],"t":"d","v":2}\n'
