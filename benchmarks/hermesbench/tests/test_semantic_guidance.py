@@ -337,7 +337,12 @@ class SemanticGuidanceTests(unittest.TestCase):
             b'{"e":[[1,1,1,"handle"]],"t":"e","v":2}\n'
             b'{"t":"x","v":2,"x":[[1,1,2,"run","c",1,"f",[[1,"f"]]],[2,1,2,"run","c",1,"f",[]]]}\n'
         )
-        for packet in (duplicate_entry, duplicate_critical):
+        duplicate_critical_component = (
+            b'{"c":[[1,"component-api"],[2,"component-other"]],"p":[[1,"src/app.ts"]],"t":"d","v":2}\n'
+            b'{"e":[[1,1,1,"handle"]],"t":"e","v":2}\n'
+            b'{"t":"x","v":2,"x":[[1,1,2,"run","c",1,"f",[[1,"f"]]],[2,1,2,"run","c",2,"f",[]]]}\n'
+        )
+        for packet in (duplicate_entry, duplicate_critical, duplicate_critical_component):
             with self.subTest(packet=packet):
                 with self.assertRaises(semantic_guidance.SemanticGuidanceError):
                     semantic_guidance.decode_paired_flow_seeds(packet, "hunt-balanced")

@@ -2861,14 +2861,14 @@ def decode_paired_flow_seeds(data: bytes, profile: str) -> tuple[dict[str, objec
     if not paths or not components or not critical_rows:
         raise SemanticGuidanceError("paired flow seed packet is incomplete")
     logical: list[dict[str, object]] = []
-    critical_endpoints: set[tuple[str, int, str, str, str]] = set()
+    critical_endpoints: set[tuple[str, int, str, str]] = set()
     for value in critical_rows:
         if not isinstance(value, list) or len(value) != 8:
             raise SemanticGuidanceError("paired flow seed critical is invalid")
         critical_id, path_id, line, symbol, family_code, component_id, pass_codes, adjacency = value
         if not _valid_paired_id(critical_id, expected_ids["x"]) or not _valid_paired_id(path_id) or not _valid_paired_id(component_id) or path_id not in paths or component_id not in components or not _valid_paired_line(line) or not _valid_paired_symbol(symbol) or family_code not in PAIRED_FLOW_CODE_FAMILIES:
             raise SemanticGuidanceError("paired flow seed critical is invalid")
-        critical_endpoint = (paths[path_id], line, symbol, family_code, components[component_id])
+        critical_endpoint = (paths[path_id], line, symbol, family_code)
         if critical_endpoint in critical_endpoints:
             raise SemanticGuidanceError("paired flow seed critical is invalid")
         critical_endpoints.add(critical_endpoint)
