@@ -197,11 +197,11 @@
   - [x] Select it only for Protocol 4 while preserving Protocol 1 through Protocol 3 prompt bytes.
   - [x] Prove unchanged candidate caps, verifier projection, invocation count, schemas, and host attestation.
   - [x] Run focused, full, bridge, compile, diff, packaging, and independent review gates.
-- [ ] Measure the managed-skill Protocol-v4 change with one freshly authorized paid Hunt Canary process.
+- [x] Measure the managed-skill Protocol-v4 change with one freshly authorized paid Hunt Canary process.
   - [x] Recover the exact prior comparison profile and frozen private inputs without disclosing private values.
   - [x] Pass focused public tests plus private controls, authentication, snapshot, and output-path preflight checks.
-  - [ ] Launch exactly one process with no automatic retry and preserve its private start/finish ledger.
-  - [ ] Independently revalidate receipts, aggregate metrics, invocation counts, snapshots, public boundaries, and container cleanup.
+  - [x] Launch exactly one process with no automatic retry and preserve its private start/finish ledger.
+  - [x] Independently revalidate receipts, aggregate metrics, invocation counts, snapshots, public boundaries, and container cleanup.
   - [x] Record path-free evidence, self-review the diff, run final verification, and create one semantic commit.
 
 ## Completion
