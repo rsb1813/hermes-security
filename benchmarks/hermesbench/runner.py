@@ -92,6 +92,9 @@ _PUBLIC_FAILURE_CODES = frozenset(
         "hunt_evidence_candidate_search_pass",
         "hunt_semantic_guidance_missing",
         "hunt_semantic_guidance_duplicate",
+        "hunt_paired_flow_seed_missing",
+        "hunt_paired_flow_seed_duplicate",
+        "hunt_paired_flow_candidate_mismatch",
     }
 )
 _SUCCESS_ARTIFACT_NAMES = frozenset({"adapter-response.json", "events.jsonl", "commands.jsonl", "evidence.json"})

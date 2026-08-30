@@ -30,7 +30,12 @@ from benchmarks.hermesbench.runner import (
 from benchmarks.hermesbench.sanitize import tree_sha256
 from benchmarks.hermesbench.receipts import TokenUsage, sha256_file
 from benchmarks.hermesbench.scoring import score_run
-from benchmarks.hermesbench.hunt_evidence import HUNT_EVIDENCE_PROTOCOL_VERSION, reproduce_hunt_evidence
+from benchmarks.hermesbench.hunt_evidence import (
+    HUNT_EVIDENCE_PROTOCOL_VERSION,
+    PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+    prepare_hunt_artifacts,
+    reproduce_hunt_evidence,
+)
 from benchmarks.hermesbench.hunt_protocol import parse_hunt_discovery_prediction
 from benchmarks.hermesbench.adapters.codex_exec import _normalize_command
 
@@ -130,6 +135,40 @@ def _hunt_result(
     evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
 ) -> ExecutorResult:
     response = _hunt_discovery(request.task_id, count)
+    if evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        with tempfile.TemporaryDirectory() as directory:
+            prepared = prepare_hunt_artifacts(
+                Path(request.snapshot_path),
+                Path(directory),
+                "hunt-balanced",
+                evidence_protocol_version=evidence_protocol_version,
+            )
+            seed = next(
+                json.loads(line)
+                for line in prepared.paired_flow_seeds.path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if json.loads(line)["seed_kind"] == "paired-flow"
+            )
+        response["prediction"]["candidates"] = [
+            _hunt_candidate(1)
+            | {
+                "finding_id": seed["seed_id"],
+                "entry_point": {
+                    "file": seed["entry"]["path"],
+                    "line": seed["entry"]["line"],
+                },
+                "critical_operation": {
+                    "file": seed["critical"]["path"],
+                    "line": seed["critical"]["line"],
+                },
+                "trace": [
+                    {"file": location["path"], "line": location["line"]}
+                    for location in seed["trace"]
+                ],
+                "search_pass": seed["eligible_search_passes"][0],
+            }
+        ]
     prediction = parse_hunt_discovery_prediction(response["prediction"], request.task_id)
     evidence = reproduce_hunt_evidence(
         Path(request.snapshot_path),
@@ -175,6 +214,18 @@ def _hunt_receipt(evidence_protocol_version: int) -> dict[str, object]:
 
 def _hunt_verification(task_id: str, candidate: object) -> dict[str, object]:
     finding = _prediction(task_id, finding_id=candidate.candidate_id)["prediction"]["findings"][0]
+    finding["entry_point"] = {
+        "file": candidate.entry_point.path,
+        "line": candidate.entry_point.start_line,
+    }
+    finding["critical_operation"] = {
+        "file": candidate.critical_operation.path,
+        "line": candidate.critical_operation.start_line,
+    }
+    finding["trace"] = [
+        {"file": location.path, "line": location.start_line}
+        for location in candidate.trace
+    ]
     finding["confidence"] = candidate.confidence
     decision = {"candidate_id": candidate.candidate_id, "disposition": "accepted", "attacker_control": "proven", "reachability": "proven", "impact": "proven", "guard_failure": "proven", "evidence": "Confirmed.", "counterevidence": "", "proof_gaps": "", "confidence": candidate.confidence}
     return {"prediction": {"schema_version": 1, "task_id": task_id, "findings": [finding], "decisions": [decision]}, "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}}
@@ -401,7 +452,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(2, discovery_receipt["config"]["max_parallel_tasks"])
 
     def test_hunt_schema_three_receipt_accepts_each_supported_evidence_protocol(self) -> None:
-        for version in (1, 2, 3, 4):
+        for version in (1, 2, 3, 4, 5):
             with self.subTest(version=version):
                 self.assertEqual(
                     WorkflowReceipt.from_json(
@@ -411,7 +462,7 @@ class WorkflowTests(unittest.TestCase):
                 )
 
     def test_hunt_schema_three_receipt_rejects_unsupported_evidence_protocol(self) -> None:
-        for version in (0, 5):
+        for version in (0, 6):
             with self.subTest(version=version):
                 with self.assertRaisesRegex(PhaseRunnerError, "protocol"):
                     WorkflowReceipt.from_json(_hunt_receipt(version))
@@ -471,6 +522,175 @@ class WorkflowTests(unittest.TestCase):
                     )
                     self.assertEqual(validated.hunt_evidence_protocol_version, version)
 
+    def test_protocol_five_workflow_completes_and_revalidates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            policy = ExecutionPolicy((("python",),))
+
+            def verification_factory(candidates: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    return ExecutorResult(
+                        _hunt_verification(
+                            request.task_id,
+                            candidates[request.task_id][0],
+                        ),
+                        ({"event": "done"},),
+                        (),
+                    )
+
+                return verification
+
+            result = run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "protocol-five",
+                "hunt",
+                "hunt-balanced",
+                _controls(),
+                policy,
+                lambda request, *_: _hunt_result(
+                    request,
+                    evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+                ),
+                verification_factory,
+            )
+            validated = validate_workflow_receipt(
+                manifest,
+                root / "snapshots",
+                outputs,
+                outputs / "protocol-five-workflow-receipt.json",
+                _controls(),
+                policy,
+            )
+
+        self.assertEqual("completed", result.receipt.status)
+        self.assertEqual(
+            PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+            result.receipt.hunt_evidence_protocol_version,
+        )
+        self.assertEqual("completed", validated.status)
+
+    def test_protocol_five_scores_recoverable_discovery_failure_as_empty_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+            model_calls: list[str] = []
+
+            def discovery(request: object, *_: object) -> ExecutorResult:
+                if request.task_id == "task-a":
+                    raise ExecutorFailureError(
+                        "private discovery detail",
+                        failure_code="hunt_paired_flow_candidate_mismatch",
+                    )
+                return _hunt_result(
+                    request,
+                    evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+                )
+
+            def verification_factory(candidates: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    model_calls.append(request.task_id)
+                    return ExecutorResult(
+                        _hunt_verification(request.task_id, candidates[request.task_id][0]),
+                        ({"event": "done"},),
+                        (),
+                    )
+
+                return verification
+
+            result = run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "partial-v5-discovery",
+                "hunt",
+                "hunt-balanced",
+                _controls(),
+                ExecutionPolicy((("python",),)),
+                discovery,
+                verification_factory,
+                hunt_evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+            )
+            validated = validate_workflow_receipt(
+                manifest,
+                root / "snapshots",
+                outputs,
+                outputs / "partial-v5-discovery-workflow-receipt.json",
+                _controls(),
+                ExecutionPolicy((("python",),)),
+            )
+            candidates = [
+                json.loads(line)
+                for line in (outputs / "partial-v5-discovery-candidates.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()
+            ]
+
+        self.assertEqual("completed", result.receipt.status)
+        self.assertEqual("completed", validated.status)
+        self.assertEqual(["task-b"], model_calls)
+        self.assertEqual([], candidates[0]["candidates"])
+
+    def test_protocol_five_scores_recoverable_verification_failure_as_empty_miss(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = _manifest(root)
+            outputs = root / "outputs"
+            outputs.mkdir()
+
+            def verification_factory(candidates: object):
+                def verification(request: object, *_: object) -> ExecutorResult:
+                    if request.task_id == "task-a":
+                        raise ExecutorFailureError(
+                            "private verification detail",
+                            failure_code="hunt_paired_flow_seed_missing",
+                        )
+                    return ExecutorResult(
+                        _hunt_verification(request.task_id, candidates[request.task_id][0]),
+                        ({"event": "done"},),
+                        (),
+                    )
+
+                return verification
+
+            result = run_workflow(
+                manifest,
+                root / "snapshots",
+                outputs,
+                "partial-v5-verification",
+                "hunt",
+                "hunt-balanced",
+                _controls(),
+                ExecutionPolicy((("python",),)),
+                lambda request, *_: _hunt_result(
+                    request,
+                    evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+                ),
+                verification_factory,
+                hunt_evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+            )
+            predictions = load_predictions(
+                outputs / "partial-v5-verification-public-predictions.jsonl"
+            )
+            validated = validate_workflow_receipt(
+                manifest,
+                root / "snapshots",
+                outputs,
+                outputs / "partial-v5-verification-workflow-receipt.json",
+                _controls(),
+                ExecutionPolicy((("python",),)),
+            )
+
+        self.assertEqual("completed", result.receipt.status)
+        self.assertEqual("completed", validated.status)
+        self.assertEqual((), predictions["task-a"].findings)
+
     def test_hunt_workflow_rejects_evidence_from_a_different_selected_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -513,7 +733,7 @@ class WorkflowTests(unittest.TestCase):
                         failure_code="hunt_evidence_candidate_location",
                         token_usage=TokenUsage(11, 13, 17),
                     )
-                return _hunt_result(request)
+                return _hunt_result(request, evidence_protocol_version=4)
 
             def verification_factory(candidates: object):
                 def verification(request: object, *_: object) -> ExecutorResult:
@@ -616,7 +836,7 @@ class WorkflowTests(unittest.TestCase):
                 "hunt-balanced",
                 _controls(),
                 policy,
-                lambda request, *_: _hunt_result(request),
+                lambda request, *_: _hunt_result(request, evidence_protocol_version=4),
                 verification_factory,
                 lambda path: {
                     "advisory_recall": score_run(
@@ -690,6 +910,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(
             phase_runner._recoverable_partial_phase(
                 (completed, failed), "hunt", 4
+            )
+        )
+        self.assertTrue(
+            phase_runner._recoverable_partial_phase(
+                (completed, failed), "hunt", 5
             )
         )
         self.assertFalse(
@@ -829,14 +1054,14 @@ class WorkflowTests(unittest.TestCase):
             outputs.mkdir()
 
             def discovery(request: object, *_: object) -> ExecutorResult:
-                return _hunt_result(request)
+                return _hunt_result(request, evidence_protocol_version=4)
 
             def verification_factory(candidates: object):
                 def verification(request: object, *_: object) -> ExecutorResult:
                     return ExecutorResult(_hunt_verification(request.task_id, candidates[request.task_id][0]), ({"event": "done"},), ())
                 return verification
 
-            run_workflow(manifest, root / "snapshots", outputs, "evidence", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory)
+            run_workflow(manifest, root / "snapshots", outputs, "evidence", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory, hunt_evidence_protocol_version=4)
             receipt_path = outputs / "evidence-workflow-receipt.json"
             receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             self.assertEqual(receipt["schema_version"], 3)
@@ -870,14 +1095,14 @@ class WorkflowTests(unittest.TestCase):
             outputs.mkdir()
 
             def discovery(request: object, *_: object) -> ExecutorResult:
-                return _hunt_result(request)
+                return _hunt_result(request, evidence_protocol_version=4)
 
             def verification_factory(_: object):
                 def verification(*_: object) -> ExecutorResult:
                     raise ExecutorFailureError("failure", failure_code="final_response_invalid")
                 return verification
 
-            run_workflow(manifest, root / "snapshots", outputs, "missing-evidence", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory)
+            run_workflow(manifest, root / "snapshots", outputs, "missing-evidence", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory, hunt_evidence_protocol_version=4)
             evidence_path = outputs / "missing-evidence-discovery" / "evidence.jsonl"
             evidence_path.unlink()
             with self.assertRaisesRegex(PhaseRunnerError, "evidence"):
@@ -913,14 +1138,14 @@ class WorkflowTests(unittest.TestCase):
             outputs.mkdir()
 
             def discovery(request: object, *_: object) -> ExecutorResult:
-                return _hunt_result(request)
+                return _hunt_result(request, evidence_protocol_version=4)
 
             def verification_factory(_: object):
                 def verification(*_: object) -> ExecutorResult:
                     raise ExecutorFailureError("public failure", failure_code="final_response_invalid")
                 return verification
 
-            result = run_workflow(manifest, root / "snapshots", outputs, "incomplete-hunt", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory)
+            result = run_workflow(manifest, root / "snapshots", outputs, "incomplete-hunt", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory, hunt_evidence_protocol_version=4)
             receipt_path = outputs / "incomplete-hunt-workflow-receipt.json"
 
             self.assertEqual(result.receipt.status, "incomplete")
@@ -1078,7 +1303,7 @@ class WorkflowTests(unittest.TestCase):
             received: dict[str, tuple[object, ...]] = {}
 
             def discovery(request: object, *_: object) -> ExecutorResult:
-                return _hunt_result(request, 6)
+                return _hunt_result(request, 6, evidence_protocol_version=4)
 
             def valid_factory(candidate_sets: object):
                 received.update(candidate_sets)
@@ -1097,7 +1322,7 @@ class WorkflowTests(unittest.TestCase):
                     return ExecutorResult({"prediction": {"schema_version": 1, "task_id": request.task_id, "findings": findings, "decisions": decisions}, "usage": {"input_tokens": 7, "cached_input_tokens": 2, "output_tokens": 3}}, ({"event": "done"},), ())
                 return verification
 
-            result = run_workflow(manifest, root / "snapshots", outputs, "six", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, valid_factory)
+            result = run_workflow(manifest, root / "snapshots", outputs, "six", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, valid_factory, hunt_evidence_protocol_version=4)
             rows = [json.loads(line) for line in (outputs / "six-candidates.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(len(rows[0]["candidates"]), 6)
             self.assertIn("expected_control", rows[0]["candidates"][5])
@@ -1146,7 +1371,7 @@ class WorkflowTests(unittest.TestCase):
                 return verification
 
             with self.assertRaisesRegex(PhaseRunnerError, "terminal decision"):
-                run_workflow(manifest, root / "snapshots", outputs, "missing", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, missing_factory)
+                run_workflow(manifest, root / "snapshots", outputs, "missing", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, missing_factory, hunt_evidence_protocol_version=4)
 
     def test_hunt_score_callback_receives_public_predictions_without_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1156,7 +1381,7 @@ class WorkflowTests(unittest.TestCase):
             outputs.mkdir()
 
             def discovery(request: object, *_: object) -> ExecutorResult:
-                return _hunt_result(request)
+                return _hunt_result(request, evidence_protocol_version=4)
 
             def verification_factory(candidates: object):
                 def verification(request: object, *_: object) -> ExecutorResult:
@@ -1166,7 +1391,7 @@ class WorkflowTests(unittest.TestCase):
             def score(predictions_path: Path) -> dict[str, object]:
                 return {"findings": sum(len(row.findings) for row in load_predictions(predictions_path).values())}
 
-            result = run_workflow(manifest, root / "snapshots", outputs, "hunt-score", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory, score)
+            result = run_workflow(manifest, root / "snapshots", outputs, "hunt-score", "hunt", "hunt-balanced", _controls(), ExecutionPolicy((("python",),)), discovery, verification_factory, score, hunt_evidence_protocol_version=4)
 
         self.assertEqual(result.artifact_paths["final_predictions"], "hunt-score-public-predictions.jsonl")
     def test_host_scoring_input_never_enters_executor_or_public_artifacts(self) -> None:
@@ -1457,7 +1682,7 @@ class WorkflowTests(unittest.TestCase):
                 return verification
 
             def hunt_executor(request: object, *_: object) -> ExecutorResult:
-                return _hunt_result(request)
+                return _hunt_result(request, evidence_protocol_version=4)
 
             def hunt_factory(candidate_sets: object):
                 def verification(request: object, *_: object) -> ExecutorResult:
@@ -1475,6 +1700,7 @@ class WorkflowTests(unittest.TestCase):
                 {"standard": executor, "hunt": hunt_executor},
                 {"standard": factory, "hunt": hunt_factory},
                 {"standard": "baseline", "hunt": "hunt-balanced"},
+                hunt_evidence_protocol_version=4,
             )
             comparison_artifact = json.loads((outputs / "paired-comparison.json").read_text(encoding="utf-8"))
         self.assertEqual(paired.schedule, (("standard", "hunt"), ("hunt", "standard"), ("standard", "hunt")))

@@ -78,10 +78,6 @@ _MAX_ERROR_JSON_DEPTH = 4
 _STANDARD_SKILL = "/workspace/plugin/skills/security-scan/SKILL.md"
 _HUNT_SKILL = "/workspace/plugin/skills/hunt-security-scan/SKILL.md"
 _HUNT_MANAGED_SKILL = "/workspace/plugin/skills/hunt-security-scan-managed/SKILL.md"
-_ADAPTER_HUNT_EVIDENCE_PROTOCOL_VERSIONS = (
-    SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS
-    | frozenset({PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION})
-)
 _SCHEMA_PATH = "/workspace/schema/prediction-response.schema.json"
 _HUNT_DISCOVERY_SCHEMA_PATH = "/workspace/schema/hunt-discovery-response.schema.json"
 _HUNT_VERIFICATION_SCHEMA_PATH = "/workspace/schema/hunt-verification-response.schema.json"
@@ -192,7 +188,7 @@ class CodexExecAdapter:
         if (
             not isinstance(hunt_evidence_protocol_version, int)
             or isinstance(hunt_evidence_protocol_version, bool)
-            or hunt_evidence_protocol_version not in _ADAPTER_HUNT_EVIDENCE_PROTOCOL_VERSIONS
+            or hunt_evidence_protocol_version not in SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS
         ):
             raise ValueError("Hunt evidence protocol is unsupported")
         self._hunt_evidence_protocol_version = hunt_evidence_protocol_version

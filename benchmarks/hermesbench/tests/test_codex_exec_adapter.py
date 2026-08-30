@@ -211,9 +211,9 @@ class CodexExecAdapterTests(unittest.TestCase):
                     hashlib.sha256(prompt.encode("utf-8")).hexdigest(), digest
                 )
 
-    def test_hunt_discovery_default_protocol_equals_explicit_protocol_four(self) -> None:
-        default = _Runtime(_hunt_stream())
-        explicit = _Runtime(_hunt_stream())
+    def test_hunt_discovery_default_protocol_equals_explicit_protocol_five(self) -> None:
+        default = _Runtime(_paired_flow_stream())
+        explicit = _Runtime(_paired_flow_stream())
         with tempfile.TemporaryDirectory() as directory:
             self._adapter("hunt", "hunt-balanced", default)(
                 _request(), Path(directory) / "default", 60
@@ -222,7 +222,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                 "hunt",
                 "hunt-balanced",
                 explicit,
-                hunt_evidence_protocol_version=4,
+                hunt_evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
             )(_request(), Path(directory) / "explicit", 60)
         self.assertEqual(
             default.calls[0]["command_argv"][-1],
@@ -783,7 +783,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                 packet.write_bytes(packet.read_bytes() + b" ")
                 return result
 
-        runtime = MutatingRuntime(_hunt_stream())
+        runtime = MutatingRuntime(_paired_flow_stream())
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as caught:
                 self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
@@ -1041,7 +1041,7 @@ class CodexExecAdapterTests(unittest.TestCase):
     def test_hunt_command_arguments_are_single_line_for_each_profile(self) -> None:
         for profile in ("hunt-balanced", "hunt-max"):
             with self.subTest(profile=profile):
-                runtime = _Runtime(_stream())
+                runtime = _Runtime(_paired_flow_stream())
                 with tempfile.TemporaryDirectory() as directory:
                     self._adapter("hunt", profile, runtime)(
                         _request(), Path(directory), 60
@@ -1058,7 +1058,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                 self.assertIn(profile, command[-1])
 
     def test_hunt_discovery_prompt_uses_only_the_twelve_candidate_limit(self) -> None:
-        runtime = _Runtime(_stream())
+        runtime = _Runtime(_paired_flow_stream())
         with tempfile.TemporaryDirectory() as directory:
             self._adapter("hunt", "hunt-balanced", runtime)(
                 _request(), Path(directory), 60

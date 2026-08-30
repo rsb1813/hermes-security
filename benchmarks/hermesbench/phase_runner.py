@@ -26,6 +26,7 @@ from .hunt_protocol import (
 from .hunt_evidence import (
     HUNT_EVIDENCE_PROTOCOL_VERSION,
     NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
+    PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
     SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS,
     HuntEvidenceError,
     parse_hunt_evidence,
@@ -61,6 +62,10 @@ _MAX_CANDIDATE_TRACE = 16
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _PUBLIC_COMMAND_TOKEN = re.compile(r"[-A-Za-z0-9_./:=@%+]+\Z")
 _REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+_RECOVERABLE_PARTIAL_HUNT_PROTOCOL_VERSIONS = frozenset({
+    NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
+    PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+})
 
 
 class PhaseRunnerError(ValueError):
@@ -453,12 +458,23 @@ def _recoverable_partial_phase(
 ) -> bool:
     statuses = tuple(record.status for record in records)
     return (
-        workflow == "hunt"
-        and evidence_protocol_version
-        == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
+        _uses_recoverable_partial_hunt_protocol(
+            workflow,
+            evidence_protocol_version,
+        )
         and any(status == "completed" for status in statuses)
         and any(status != "completed" for status in statuses)
         and all(status in {"completed", "failed", "timeout"} for status in statuses)
+    )
+
+
+def _uses_recoverable_partial_hunt_protocol(
+    workflow: str,
+    evidence_protocol_version: int | None,
+) -> bool:
+    return (
+        workflow == "hunt"
+        and evidence_protocol_version in _RECOVERABLE_PARTIAL_HUNT_PROTOCOL_VERSIONS
     )
 
 
@@ -603,10 +619,9 @@ def run_workflow(
     snapshot_hash = _snapshot_set_sha256(manifest)
     discovery_run_id = f"{run_id}-discovery"
     discovery_kind = "hunt-discovery" if workflow == "hunt" else "standard"
-    account_failure_usage = (
-        workflow == "hunt"
-        and selected_hunt_evidence_protocol_version
-        == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
+    account_failure_usage = _uses_recoverable_partial_hunt_protocol(
+        workflow,
+        selected_hunt_evidence_protocol_version,
     )
     discovery = run_suite(
         manifest,
@@ -901,10 +916,9 @@ def validate_workflow_receipt(
     if sha256_file(discovery_predictions_path) != receipt.discovery_predictions_sha256:
         raise PhaseRunnerError("workflow receipt discovery predictions hash does not match")
     discovery = load_receipt(discovery_path)
-    account_failure_usage = (
-        receipt.workflow == "hunt"
-        and receipt.hunt_evidence_protocol_version
-        == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
+    account_failure_usage = _uses_recoverable_partial_hunt_protocol(
+        receipt.workflow,
+        receipt.hunt_evidence_protocol_version,
     )
     discovery_records = _validate_phase(
         manifest,
