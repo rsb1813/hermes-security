@@ -106,6 +106,18 @@
 - [ ] Tune one material variable at a time on Mini.
 - [ ] Add safe caching and progressive-context reuse.
 - [ ] Add adaptive escalation without reducing coverage floors.
+- [x] Diagnose the Protocol-v4 zero-recall result as an entry-to-critical localization failure rather than missing critical-site parsing.
+- [x] Compare prompt tightening, paired-flow seeds, and an adaptive extra scout under the two-call and compatibility constraints.
+- [x] Approve the Protocol 5 paired-flow seed architecture under the user's standing non-destructive architecture authority.
+- [x] Write the Protocol 5 paired-flow seed design specification.
+- [x] Write the Protocol 5 RED/GREEN implementation plan.
+- [ ] Add deterministic bounded paired-flow and sink-only seed generation without a second source scan.
+- [ ] Bind exact seed identity, endpoints, pass eligibility, fallback counts, and artifact integrity into Protocol 5 evidence.
+- [ ] Route Protocol 5 through the managed discovery and independent verification phases without exposing the full semantic packet.
+- [ ] Extend partial-phase behavior to Protocol 5 and make it the default only after focused tests pass.
+- [ ] Verify Protocol 1 through Protocol 4 exact compatibility and the complete no-model suite.
+- [ ] Run aggregate-only host coverage and snapshot-integrity gates without a model, network, container, or paid invocation.
+- [ ] Complete independent Critical/Important review, semantic commits, and public fork push.
 - [x] Record cached input, uncached input, output, time, and cache hits separately.
 - [x] Compare regex-only, lexical-graph, and language-specific AST guidance approaches.
 - [x] Obtain approval for deterministic lexical semantic guidance.
