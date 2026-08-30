@@ -177,6 +177,17 @@
   - [x] Implement deterministic sink-first structural guidance without increasing semantic caps or model calls.
   - [x] Rebuild and evaluate retained guidance; record measured 3/4 exact-line coverage and the unmet 4/4 target without overstating recall.
   - [x] Run focused, full, bridge, compile, diff, and independent review gates.
+- [x] Recover the remaining host-guidance miss without adding model calls or semantic capacity.
+  - [x] Revalidate that the missing call-shaped operation already exists in the raw structural site set.
+  - [x] Reject external AST and language-specific hybrid parsers for the current selection failure.
+  - [x] Measure stable component novelty, path novelty, and row-density selectors against the unchanged full index.
+  - [x] Select bounded site-density lookahead 16 after it alone reached 4/4 with zero current-hit loss and fewer bytes.
+  - [x] Implement only a selector that reaches 4/4 aggregate guidance without losing any current hit or raising caps.
+    - [x] Add a public RED test for bounded dense-row selection.
+    - [x] Preserve all existing semantic priority lanes with stable per-lane density queues.
+    - [x] Confirm the implemented constrained selector still reaches 4/4 on retained snapshots.
+  - [x] Preserve Protocol 1 through 3 bytes, strong route bytes, schema-3 wire fields, and one discovery call.
+  - [x] Run focused, full, bridge, compile, diff, aggregate diagnostic, and independent review gates.
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
 

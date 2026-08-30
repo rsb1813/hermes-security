@@ -412,6 +412,35 @@ class SemanticGuidanceTests(unittest.TestCase):
         self.assertEqual({row["component"] for row in rows}, {"component-a", "component-b"})
         self.assertTrue(all(row["hint_kind"] == "operation-index" for row in rows))
 
+    def test_schema_three_operation_index_prioritizes_dense_rows_with_bounded_lookahead(self) -> None:
+        sites = tuple(
+            semantic_guidance._StructuralSite(
+                f"component-{component_index:02}",
+                f"src/file-{component_index:02}.ts",
+                line,
+                "call",
+                f"signature-{component_index}-{line}",
+            )
+            for component_index in range(17)
+            for line in range(
+                1,
+                33
+                if component_index == 16
+                else 25
+                if component_index == 15
+                else 2,
+            )
+        )
+        rows = semantic_guidance._operation_index_rows(
+            sites,
+            {site.path: ("forward",) for site in sites},
+            GuidanceLimits(128 * 1024, 800, 800, 800, 200, 128 * 1024, 4),
+        )
+        self.assertEqual(
+            [row["component"] for row in rows[:3]],
+            ["component-15", "component-16", "component-00"],
+        )
+
     def test_schema_three_operation_index_prefers_reused_signatures_before_singletons(self) -> None:
         self.assertEqual(
             semantic_guidance._operation_index_signature_priority(2)[0],

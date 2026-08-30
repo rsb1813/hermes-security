@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from collections import Counter, deque
+from fractions import Fraction
 import hashlib
 import json
 import os
@@ -43,6 +44,7 @@ MAX_OPERATION_INDEX_PREFERRED_REUSED_SIGNATURE_FREQUENCY = 7
 MAX_OPERATION_INDEX_REUSED_SIGNATURE_FREQUENCY = 16
 MIN_OPERATION_INDEX_COMPLEX_CALL_IDENTIFIERS = 3
 OPERATION_INDEX_PARAMETER_FLOW_WEIGHT = 2
+OPERATION_INDEX_DENSITY_LOOKAHEAD = 16
 MAX_FILE_BYTES = 1024 * 1024
 _CODE = "C"
 _STRING = "S"
@@ -1744,7 +1746,60 @@ def _operation_index_rows(
                     row,
                 )
             )
-    return tuple(item[-1] for item in sorted(ordered_rows, key=lambda item: item[:-1]))
+    priority_order = tuple(
+        (item[:7], item[-1])
+        for item in sorted(ordered_rows, key=lambda item: item[:-1])
+    )
+    return _operation_index_density_order(priority_order)
+
+
+def _operation_index_density_order(
+    prioritized_rows: tuple[
+        tuple[tuple[int, int, int, int, int, int, int], dict[str, object]],
+        ...,
+    ],
+) -> tuple[dict[str, object], ...]:
+    def density(row: dict[str, object]) -> Fraction:
+        site_count = sum(
+            len(entry["s"])
+            for entry in row["entries"]
+            if isinstance(entry, dict) and isinstance(entry.get("s"), list)
+        )
+        return Fraction(site_count, len(_encode_canonical_row(row)))
+
+    slot_lanes: list[tuple[int, int, int, int, int, int]] = []
+    rows_by_lane: dict[
+        tuple[int, int, int, int, int, int],
+        list[tuple[Fraction, dict[str, object]]],
+    ] = {}
+    for priority, row in prioritized_rows:
+        lane = (priority[0], *priority[2:])
+        slot_lanes.append(lane)
+        rows_by_lane.setdefault(lane, []).append((density(row), row))
+
+    ordered_by_lane: dict[
+        tuple[int, int, int, int, int, int],
+        deque[dict[str, object]],
+    ] = {}
+    for lane, lane_rows in rows_by_lane.items():
+        pending = iter(lane_rows)
+        window = list(
+            item
+            for _, item in zip(range(OPERATION_INDEX_DENSITY_LOOKAHEAD), pending)
+        )
+        ordered: deque[dict[str, object]] = deque()
+        while window:
+            selected_index = max(
+                range(len(window)),
+                key=lambda index: (window[index][0], -index),
+            )
+            _, row = window.pop(selected_index)
+            ordered.append(row)
+            next_row = next(pending, None)
+            if next_row is not None:
+                window.append(next_row)
+        ordered_by_lane[lane] = ordered
+    return tuple(ordered_by_lane[lane].popleft() for lane in slot_lanes)
 
 
 def _operation_index_signature_priority(frequency: int) -> tuple[int, int]:

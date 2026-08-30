@@ -142,3 +142,20 @@ Verification: deterministic fake executors prove real overlap, manifest-ordered 
 - Protocols 1 through 3, Standard, receipt validation, snapshot isolation, candidate caps, full-frontier eligibility, and the paid-run boundary remain unchanged. No model, network, container, or paid benchmark invocation was made for this unit.
 
 Verification: 124 semantic-guidance tests and all 458 HermesBench Python tests pass, with three and ten documented platform skips respectively. The Bun bridge passes its real CLI integration test, Python compilation succeeds, and `git diff --check` is clean. The retained 4/4 host-side target remains unmet and must not be represented as end-to-end discovery performance.
+
+## Current structural-selection checkpoint
+
+- Aggregate-only revalidation confirms that all three call-shaped vulnerable critical operations already exist in the raw product structural-site set. The fourth operation is covered by an existing semantic route. The remaining 3/4 result is therefore a bounded index-selection failure, not a parser-coverage failure.
+- Reject a new external AST dependency. The benchmark Python path has no dependency manifest, and adding grammars would enlarge Windows, container, packaging, and determinism boundaries without creating the already-present site.
+- Reject a Python-standard-library AST hybrid. It would split Python behavior from Go and TypeScript while leaving the current selection problem unchanged.
+- Compare only transformations over the unchanged full index: stable component novelty within a bounded lookahead, stable path novelty within the same lookahead, and deterministic site-per-byte density. Keep current order as the control.
+- A production selector is eligible only if the same four retained snapshots reach 4/4 exact critical-operation guidance, every current hit remains present, total semantic bytes do not exceed the route-only baseline, rows stay at or below 2 KiB, snapshots remain unchanged, and the discovery model-call count stays one.
+- If no general selector satisfies every gate, retain 3/4 and stop instead of adding target-shaped ranges or oracle-derived exceptions.
+
+The equal-budget experiment selected bounded site-density lookahead 16. It was the only tested general reorder to raise direct structural coverage from 2/4 to 3/4 and total guidance from 3/4 to 4/4 with zero lost current hits. Aggregate selected bytes fell by 385 while encoded sites increased by 2,183. Production work therefore remains limited to this stable local row reorder and begins with a public failing behavior test.
+
+The production-safe variant preserves the existing semantic priority lane sequence and applies stable density selection only within each lane. Retained-snapshot remeasurement confirmed the target: 3/4 direct structural coverage, 4/4 total semantic operation coverage, zero lost hits, 324,248 total bytes, 236,629 operation-index bytes, 133 index rows, 11,735 encoded sites, and unchanged 2,048-byte maximum rows.
+
+Verification: the aggregate diagnostic exposes only anonymous ranks, budgets, and coverage counts. Any selected implementation must begin with a public failing behavior test and preserve exact Protocol 1 through 3 golden bytes plus strong schema-3 route bytes.
+
+Final verification passes 125 focused semantic tests, 54 adapter tests, all 459 HermesBench Python tests, the Bun real-CLI bridge, six explicit legacy-byte and prompt-hash contracts, compileall, diff checks, aggregate snapshot integrity, and independent Critical/Important review.
