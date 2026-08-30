@@ -277,7 +277,7 @@ class CodexExecAdapterTests(unittest.TestCase):
             self.assertIn(managed_skill, prompt)
             self.assertNotIn(standalone_skill, prompt)
 
-    def test_protocol_five_uses_only_priority_and_paired_seed_artifacts(self) -> None:
+    def test_protocol_five_uses_only_priority_and_factorized_seed_artifacts(self) -> None:
         priority = "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
         seeds = "cat /workspace/scratch/hermesbench-hunt/paired-flow-seeds.jsonl"
         managed_skill = "/workspace/plugin/skills/hunt-security-scan-managed/SKILL.md"
@@ -338,9 +338,11 @@ class CodexExecAdapterTests(unittest.TestCase):
             "/workspace/schema/hunt-discovery-response.schema.json",
         )
         for instruction in (
-            "paired-flow exact ID+entry+critical copy",
-            "sink-only exact ID+critical with source-inspected frontier entry",
-            "eligible seed pass",
+            "d/e/x factorized packet",
+            "join-e<entry_id>-c<critical_id>",
+            "sink-c<critical_id>",
+            "f/b/g/p/s/x",
+            "a/c/m/C/Q/F/T/D/N/S/O",
             "When seeds+candidates exist, return at least one seeded result",
             "at most four unseeded fallback candidates",
             "source inspection is mandatory",

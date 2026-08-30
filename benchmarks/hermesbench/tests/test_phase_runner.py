@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import benchmarks.hermesbench.phase_runner as phase_runner
+from benchmarks.hermesbench import semantic_guidance
 from benchmarks.hermesbench.contracts import BenchmarkManifest, load_predictions, parse_manifest, parse_oracle
 from benchmarks.hermesbench.phase_runner import (
     FrozenControls,
@@ -143,20 +144,26 @@ def _hunt_result(
                 "hunt-balanced",
                 evidence_protocol_version=evidence_protocol_version,
             )
-            seed = next(
-                json.loads(line)
-                for line in prepared.paired_flow_seeds.path.read_text(
-                    encoding="utf-8"
-                ).splitlines()
-                if json.loads(line)["seed_kind"] == "paired-flow"
+            if prepared.paired_flow_seeds is None:
+                raise AssertionError("Protocol 5 paired flow seeds are unavailable")
+            rows = semantic_guidance.decode_paired_flow_seeds(
+                prepared.paired_flow_seeds.path.read_bytes(),
+                "hunt-balanced",
             )
+            seed = next(
+                (row for row in rows if row["seed_kind"] == "paired-flow"),
+                None,
+            )
+            if seed is None:
+                seed = next(row for row in rows if row["seed_kind"] == "sink-only")
+            entry = seed["entry"] or {"path": "source.py", "line": 1}
         response["prediction"]["candidates"] = [
             _hunt_candidate(1)
             | {
                 "finding_id": seed["seed_id"],
                 "entry_point": {
-                    "file": seed["entry"]["path"],
-                    "line": seed["entry"]["line"],
+                    "file": entry["path"],
+                    "line": entry["line"],
                 },
                 "critical_operation": {
                     "file": seed["critical"]["path"],

@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from benchmarks.hermesbench import hunt_evidence
+from benchmarks.hermesbench import hunt_evidence, semantic_guidance
 from benchmarks.hermesbench.hunt_evidence import (
     HuntEvidenceError,
     attest_hunt_discovery,
@@ -347,7 +347,10 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
             "hunt-balanced",
             evidence_protocol_version=5,
         )
-        rows = [json.loads(line) for line in prepared.paired_flow_seeds.path.read_text(encoding="utf-8").splitlines()]
+        rows = semantic_guidance.decode_paired_flow_seeds(
+            prepared.paired_flow_seeds.path.read_bytes(),
+            "hunt-balanced",
+        )
         return prepared, rows
 
     def _seed_snapshot(self, root: Path) -> Path:
@@ -361,6 +364,16 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
             "export function apply(value) {\n  target.setting = value;\n  target.custom('safe');\n}\n",
             encoding="utf-8",
         )
+        return snapshot
+
+    def _cross_seed_snapshot(self, root: Path) -> Path:
+        snapshot = root / "cross-seed-snapshot"
+        snapshot.mkdir()
+        for name in ("first", "second"):
+            (snapshot / f"{name}.py").write_text(
+                f'import subprocess\ndef handle_{name}(request):\n    return subprocess.run(request.args.get("q"))\n',
+                encoding="utf-8",
+            )
         return snapshot
 
     @staticmethod
@@ -386,6 +399,7 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
                 (self._PACKET_READ, self._SEED_READ),
             )
         self.assertEqual(evidence.protocol_version, 5)
+        self.assertEqual(evidence.paired_flow_seed_count, len(rows))
         self.assertEqual(evidence.paired_flow_candidate_count, 1)
         self.assertEqual(evidence.sink_only_candidate_count, 0)
         self.assertEqual(evidence.fallback_candidate_count, 0)
@@ -483,10 +497,10 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
             paired = next(row for row in rows if row["seed_kind"] == "paired-flow")
             base = self._candidate(paired["seed_id"], self._endpoint(paired["entry"]), self._endpoint(paired["critical"]), paired["eligible_search_passes"][0])
             mutations = (
-                {**base, "finding_id": "seed-00000000000000000000000000000000"},
+                {**base, "finding_id": "join-e999-c999"},
                 {**base, "entry_point": {"file": base["entry_point"]["file"], "line": base["entry_point"]["line"] + 1}},
                 {**base, "search_pass": "backward"},
-                {**base, "finding_id": "seed-shaped-fallback"},
+                {**base, "finding_id": "join-invalid-reserved-fallback"},
             )
             for candidate in mutations:
                 with self.subTest(candidate=candidate["finding_id"]), self.assertRaises(HuntEvidenceError) as caught:
@@ -528,11 +542,17 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
     def test_protocol_five_rejects_cross_seed_endpoints(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            prepared, rows = self._protocol_five_prepared(root, self._seed_snapshot(root))
+            prepared, rows = self._protocol_five_prepared(root, self._cross_seed_snapshot(root))
             paired = [row for row in rows if row["seed_kind"] == "paired-flow"]
+            self.assertGreaterEqual(len(paired), 2)
+            other = next(
+                row
+                for row in paired[1:]
+                if self._endpoint(row["entry"]) != self._endpoint(paired[0]["entry"])
+            )
             candidate = self._candidate(
                 paired[0]["seed_id"],
-                self._endpoint(paired[1]["entry"]),
+                self._endpoint(other["entry"]),
                 self._endpoint(paired[0]["critical"]),
                 paired[0]["eligible_search_passes"][0],
             )
