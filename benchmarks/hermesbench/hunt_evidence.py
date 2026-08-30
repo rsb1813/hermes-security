@@ -357,6 +357,8 @@ def attest_hunt_discovery(prepared: PreparedHuntArtifacts, prediction: object, o
     """Checks prepared bytes and binds a valid discovery result without source paths."""
     if not isinstance(prepared, PreparedHuntArtifacts):
         raise HuntEvidenceError("prepared Hunt artifacts are invalid")
+    if prepared.evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        raise HuntEvidenceError("Protocol 5 attestation is unavailable")
     if not isinstance(observed_argv, tuple) or observed_argv.count(_REQUIRED_PACKET_READ) == 0:
         raise HuntEvidenceError("priority packet was not read", category="hunt_evidence_packet_missing")
     if observed_argv.count(_REQUIRED_PACKET_READ) != 1:
@@ -430,6 +432,8 @@ def reproduce_hunt_evidence(
     evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
 ) -> HuntEvidence:
     """Rebuilds canonical Hunt evidence without invoking a model runtime."""
+    if evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        raise HuntEvidenceError("Protocol 5 evidence reproduction is unavailable")
     with tempfile.TemporaryDirectory(prefix="hermesbench-hunt-evidence-") as directory:
         prepared = prepare_hunt_artifacts(
             snapshot_path,

@@ -304,6 +304,34 @@ class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):
         )
         return prepared, self._prediction()
 
+    def test_protocol_five_preparation_is_not_attestable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepared = prepare_hunt_artifacts(
+                self._snapshot(root),
+                root / "scratch",
+                "hunt-balanced",
+                evidence_protocol_version=5,
+            )
+            self.assertIsNotNone(prepared.paired_flow_seeds)
+            with self.assertRaisesRegex(HuntEvidenceError, "Protocol 5"):
+                attest_hunt_discovery(
+                    prepared,
+                    self._prediction(),
+                    (self._PACKET_READ, hunt_evidence._REQUIRED_SEMANTIC_READ),
+                )
+
+    def test_protocol_five_reproduction_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(HuntEvidenceError, "Protocol 5"):
+                hunt_evidence.reproduce_hunt_evidence(
+                    self._snapshot(root),
+                    "hunt-balanced",
+                    self._prediction(),
+                    evidence_protocol_version=5,
+                )
+
     def test_missing_artifact_fails_closed(self) -> None:
         # Removing a trusted artifact after preparation must invalidate attestation.
         with tempfile.TemporaryDirectory() as directory:
