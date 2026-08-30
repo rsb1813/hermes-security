@@ -198,61 +198,160 @@ class SemanticGuidanceTests(unittest.TestCase):
             ],
         )
 
-    def test_schema_three_retains_deterministic_paired_flow_seed_rows(self) -> None:
+    def test_schema_three_emits_factorized_paired_flow_packet_and_decodes_logical_rows(self) -> None:
         files = {
-            "src/routes.ts": (
-                "export function handle(request, value) {\n"
-                "  request.client.run(value);\n"
-                "}\n"
-            ),
-            "src/state.ts": (
-                "export function apply(value) {\n"
-                "  target.setting = value;\n"
-                "  target.custom('safe');\n"
-                "}\n"
-            ),
+            "src/routes.py": "import subprocess\ndef handle(request):\n    return subprocess.run(request.args['q'])\n",
+            "src/state.py": "def apply(value):\n    target.setting = value\n",
         }
         first = self._build(
             "paired-flow-first",
             files,
             guidance_schema_version=3,
-            components={"src/routes.ts": "component-api", "src/state.ts": "component-state"},
+            components={"src/routes.py": "component-api", "src/state.py": "component-state"},
             include_paired_flow_seeds=True,
         )
         second = self._build(
             "paired-flow-second",
             dict(reversed(tuple(files.items()))),
             guidance_schema_version=3,
-            components={"src/routes.ts": "component-api", "src/state.ts": "component-state"},
+            components={"src/routes.py": "component-api", "src/state.py": "component-state"},
             include_paired_flow_seeds=True,
         )
         self.assertEqual(first.paired_flow_seeds.canonical_bytes, second.paired_flow_seeds.canonical_bytes)
         rows = [json.loads(line) for line in first.paired_flow_seeds.canonical_bytes.splitlines()]
-        self.assertEqual([row["seed_kind"] for row in rows], ["paired-flow", "paired-flow", "sink-only"])
-        self.assertEqual([row["component"] for row in rows], ["component-api", "component-state", "component-state"])
-        self.assertEqual(rows[0]["reason_codes"], ["declaration-source"])
-        self.assertEqual(rows[1]["reason_codes"], ["parameter-flow"])
-        self.assertIsNone(rows[2]["entry"])
-        self.assertEqual(rows[2]["reason_codes"], ["sink-only"])
-        self.assertTrue(all(row["seed_id"].startswith("seed-") and len(row["seed_id"]) == 37 for row in rows))
+        self.assertEqual([row["t"] for row in rows], ["d", "e", "x"])
+        self.assertTrue(all(row["v"] == 2 for row in rows))
+        self.assertEqual(set(rows[0]), {"c", "p", "t", "v"})
+        self.assertEqual(set(rows[1]), {"e", "t", "v"})
+        self.assertEqual(set(rows[2]), {"t", "v", "x"})
+        logical = semantic_guidance.decode_paired_flow_seeds(
+            first.paired_flow_seeds.canonical_bytes,
+            "hunt-balanced",
+        )
+        self.assertTrue(any(row["seed_id"].startswith("join-e") for row in logical), logical)
+        self.assertTrue(any(row["seed_id"].startswith("sink-c") for row in logical))
+        self.assertTrue(all(row["schema_version"] == 2 for row in logical))
 
-    def test_paired_flow_seeds_reject_truncated_identifier_collisions(self) -> None:
-        files = {
-            "src/app.ts": "export function handle(request, value) { target.custom(value); }\n",
-            "src/other.ts": "export function apply(value) { target.setting = value; }\n",
+    def test_factorized_critical_order_uses_operation_index_rank_before_canonical_fallback(self) -> None:
+        semantic_rows = (
+            {
+                "hint_kind": "call-route",
+                "operation": {"path": "src/a.ts", "line": 1, "symbol": "call"},
+            },
+            {
+                "hint_kind": "operation-index",
+                "entries": [{"p": "src/z.ts", "q": "f", "s": ["9m"]}],
+            },
+        )
+        semantic_bytes = b"".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+            for row in semantic_rows
+        )
+        ranks = semantic_guidance._factorized_critical_ranks(semantic_bytes)
+        first = {
+            "location": semantic_guidance._Location("src/a.ts", 1, "call"),
+            "family": "call",
+            "component": "component-a",
+            "passes": ("forward",),
+            "adjacency": {},
         }
-        with mock.patch(
-            "benchmarks.hermesbench.semantic_guidance._paired_flow_seed_id",
-            return_value="seed-" + "0" * 32,
+        prioritized = {
+            "location": semantic_guidance._Location("src/z.ts", 9, "setting"),
+            "family": "mutation",
+            "component": "component-z",
+            "passes": ("forward",),
+            "adjacency": {},
+        }
+        self.assertEqual(ranks, {("src/z.ts", 9): 0, ("src/a.ts", 1): 1})
+        self.assertEqual(
+            sorted(
+                (first, prioritized),
+                key=lambda row: semantic_guidance._factorized_critical_sort_key(row, ranks),
+            ),
+            [prioritized, first],
+        )
+
+    def test_factorized_packet_rejects_noncanonical_and_invalid_references(self) -> None:
+        packet = (
+            b'{"c":[[1,"component-api"]],"p":[[1,"src/app.ts"]],"t":"d","v":2}\n'
+            b'{"e":[[1,1,1,"handle"]],"t":"e","v":2}\n'
+            b'{"t":"x","v":2,"x":[[1,1,2,"run","c",1,"f",[[1,"f"]]],[2,1,3,"save","m",1,"f",[]]]}\n'
+        )
+        logical = semantic_guidance.decode_paired_flow_seeds(packet, "hunt-balanced")
+        self.assertEqual([row["seed_id"] for row in logical], ["join-e1-c1", "sink-c2"])
+        self.assertEqual(logical[0]["critical"]["family"], "call")
+        self.assertEqual(logical[1]["reason_codes"], ["factorized-critical"])
+        invalid = packet.replace(b"[[1,\"f\"]]", b"[[3,\"f\"]]")
+        with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+            semantic_guidance.decode_paired_flow_seeds(invalid, "hunt-balanced")
+
+    def test_factorized_prefix_search_avoids_encoding_far_beyond_the_fitting_prefix(self) -> None:
+        encoded_prefixes: list[int] = []
+
+        def packet(
+            _: tuple[tuple[semantic_guidance._Location, str], ...],
+            rows: tuple[dict[str, object], ...],
+            __: int,
+        ) -> bytes:
+            encoded_prefixes.append(len(rows))
+            return b"x" * len(rows)
+
+        with (
+            mock.patch.object(semantic_guidance, "_factorized_packet", side_effect=packet),
+            mock.patch.object(
+                semantic_guidance,
+                "_factorized_packet_fits",
+                side_effect=lambda value, *_: len(value) <= 8,
+            ),
+        ):
+            selected = semantic_guidance._largest_fitting_factorized_packet(
+                (),
+                tuple({"index": index} for index in range(10_000)),
+                128,
+                64 * 1024,
+                1024,
+            )
+        self.assertEqual(selected, b"x" * 8)
+        self.assertLessEqual(max(encoded_prefixes), 16)
+
+    def test_factorized_packet_rejects_duplicate_and_nonconsecutive_dictionary_ids(self) -> None:
+        duplicate = (
+            b'{"c":[[1,"component-api"]],"p":[[1,"src/app.ts"],[1,"src/other.ts"]],"t":"d","v":2}\n'
+            b'{"e":[],"t":"e","v":2}\n'
+            b'{"t":"x","v":2,"x":[[1,1,2,"run","c",1,"f",[]]]}\n'
+        )
+        nonconsecutive = duplicate.replace(b'[[1,"src/app.ts"],[1,"src/other.ts"]]', b'[[2,"src/app.ts"]]')
+        for packet in (duplicate, nonconsecutive):
+            with self.subTest(packet=packet):
+                with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+                    semantic_guidance.decode_paired_flow_seeds(packet, "hunt-balanced")
+
+    def test_factorized_decoder_rejects_boolean_ids_noncanonical_rows_and_five_adjacencies(self) -> None:
+        valid = (
+            b'{"c":[[1,"component-api"]],"p":[[1,"src/app.ts"]],"t":"d","v":2}\n'
+            b'{"e":[[1,1,1,"handle"],[2,1,2,"relay"],[3,1,3,"other"],[4,1,4,"more"],[5,1,5,"last"]],"t":"e","v":2}\n'
+            b'{"t":"x","v":2,"x":[[1,1,6,"run","c",1,"f",[[1,"f"],[2,"f"],[3,"f"],[4,"f"]]]]}\n'
+        )
+        boolean_id = valid.replace(b'[[1,"component-api"]]', b'[[true,"component-api"]]')
+        noncanonical = valid.replace(b'{"c"', b'{"v":2,"c"', 1).replace(b',"v":2}\n', b'}\n', 1)
+        five_adjacencies = valid.replace(b'[[1,"f"],[2,"f"],[3,"f"],[4,"f"]]', b'[[1,"f"],[2,"f"],[3,"f"],[4,"f"],[5,"f"]]')
+        for packet in (boolean_id, noncanonical, five_adjacencies):
+            with self.subTest(packet=packet):
+                with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+                    semantic_guidance.decode_paired_flow_seeds(packet, "hunt-balanced")
+
+    def test_factorized_decoder_rejects_entry_bank_over_profile_limit(self) -> None:
+        packet = (
+            b'{"c":[[1,"component-api"]],"p":[[1,"src/app.ts"]],"t":"d","v":2}\n'
+            b'{"e":[[1,1,1,"handle"],[2,1,2,"relay"],[3,1,3,"other"]],"t":"e","v":2}\n'
+            b'{"t":"x","v":2,"x":[[1,1,4,"run","c",1,"f",[[1,"f"]]]]}\n'
+        )
+        with mock.patch.dict(
+            semantic_guidance.PAIRED_FLOW_SEED_LIMITS,
+            {"hunt-balanced": (2, 128, 64 * 1024, 1024)},
         ):
             with self.assertRaises(semantic_guidance.SemanticGuidanceError):
-                self._build(
-                    "paired-flow-collision",
-                    files,
-                    guidance_schema_version=3,
-                    components={"src/app.ts": "component-api", "src/other.ts": "component-state"},
-                    include_paired_flow_seeds=True,
-                )
+                semantic_guidance.decode_paired_flow_seeds(packet, "hunt-balanced")
 
     def test_paired_flow_seeds_honor_row_and_byte_limits_deterministically(self) -> None:
         files = {
@@ -263,7 +362,7 @@ class SemanticGuidanceTests(unittest.TestCase):
         }
         with mock.patch.dict(
             semantic_guidance.PAIRED_FLOW_SEED_LIMITS,
-            {"hunt-balanced": (3, 2048, 1024)},
+            {"hunt-balanced": (64, 3, 2048, 1024)},
         ):
             result = self._build(
                 "paired-flow-bounds",
@@ -295,11 +394,131 @@ class SemanticGuidanceTests(unittest.TestCase):
             components={"src/api.ts": "component-api", "src/state.ts": "component-state"},
             include_paired_flow_seeds=True,
         )
-        rows = [json.loads(line) for line in disconnected.paired_flow_seeds.canonical_bytes.splitlines()]
+        rows = semantic_guidance.decode_paired_flow_seeds(
+            disconnected.paired_flow_seeds.canonical_bytes,
+            "hunt-balanced",
+        )
+        self.assertTrue(
+            any(
+                row["seed_kind"] == "paired-flow"
+                and row["entry"]["path"] == "src/api.ts"
+                and row["critical"]["path"] == "src/api.ts"
+                for row in rows
+            ),
+            rows,
+        )
         self.assertTrue(all(
             row["entry"] is None or row["entry"]["path"] == row["critical"]["path"]
             for row in rows
         ))
+
+    def test_factorized_entry_limit_prioritizes_cross_declaration_graph_roots(self) -> None:
+        files = {
+            "src/a_local.ts": "export function local(request) { target.custom('safe'); }\n",
+            "src/z_entry.ts": "import { relay } from './z_sink';\nexport function handle(input) { return relay(input); }\n",
+            "src/z_sink.ts": "export function relay(value) { target.setting = value; }\n",
+        }
+        with mock.patch.dict(
+            semantic_guidance.PAIRED_FLOW_SEED_LIMITS,
+            {"hunt-balanced": (1, 128, 64 * 1024, 1024)},
+        ):
+            result = self._build(
+                "factorized-graph-entry-priority",
+                files,
+                guidance_schema_version=3,
+                components={
+                    "src/a_local.ts": "component-a",
+                    "src/z_entry.ts": "component-z",
+                    "src/z_sink.ts": "component-z",
+                },
+                include_paired_flow_seeds=True,
+            )
+        rows = semantic_guidance.decode_paired_flow_seeds(
+            result.paired_flow_seeds.canonical_bytes,
+            "hunt-balanced",
+        )
+        self.assertTrue(
+            any(
+                row["seed_kind"] == "paired-flow"
+                and row["entry"]["path"] == "src/z_entry.ts"
+                and row["critical"]["path"] == "src/z_sink.ts"
+                for row in rows
+            ),
+            rows,
+        )
+
+    def test_factorized_graph_entry_order_reproduces_the_complete_canonical_candidate(self) -> None:
+        entry = semantic_guidance._Location("src/entry.ts", 3, "handle")
+        source = semantic_guidance._Location("src/entry.ts", 3, "input")
+        relay = semantic_guidance._Location("src/relay.ts", 7, "relay")
+        critical = semantic_guidance._Location("src/sink.ts", 11, "setting")
+        key = semantic_guidance._factorized_graph_entry_order_key(
+            entry,
+            critical,
+            "mutation",
+            (source, entry, relay),
+            ("graph-structural-flow", "import-linked"),
+            ("forward", "state"),
+            "component-state",
+        )
+        logical = {
+            "component": "component-state",
+            "critical": {
+                "family": "mutation",
+                "path": "src/sink.ts",
+                "line": 11,
+                "symbol": "setting",
+            },
+            "eligible_search_passes": ["forward", "state"],
+            "entry": {"path": "src/entry.ts", "line": 3, "symbol": "handle"},
+            "proof_status": "investigation_only",
+            "reason_codes": ["graph-structural-flow", "import-linked"],
+            "schema_version": 1,
+            "seed_kind": "paired-flow",
+            "trace": [
+                {"path": "src/entry.ts", "line": 3, "symbol": "input"},
+                {"path": "src/relay.ts", "line": 7, "symbol": "relay"},
+            ],
+        }
+        seed_id = "seed-" + hashlib.sha256(
+            json.dumps(
+                logical,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        expected = {**logical, "seed_id": seed_id}
+        self.assertEqual(
+            key,
+            json.dumps(
+                expected,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+            + b"\n",
+        )
+
+    def test_factorized_entry_representative_keeps_the_canonical_minimum(self) -> None:
+        entry = semantic_guidance._Location("src/entry.ts", 3, "handle")
+        representatives: dict[
+            semantic_guidance._Location,
+            tuple[bytes, str],
+        ] = {}
+        semantic_guidance._retain_factorized_entry_representative(
+            representatives,
+            entry,
+            b"z-row\n",
+            "component-z",
+        )
+        semantic_guidance._retain_factorized_entry_representative(
+            representatives,
+            entry,
+            b"a-row\n",
+            "component-a",
+        )
+        self.assertEqual(representatives[entry], (b"a-row\n", "component-a"))
 
     def test_paired_flow_seeds_ignore_oracle_like_files_outside_the_frontier(self) -> None:
         snapshot = self._root / "paired-flow-oracle-like"
