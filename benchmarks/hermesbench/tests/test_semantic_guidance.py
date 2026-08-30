@@ -50,6 +50,7 @@ class SemanticGuidanceTests(unittest.TestCase):
         guidance_schema_version: int = 1,
         passes: dict[str, tuple[str, ...]] | None = None,
         components: dict[str, str] | None = None,
+        include_paired_flow_seeds: bool = False,
     ) -> SemanticGuidance:
         snapshot = self._root / name
         snapshot.mkdir()
@@ -62,6 +63,7 @@ class SemanticGuidanceTests(unittest.TestCase):
             _frontier_contexts(files, passes, components),
             profile,
             guidance_schema_version=guidance_schema_version,
+            include_paired_flow_seeds=include_paired_flow_seeds,
         )
 
     def _rows(self, files: dict[str, str | bytes]) -> list[dict[str, object]]:
@@ -195,6 +197,125 @@ class SemanticGuidanceTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_schema_three_retains_deterministic_paired_flow_seed_rows(self) -> None:
+        files = {
+            "src/routes.ts": (
+                "export function handle(request, value) {\n"
+                "  request.client.run(value);\n"
+                "}\n"
+            ),
+            "src/state.ts": (
+                "export function apply(value) {\n"
+                "  target.setting = value;\n"
+                "  target.custom('safe');\n"
+                "}\n"
+            ),
+        }
+        first = self._build(
+            "paired-flow-first",
+            files,
+            guidance_schema_version=3,
+            components={"src/routes.ts": "component-api", "src/state.ts": "component-state"},
+            include_paired_flow_seeds=True,
+        )
+        second = self._build(
+            "paired-flow-second",
+            dict(reversed(tuple(files.items()))),
+            guidance_schema_version=3,
+            components={"src/routes.ts": "component-api", "src/state.ts": "component-state"},
+            include_paired_flow_seeds=True,
+        )
+        self.assertEqual(first.paired_flow_seeds.canonical_bytes, second.paired_flow_seeds.canonical_bytes)
+        rows = [json.loads(line) for line in first.paired_flow_seeds.canonical_bytes.splitlines()]
+        self.assertEqual([row["seed_kind"] for row in rows], ["paired-flow", "paired-flow", "sink-only"])
+        self.assertEqual([row["component"] for row in rows], ["component-api", "component-state", "component-state"])
+        self.assertEqual(rows[0]["reason_codes"], ["declaration-source"])
+        self.assertEqual(rows[1]["reason_codes"], ["parameter-flow"])
+        self.assertIsNone(rows[2]["entry"])
+        self.assertEqual(rows[2]["reason_codes"], ["sink-only"])
+        self.assertTrue(all(row["seed_id"].startswith("seed-") and len(row["seed_id"]) == 37 for row in rows))
+
+    def test_paired_flow_seeds_reject_truncated_identifier_collisions(self) -> None:
+        files = {
+            "src/app.ts": "export function handle(request, value) { target.custom(value); }\n",
+            "src/other.ts": "export function apply(value) { target.setting = value; }\n",
+        }
+        with mock.patch(
+            "benchmarks.hermesbench.semantic_guidance._paired_flow_seed_id",
+            return_value="seed-" + "0" * 32,
+        ):
+            with self.assertRaises(semantic_guidance.SemanticGuidanceError):
+                self._build(
+                    "paired-flow-collision",
+                    files,
+                    guidance_schema_version=3,
+                    components={"src/app.ts": "component-api", "src/other.ts": "component-state"},
+                    include_paired_flow_seeds=True,
+                )
+
+    def test_paired_flow_seeds_honor_row_and_byte_limits_deterministically(self) -> None:
+        files = {
+            f"src/module_{number}.ts": (
+                f"export function apply{number}(value) {{ target.custom{number}(value); }}\n"
+            )
+            for number in range(8)
+        }
+        with mock.patch.dict(
+            semantic_guidance.PAIRED_FLOW_SEED_LIMITS,
+            {"hunt-balanced": (3, 2048, 1024)},
+        ):
+            result = self._build(
+                "paired-flow-bounds",
+                files,
+                guidance_schema_version=3,
+                components={path: f"component-{index % 2}" for index, path in enumerate(files)},
+                include_paired_flow_seeds=True,
+            )
+        self.assertEqual(result.paired_flow_seeds.row_count, 3)
+        self.assertLessEqual(len(result.paired_flow_seeds.canonical_bytes), 2048)
+        self.assertTrue(all(len(line) + 1 <= 1024 for line in result.paired_flow_seeds.canonical_bytes.splitlines()))
+
+    def test_paired_flow_seeds_allow_empty_and_do_not_cross_disconnected_components(self) -> None:
+        empty = self._build(
+            "paired-flow-empty",
+            {"src/ordinary.ts": "export const value = 1;\n"},
+            guidance_schema_version=3,
+            components={"src/ordinary.ts": "component-empty"},
+            include_paired_flow_seeds=True,
+        )
+        self.assertEqual(empty.paired_flow_seeds.canonical_bytes, b"")
+        disconnected = self._build(
+            "paired-flow-disconnected",
+            {
+                "src/api.ts": "export function handle(request) { target.custom('safe'); }\n",
+                "src/state.ts": "export function apply(value) { target.setting = value; }\n",
+            },
+            guidance_schema_version=3,
+            components={"src/api.ts": "component-api", "src/state.ts": "component-state"},
+            include_paired_flow_seeds=True,
+        )
+        rows = [json.loads(line) for line in disconnected.paired_flow_seeds.canonical_bytes.splitlines()]
+        self.assertTrue(all(
+            row["entry"] is None or row["entry"]["path"] == row["critical"]["path"]
+            for row in rows
+        ))
+
+    def test_paired_flow_seeds_ignore_oracle_like_files_outside_the_frontier(self) -> None:
+        snapshot = self._root / "paired-flow-oracle-like"
+        snapshot.mkdir()
+        (snapshot / "src").mkdir()
+        (snapshot / "oracles").mkdir()
+        (snapshot / "src" / "app.ts").write_text(
+            "export function handle(request, value) { target.custom(value); }\n",
+            encoding="utf-8",
+        )
+        (snapshot / "oracles" / "expected.txt").write_text("first\n", encoding="utf-8")
+        contexts = (("src/app.ts", "component-api", ("forward",)),)
+        first = build_semantic_guidance(snapshot, contexts, "hunt-balanced", guidance_schema_version=3, include_paired_flow_seeds=True)
+        (snapshot / "oracles" / "expected.txt").write_text("second\n", encoding="utf-8")
+        second = build_semantic_guidance(snapshot, contexts, "hunt-balanced", guidance_schema_version=3, include_paired_flow_seeds=True)
+        self.assertEqual(first.paired_flow_seeds.canonical_bytes, second.paired_flow_seeds.canonical_bytes)
 
     def test_schema_three_operation_index_is_byte_deterministic(self) -> None:
         files = {

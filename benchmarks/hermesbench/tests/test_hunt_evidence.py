@@ -82,7 +82,7 @@ class HuntEvidencePreparationTests(unittest.TestCase):
             "coverage_debt_count": 3,
             "validated_closure_count": 0,
         }
-        if version in (2, 3, 4):
+        if version in (2, 3, 4, 5):
             payload |= {
                 "semantic_guidance_sha256": "6" * 64,
                 "semantic_guidance_count": 2,
@@ -265,6 +265,20 @@ class HuntEvidencePreparationTests(unittest.TestCase):
         self.assertEqual(row["component"], ".")
         self.assertNotEqual(protocol_four.semantic_guidance.sha256, protocol_three.semantic_guidance.sha256)
         self.assertEqual(protocol_two.semantic_guidance.sha256, "c7521cf55318dc1cc393c12e39c643fbabdd003d02329160f92861c257549a37")
+
+    def test_protocol_five_records_deterministic_paired_flow_seeds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = self._semantic_snapshot(root)
+            first = prepare_hunt_artifacts(snapshot, root / "first", "hunt-balanced", evidence_protocol_version=5)
+            second = prepare_hunt_artifacts(snapshot, root / "second", "hunt-balanced", evidence_protocol_version=5)
+            self.assertEqual(first.paired_flow_seeds.sha256, second.paired_flow_seeds.sha256)
+            self.assertEqual(first.paired_flow_seeds_row_count, second.paired_flow_seeds_row_count)
+            self.assertEqual(
+                first.paired_flow_seeds.path.read_bytes(),
+                second.paired_flow_seeds.path.read_bytes(),
+            )
+            self.assertIn("paired-flow-seeds.jsonl", {path.name for path in first.plan_directory.iterdir()})
 
 
 class HuntEvidenceAttestationTests(HuntEvidencePreparationTests):

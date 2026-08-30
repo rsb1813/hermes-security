@@ -45,6 +45,13 @@ MAX_OPERATION_INDEX_REUSED_SIGNATURE_FREQUENCY = 16
 MIN_OPERATION_INDEX_COMPLEX_CALL_IDENTIFIERS = 3
 OPERATION_INDEX_PARAMETER_FLOW_WEIGHT = 2
 OPERATION_INDEX_DENSITY_LOOKAHEAD = 16
+PAIRED_FLOW_SEED_SCHEMA_VERSION = 1
+PAIRED_FLOW_SEED_LIMITS = {
+    "hunt-balanced": (128, 64 * 1024, 1024),
+    "hunt-max": (256, 128 * 1024, 1024),
+}
+MAX_PAIRED_FLOW_SEED_TRACE = 4
+MAX_PAIRED_FLOW_SEED_SYMBOL_BYTES = 256
 MAX_FILE_BYTES = 1024 * 1024
 _CODE = "C"
 _STRING = "S"
@@ -128,6 +135,15 @@ class SemanticGuidance:
     edge_count: int
     scanned_file_count: int
     skipped_file_count: int
+    paired_flow_seeds: PairedFlowSeeds | None = None
+
+
+@dataclass(frozen=True)
+class PairedFlowSeeds:
+    canonical_bytes: bytes
+    row_count: int
+    paired_count: int
+    sink_only_count: int
 
 
 @dataclass(frozen=True)
@@ -194,6 +210,8 @@ class _StructuralSite:
     signature: str
     parameter_flow: bool = False
     argument_identifier_count: int = 0
+    owner: _Location | None = None
+    owner_sources: tuple[_Location, ...] = ()
 
 
 _ModuleTargetIndex = dict[tuple[str, str, str], tuple[_Declaration, ...]]
@@ -224,6 +242,7 @@ def build_semantic_guidance(
     profile: str,
     *,
     guidance_schema_version: int,
+    include_paired_flow_seeds: bool = False,
 ) -> SemanticGuidance:
     try:
         limits = PROFILE_LIMITS[profile]
@@ -235,6 +254,8 @@ def build_semantic_guidance(
         or guidance_schema_version not in SUPPORTED_SEMANTIC_GUIDANCE_SCHEMA_VERSIONS
     ):
         raise SemanticGuidanceError("semantic guidance schema version is unsupported")
+    if not isinstance(include_paired_flow_seeds, bool):
+        raise SemanticGuidanceError("paired flow seed selection is invalid")
     paths, frontier_passes_by_path, frontier_components_by_path = _normalize_frontier_contexts(
         frontier_contexts,
         guidance_schema_version,
@@ -260,12 +281,13 @@ def build_semantic_guidance(
     )
     if guidance_schema_version == SEMANTIC_GUIDANCE_SCHEMA_VERSION:
         routes, edge_count, incoming, by_identity = _build_schema_three_routes(declarations, limits)
+        structural_sites = _structural_sites(
+            declarations,
+            frontier_components_by_path,
+            limits.edge_count,
+        )
         operation_index_rows = _operation_index_rows(
-            _structural_sites(
-                declarations,
-                frontier_components_by_path,
-                limits.edge_count,
-            ),
+            structural_sites,
             frontier_passes_by_path,
             limits,
         )
@@ -273,9 +295,21 @@ def build_semantic_guidance(
             *routes,
             *_nested_output_routes(nested_observations, incoming, by_identity),
         )
+        paired_flow_seeds = (
+            _paired_flow_seeds(
+                routes,
+                structural_sites,
+                frontier_passes_by_path,
+                frontier_components_by_path,
+                profile,
+            )
+            if include_paired_flow_seeds
+            else None
+        )
     else:
         routes, edge_count = _build_routes(declarations, limits)
         operation_index_rows = ()
+        paired_flow_seeds = None
     canonical_bytes, row_count = _canonical_guidance(
         routes,
         limits,
@@ -290,6 +324,7 @@ def build_semantic_guidance(
         edge_count,
         scan.scanned_file_count,
         scan.skipped_file_count,
+        paired_flow_seeds,
     )
 
 
@@ -1463,6 +1498,8 @@ def _structural_sites(
                 call.name.lower(),
                 call.parameter_flow,
                 call.argument_identifier_count,
+                declaration.location,
+                declaration.sources,
             )
             retain(site)
         for mutation in declaration.mutations:
@@ -1475,6 +1512,9 @@ def _structural_sites(
                 "mutation",
                 mutation.signature,
                 mutation.parameter_flow,
+                0,
+                declaration.location,
+                declaration.sources,
             )
             retain(site)
         for assignment in declaration.assignments:
@@ -1490,6 +1530,9 @@ def _structural_sites(
                 "assignment",
                 assignment.signature,
                 True,
+                0,
+                declaration.location,
+                declaration.sources,
             )
             retain(site)
     return tuple(
@@ -2184,6 +2227,270 @@ def _combined_strength(current: str, edge: str) -> str:
 
 def _location_identity(location: _Location) -> tuple[str, int, str]:
     return (location.path, location.line, location.symbol)
+
+
+def _paired_flow_seeds(
+    routes: tuple[_Route, ...],
+    sites: tuple[_StructuralSite, ...],
+    frontier_passes_by_path: dict[str, tuple[str, ...]],
+    frontier_components_by_path: dict[str, str],
+    profile: str,
+) -> PairedFlowSeeds:
+    row_limit, byte_limit, row_byte_limit = PAIRED_FLOW_SEED_LIMITS.get(
+        profile,
+        PAIRED_FLOW_SEED_LIMITS["hunt-balanced"],
+    )
+    lanes: dict[str, list[dict[str, object]]] = {
+        "paired-route": [],
+        "paired-source": [],
+        "paired-parameter": [],
+        "sink-only": [],
+    }
+    covered_sites: set[tuple[str, int, str, str]] = set()
+    for route in routes:
+        try:
+            component = frontier_components_by_path[route.operation.path]
+        except KeyError as error:
+            raise SemanticGuidanceError("paired flow seed route has no component") from error
+        row = _paired_flow_seed_row(
+            "paired-flow",
+            route.source,
+            route.operation,
+            route.operation_family,
+            route.trace,
+            ("semantic-route",),
+            frontier_passes_by_path,
+            component,
+        )
+        if row is not None:
+            lanes["paired-route"].append(row)
+    for site in sites:
+        if _site_identity(site) in covered_sites or site.owner is None or _route_covers_site(routes, site):
+            continue
+        for source in site.owner_sources:
+            row = _paired_flow_seed_row(
+                "paired-flow",
+                source,
+                _site_location(site),
+                site.family,
+                (),
+                ("declaration-source",),
+                frontier_passes_by_path,
+                site.component,
+            )
+            if row is not None:
+                lanes["paired-source"].append(row)
+                covered_sites.add(_site_identity(site))
+                break
+    for site in sites:
+        if _site_identity(site) in covered_sites or _route_covers_site(routes, site) or not site.parameter_flow or site.owner is None:
+            continue
+        row = _paired_flow_seed_row(
+            "paired-flow",
+            site.owner,
+            _site_location(site),
+            site.family,
+            (),
+            ("parameter-flow",),
+            frontier_passes_by_path,
+            site.component,
+        )
+        if row is not None:
+            lanes["paired-parameter"].append(row)
+            covered_sites.add(_site_identity(site))
+    for site in sites:
+        if _site_identity(site) in covered_sites or _route_covers_site(routes, site):
+            continue
+        row = _paired_flow_seed_row(
+            "sink-only",
+            None,
+            _site_location(site),
+            site.family,
+            (),
+            ("sink-only",),
+            frontier_passes_by_path,
+            site.component,
+        )
+        if row is not None:
+            lanes["sink-only"].append(row)
+    lanes = _deduplicate_paired_flow_seed_rows(lanes)
+    selected: list[bytes] = []
+    used_bytes = 0
+    queues = {
+        lane: deque(_component_round_robin_rows(rows))
+        for lane, rows in lanes.items()
+    }
+    while any(queues.values()) and len(selected) < row_limit:
+        contributed = False
+        for lane in ("paired-route", "paired-source", "paired-parameter", "sink-only"):
+            queue = queues[lane]
+            if not queue or len(selected) >= row_limit:
+                continue
+            encoded = _encode_canonical_row(queue.popleft())
+            if len(encoded) > row_byte_limit or used_bytes + len(encoded) > byte_limit:
+                continue
+            selected.append(encoded)
+            used_bytes += len(encoded)
+            contributed = True
+        if not contributed and not any(queues.values()):
+            break
+    rows = [json.loads(encoded) for encoded in selected]
+    return PairedFlowSeeds(
+        b"".join(selected),
+        len(selected),
+        sum(row["seed_kind"] == "paired-flow" for row in rows),
+        sum(row["seed_kind"] == "sink-only" for row in rows),
+    )
+
+
+def _component_round_robin_rows(rows: list[dict[str, object]]) -> tuple[dict[str, object], ...]:
+    grouped: dict[str, deque[dict[str, object]]] = {}
+    for row in rows:
+        component = row["component"]
+        if not isinstance(component, str):
+            raise SemanticGuidanceError("paired flow seed component is invalid")
+        grouped.setdefault(component, deque()).append(row)
+    for component, queue in tuple(grouped.items()):
+        grouped[component] = deque(sorted(queue, key=_paired_flow_seed_sort_key))
+    ordered: list[dict[str, object]] = []
+    while True:
+        contributed = False
+        for component in sorted(grouped):
+            queue = grouped[component]
+            if queue:
+                ordered.append(queue.popleft())
+                contributed = True
+        if not contributed:
+            return tuple(ordered)
+
+
+def _paired_flow_seed_sort_key(row: dict[str, object]) -> tuple[object, ...]:
+    critical = row["critical"]
+    if not isinstance(critical, dict):
+        raise SemanticGuidanceError("paired flow seed critical location is invalid")
+    return (
+        row["component"],
+        critical["path"],
+        critical["line"],
+        critical["family"],
+        critical["symbol"],
+        row["seed_id"],
+    )
+
+
+def _deduplicate_paired_flow_seed_rows(
+    lanes: dict[str, list[dict[str, object]]],
+) -> dict[str, list[dict[str, object]]]:
+    retained: dict[tuple[object, ...], dict[str, object]] = {}
+    seed_ids: dict[str, dict[str, object]] = {}
+    result = {lane: [] for lane in lanes}
+    for lane, rows in lanes.items():
+        for row in rows:
+            key = (row["seed_kind"], _seed_endpoint_key(row["entry"]), _seed_endpoint_key(row["critical"]))
+            if key in retained:
+                continue
+            seed_id = row["seed_id"]
+            if not isinstance(seed_id, str):
+                raise SemanticGuidanceError("paired flow seed ID is invalid")
+            previous = seed_ids.get(seed_id)
+            if previous is not None and previous != row:
+                raise SemanticGuidanceError("paired flow seed ID collision")
+            retained[key] = row
+            seed_ids[seed_id] = row
+            result[lane].append(row)
+    return result
+
+
+def _seed_endpoint_key(value: object) -> tuple[object, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise SemanticGuidanceError("paired flow seed endpoint is invalid")
+    return tuple(sorted(value.items()))
+
+
+def _paired_flow_seed_row(
+    seed_kind: str,
+    entry: _Location | None,
+    critical: _Location,
+    family: str,
+    trace: tuple[_Location, ...],
+    reason_codes: tuple[str, ...],
+    frontier_passes_by_path: dict[str, tuple[str, ...]],
+    component: str,
+) -> dict[str, object] | None:
+    entry_value = _seed_location(entry) if entry is not None else None
+    critical_value = _seed_critical_location(critical, family)
+    trace_value = [
+        value
+        for location in trace
+        if location not in {entry, critical}
+        if (value := _seed_location(location)) is not None
+    ][:MAX_PAIRED_FLOW_SEED_TRACE]
+    if (entry is not None and entry_value is None) or critical_value is None:
+        return None
+    paths = {critical.path}
+    if entry is not None:
+        paths.add(entry.path)
+    paths.update(location.path for location in trace)
+    try:
+        eligible = [
+            value
+            for value in HUNT_SEARCH_PASS_ORDER
+            if any(value in frontier_passes_by_path[path] for path in paths)
+        ]
+    except KeyError as error:
+        raise SemanticGuidanceError("paired flow seed is absent from frontier passes") from error
+    if not eligible or not isinstance(component, str) or not component or "\x00" in component:
+        return None
+    logical: dict[str, object] = {
+        "component": component,
+        "critical": critical_value,
+        "eligible_search_passes": eligible,
+        "entry": entry_value,
+        "proof_status": "investigation_only",
+        "reason_codes": list(reason_codes),
+        "schema_version": PAIRED_FLOW_SEED_SCHEMA_VERSION,
+        "seed_kind": seed_kind,
+        "trace": trace_value,
+    }
+    seed_id = _paired_flow_seed_id(logical)
+    return {**logical, "seed_id": seed_id}
+
+
+def _paired_flow_seed_id(logical_row: dict[str, object]) -> str:
+    canonical = json.dumps(logical_row, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return "seed-" + hashlib.sha256(canonical).hexdigest()[:32]
+
+
+def _seed_location(location: _Location) -> dict[str, object] | None:
+    if len(location.symbol.encode("utf-8")) > MAX_PAIRED_FLOW_SEED_SYMBOL_BYTES:
+        return None
+    return location.as_dict()
+
+
+def _seed_critical_location(location: _Location, family: str) -> dict[str, object] | None:
+    value = _seed_location(location)
+    if value is None or not isinstance(family, str) or not family:
+        return None
+    return {"family": family, **value}
+
+
+def _site_location(site: _StructuralSite) -> _Location:
+    return _Location(site.path, site.line, site.signature)
+
+
+def _site_identity(site: _StructuralSite) -> tuple[str, int, str, str]:
+    return (site.path, site.line, site.family, site.signature)
+
+
+def _route_covers_site(routes: tuple[_Route, ...], site: _StructuralSite) -> bool:
+    return any(
+        route.operation.path == site.path
+        and route.operation.line == site.line
+        and route.operation.symbol.rsplit(".", 1)[-1].lower() == site.signature
+        for route in routes
+    )
 
 
 def _canonical_guidance(

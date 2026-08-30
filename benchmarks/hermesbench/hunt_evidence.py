@@ -30,13 +30,16 @@ FRONTIER_NAME = "frontier.jsonl"
 FRONTIER_RECEIPT_NAME = "frontier-receipt.json"
 PRIORITY_PACKET_NAME = "priority-packet.jsonl"
 SEMANTIC_GUIDANCE_NAME = "semantic-guidance.jsonl"
+PAIRED_FLOW_SEEDS_NAME = "paired-flow-seeds.jsonl"
 LEGACY_HUNT_EVIDENCE_PROTOCOL_VERSION = 1
 SEMANTIC_GUIDANCE_HUNT_EVIDENCE_PROTOCOL_VERSION = 2
 PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION = 3
 NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION = 4
+PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION = 5
 HUNT_EVIDENCE_PROTOCOL_VERSION = NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
 SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({1, 2, 3, 4})
-_SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({2, 3, 4})
+_PREPARATION_HUNT_EVIDENCE_PROTOCOL_VERSIONS = SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS | frozenset({PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION})
+_SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS = frozenset({2, 3, 4, 5})
 MAX_INVENTORY_ROWS = 100_000
 MAX_INVENTORY_BYTES = 8 * 1024 * 1024
 MAX_RANK_INPUT_BYTES = 32 * 1024 * 1024
@@ -66,6 +69,7 @@ HUNT_EVIDENCE_FIELDS_V2 = HUNT_EVIDENCE_FIELDS_V1 | frozenset({
 })
 HUNT_EVIDENCE_FIELDS_V3 = HUNT_EVIDENCE_FIELDS_V2
 HUNT_EVIDENCE_FIELDS_V4 = HUNT_EVIDENCE_FIELDS_V3
+HUNT_EVIDENCE_FIELDS_V5 = HUNT_EVIDENCE_FIELDS_V4
 HUNT_EVIDENCE_FIELDS = HUNT_EVIDENCE_FIELDS_V3
 HUNT_EVIDENCE_FAILURE_CODES = frozenset({
     "hunt_evidence_packet_missing",
@@ -109,6 +113,7 @@ class PreparedHuntArtifacts:
     frontier_receipt: _Artifact
     priority_packet: _Artifact
     semantic_guidance: _Artifact | None
+    paired_flow_seeds: _Artifact | None
     inventory_count: int
     frontier_count: int
     frontier_pass_count: int
@@ -118,6 +123,9 @@ class PreparedHuntArtifacts:
     semantic_guidance_edge_count: int | None
     semantic_guidance_scanned_file_count: int | None
     semantic_guidance_skipped_file_count: int | None
+    paired_flow_seeds_row_count: int | None
+    paired_flow_seeds_paired_count: int | None
+    paired_flow_seeds_sink_only_count: int | None
     preparation_fingerprint: str
     preparation_seconds: float
     container_priority_packet_path: str = "/workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
@@ -239,7 +247,7 @@ def prepare_hunt_artifacts(
     evidence_protocol_version: int = HUNT_EVIDENCE_PROTOCOL_VERSION,
 ) -> PreparedHuntArtifacts:
     """Creates and records the complete immutable Hunt plan using bundled helpers."""
-    if profile not in PRIORITY_ROW_LIMITS or not _supported_protocol_version(evidence_protocol_version):
+    if profile not in PRIORITY_ROW_LIMITS or not _supported_preparation_protocol_version(evidence_protocol_version):
         raise HuntEvidenceError("Hunt profile is unsupported")
     snapshot = _safe_directory(snapshot_path, "snapshot")
     scratch = _safe_directory(scratch_path, "scratch", create=True)
@@ -254,6 +262,7 @@ def prepare_hunt_artifacts(
     receipt = plan / FRONTIER_RECEIPT_NAME
     priority_packet = plan / PRIORITY_PACKET_NAME
     semantic_guidance_path = plan / SEMANTIC_GUIDANCE_NAME
+    paired_flow_seeds_path = plan / PAIRED_FLOW_SEEDS_NAME
     _run_helper("generate_in_scope_files.py", ("--repo", str(snapshot), "--scope", ".", "--out", str(inventory)))
     _run_helper("generate_rank_input.py", ("make-repo-rank-input", "--repo", str(snapshot), "--scope", ".", "--out", str(rank_input)))
     _normalize_lf(inventory, "inventory")
@@ -284,12 +293,15 @@ def prepare_hunt_artifacts(
     }
     semantic_guidance = None
     semantic_counts = (None, None, None, None)
+    paired_flow_seeds = None
+    paired_flow_seed_counts = (None, None, None)
     if _uses_semantic_guidance(evidence_protocol_version):
         guidance = build_semantic_guidance(
             snapshot,
             frontier_contexts,
             profile,
             guidance_schema_version=_semantic_guidance_schema_version(evidence_protocol_version),
+            include_paired_flow_seeds=evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
         )
         semantic_guidance_path.write_bytes(guidance.canonical_bytes)
         semantic_guidance = _record(semantic_guidance_path, "semantic guidance")
@@ -300,13 +312,44 @@ def prepare_hunt_artifacts(
             guidance.scanned_file_count,
             guidance.skipped_file_count,
         )
+        if evidence_protocol_version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+            if guidance.paired_flow_seeds is None:
+                raise HuntEvidenceError("paired flow seeds are unavailable")
+            paired_flow_seeds_path.write_bytes(guidance.paired_flow_seeds.canonical_bytes)
+            paired_flow_seeds = _record(paired_flow_seeds_path, "paired flow seeds")
+            artifacts["paired_flow_seeds"] = paired_flow_seeds
+            paired_flow_seed_counts = (
+                guidance.paired_flow_seeds.row_count,
+                guidance.paired_flow_seeds.paired_count,
+                guidance.paired_flow_seeds.sink_only_count,
+            )
     passes = {(str(row["work_id"]), value) for row in frontier_rows for value in row["passes"]}
     fingerprint = _canonical_sha256({name: artifact.sha256 for name, artifact in artifacts.items()} | {"profile": profile})
     return PreparedHuntArtifacts(
-        plan, profile, evidence_protocol_version, artifacts["inventory"], artifacts["rank_input"], artifacts["frontier"], artifacts["frontier_receipt"], artifacts["priority_packet"], semantic_guidance,
-        len(inventory_paths), len(frontier_rows), len(passes), len(priority_rows), artifacts["priority_packet"].byte_count,
-        *semantic_counts,
-        fingerprint, time.monotonic() - started,
+        plan_directory=plan,
+        profile=profile,
+        evidence_protocol_version=evidence_protocol_version,
+        inventory=artifacts["inventory"],
+        rank_input=artifacts["rank_input"],
+        frontier=artifacts["frontier"],
+        frontier_receipt=artifacts["frontier_receipt"],
+        priority_packet=artifacts["priority_packet"],
+        semantic_guidance=semantic_guidance,
+        paired_flow_seeds=paired_flow_seeds,
+        inventory_count=len(inventory_paths),
+        frontier_count=len(frontier_rows),
+        frontier_pass_count=len(passes),
+        priority_count=len(priority_rows),
+        priority_bytes=artifacts["priority_packet"].byte_count,
+        semantic_guidance_row_count=semantic_counts[0],
+        semantic_guidance_edge_count=semantic_counts[1],
+        semantic_guidance_scanned_file_count=semantic_counts[2],
+        semantic_guidance_skipped_file_count=semantic_counts[3],
+        paired_flow_seeds_row_count=paired_flow_seed_counts[0],
+        paired_flow_seeds_paired_count=paired_flow_seed_counts[1],
+        paired_flow_seeds_sink_only_count=paired_flow_seed_counts[2],
+        preparation_fingerprint=fingerprint,
+        preparation_seconds=time.monotonic() - started,
     )
 
 
@@ -404,6 +447,10 @@ def _supported_protocol_version(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value in SUPPORTED_HUNT_EVIDENCE_PROTOCOL_VERSIONS
 
 
+def _supported_preparation_protocol_version(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value in _PREPARATION_HUNT_EVIDENCE_PROTOCOL_VERSIONS
+
+
 def _uses_semantic_guidance(version: int) -> bool:
     return version in _SEMANTIC_HUNT_EVIDENCE_PROTOCOL_VERSIONS
 
@@ -414,6 +461,8 @@ def _semantic_guidance_schema_version(version: int) -> int:
     if version == PASS_ANNOTATED_HUNT_EVIDENCE_PROTOCOL_VERSION:
         return PASS_ANNOTATED_SEMANTIC_GUIDANCE_SCHEMA_VERSION
     if version == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return SEMANTIC_GUIDANCE_SCHEMA_VERSION
+    if version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
         return SEMANTIC_GUIDANCE_SCHEMA_VERSION
     raise HuntEvidenceError("Hunt evidence protocol has no semantic guidance")
 
@@ -427,6 +476,8 @@ def _evidence_fields(version: int) -> frozenset[str]:
         return HUNT_EVIDENCE_FIELDS_V3
     if version == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION:
         return HUNT_EVIDENCE_FIELDS_V4
+    if version == PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION:
+        return HUNT_EVIDENCE_FIELDS_V5
     raise HuntEvidenceError("Hunt evidence protocol is unsupported")
 
 
