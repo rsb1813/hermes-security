@@ -25,6 +25,7 @@ from benchmarks.hermesbench.adapters.codex_exec import (
 from benchmarks.hermesbench.phase_runner import CanonicalCandidate
 from benchmarks.hermesbench.contracts import Location
 from benchmarks.hermesbench.hunt_evidence import (
+    NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
     PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
     HuntEvidenceError,
 )
@@ -764,10 +765,20 @@ class CodexExecAdapterTests(unittest.TestCase):
             verification_scratch = Path(directory) / "verification"
             discovery_scratch.mkdir()
             verification_scratch.mkdir()
-            self._adapter("hunt", "hunt-balanced", discovery)(
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                discovery,
+                hunt_evidence_protocol_version=NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
+            )(
                 _request(), discovery_scratch, 60
             )
-            self._adapter("hunt", "hunt-balanced", verification).for_verification(
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                verification,
+                hunt_evidence_protocol_version=NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
+            ).for_verification(
                 {"task-001": ()}
             )(_request(), verification_scratch, 60)
 
@@ -797,7 +808,12 @@ class CodexExecAdapterTests(unittest.TestCase):
         runtime = _Runtime(packet_read + _hunt_stream())
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(CodexExecError) as caught:
-                self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 60)
+                self._adapter(
+                    "hunt",
+                    "hunt-balanced",
+                    runtime,
+                    hunt_evidence_protocol_version=NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
+                )(_request(), Path(directory), 60)
         self.assertEqual(caught.exception.failure_code, "hunt_evidence_packet_duplicate")
 
     def test_hunt_attestation_categories_map_to_path_free_public_codes(self) -> None:
@@ -833,7 +849,12 @@ class CodexExecAdapterTests(unittest.TestCase):
         runtime = _Runtime(_hunt_stream())
         with tempfile.TemporaryDirectory() as directory:
             with patch("benchmarks.hermesbench.adapters.codex_exec.time.monotonic", side_effect=(10.0, 10.0, 27.2, 27.2)):
-                self._adapter("hunt", "hunt-balanced", runtime)(_request(), Path(directory), 480)
+                self._adapter(
+                    "hunt",
+                    "hunt-balanced",
+                    runtime,
+                    hunt_evidence_protocol_version=NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
+                )(_request(), Path(directory), 480)
         self.assertEqual(runtime.calls[0]["timeout_seconds"], 462)
 
     def test_hunt_preparation_with_less_than_one_second_skips_runtime(self) -> None:
@@ -990,7 +1011,12 @@ class CodexExecAdapterTests(unittest.TestCase):
             self._adapter("standard", "baseline", standard_runtime)(
                 _request(), standard_scratch, 60
             )
-            self._adapter("hunt", "hunt-balanced", hunt_runtime)(
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                hunt_runtime,
+                hunt_evidence_protocol_version=NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION,
+            )(
                 _request(), hunt_scratch, 60
             )
 
