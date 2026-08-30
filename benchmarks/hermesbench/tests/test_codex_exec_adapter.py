@@ -24,7 +24,10 @@ from benchmarks.hermesbench.adapters.codex_exec import (
 )
 from benchmarks.hermesbench.phase_runner import CanonicalCandidate
 from benchmarks.hermesbench.contracts import Location
-from benchmarks.hermesbench.hunt_evidence import HuntEvidenceError
+from benchmarks.hermesbench.hunt_evidence import (
+    PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+    HuntEvidenceError,
+)
 from benchmarks.hermesbench.runner import ExecutorTimeoutError
 
 
@@ -97,6 +100,25 @@ def _hunt_stream() -> bytes:
     priority = {"type": "item.completed", "item": {"type": "command_execution", "command": "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"}}
     semantic = {"type": "item.completed", "item": {"type": "command_execution", "command": "cat /workspace/scratch/hermesbench-hunt/semantic-guidance.jsonl"}}
     return encode(priority) + _stream(command=semantic["item"]["command"])
+
+
+def _paired_flow_stream() -> bytes:
+    encode = lambda row: json.dumps(row).encode("utf-8") + b"\n"
+    priority = {
+        "type": "item.completed",
+        "item": {
+            "type": "command_execution",
+            "command": "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl",
+        },
+    }
+    seeds = {
+        "type": "item.completed",
+        "item": {
+            "type": "command_execution",
+            "command": "cat /workspace/scratch/hermesbench-hunt/paired-flow-seeds.jsonl",
+        },
+    }
+    return encode(priority) + _stream(command=seeds["item"]["command"])
 
 
 class CodexExecAdapterTests(unittest.TestCase):
@@ -253,6 +275,115 @@ class CodexExecAdapterTests(unittest.TestCase):
         ):
             self.assertIn(managed_skill, prompt)
             self.assertNotIn(standalone_skill, prompt)
+
+    def test_protocol_five_uses_only_priority_and_paired_seed_artifacts(self) -> None:
+        priority = "cat /workspace/scratch/hermesbench-hunt/priority-packet.jsonl"
+        seeds = "cat /workspace/scratch/hermesbench-hunt/paired-flow-seeds.jsonl"
+        managed_skill = "/workspace/plugin/skills/hunt-security-scan-managed/SKILL.md"
+        candidate = CanonicalCandidate(
+            candidate_id="candidate-1",
+            entry_point=Location("source.py", 1, 1),
+            critical_operation=Location("source.py", 3, 3),
+            trace=(Location("source.py", 2, 2),),
+            confidence=0.81,
+            vulnerability_family="family-sentinel",
+            search_pass="pass-sentinel",
+            hypothesis="hypothesis-sentinel",
+            evidence="evidence-sentinel",
+            counterevidence="counterevidence-sentinel",
+            expected_control="control-sentinel",
+        )
+        discovery = _Runtime(_paired_flow_stream())
+        verification = _Runtime(_stream(), final_message=_HUNT_VERIFICATION_RESPONSE)
+        with tempfile.TemporaryDirectory() as directory:
+            discovery_scratch = Path(directory) / "discovery"
+            verification_scratch = Path(directory) / "verification"
+            discovery_scratch.mkdir()
+            verification_scratch.mkdir()
+            result = self._adapter(
+                "hunt",
+                "hunt-balanced",
+                discovery,
+                hunt_evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+            )(_request(), discovery_scratch, 60)
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                verification,
+                hunt_evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+            ).for_verification({"task-001": (candidate,)})(
+                _request(), verification_scratch, 60
+            )
+
+        self.assertIsNotNone(result.hunt_evidence)
+        self.assertEqual(
+            result.observed_argv,
+            (("cat", priority.split(" ", 1)[1]), ("cat", seeds.split(" ", 1)[1])),
+        )
+        self.assertEqual((len(discovery.calls), len(verification.calls)), (1, 1))
+        discovery_command = discovery.calls[0]["command_argv"]
+        discovery_prompt = discovery_command[-1]
+        self.assertIn(managed_skill, discovery_prompt)
+        self.assertIn("--output-schema", discovery_command)
+        self.assertEqual(
+            discovery_command[discovery_command.index("--output-schema") + 1],
+            "/workspace/schema/hunt-discovery-response.schema.json",
+        )
+        for instruction in (
+            "paired-flow exact ID+entry+critical copy",
+            "sink-only exact ID+critical with source-inspected frontier entry",
+            "eligible seed pass",
+            "When seeds+candidates exist, return at least one seeded result",
+            "at most four unseeded fallback candidates",
+            "source inspection is mandatory",
+            "guidance, never proof",
+            "at most 12 distinct bounded hypotheses",
+        ):
+            with self.subTest(instruction=instruction):
+                self.assertIn(instruction, discovery_prompt)
+        self.assertIn("Paired-flow seeds are the only seed packet for this phase", discovery_prompt)
+        self.assertIn("do not read semantic-guidance", discovery_prompt)
+        self.assertNotIn("semantic-guidance.jsonl", discovery_prompt)
+        verification_command = verification.calls[0]["command_argv"]
+        verification_prompt = verification_command[-1]
+        self.assertEqual(
+            verification_command[verification_command.index("--output-schema") + 1],
+            "/workspace/schema/hunt-verification-response.schema.json",
+        )
+        candidate_row = json.loads(verification_prompt.rsplit("Candidate set: ", 1)[1])[0]
+        self.assertEqual(
+            set(candidate_row),
+            {"candidate_id", "entry_point", "critical_operation", "trace"},
+        )
+        for sentinel in (
+            "0.81",
+            "family-sentinel",
+            "pass-sentinel",
+            "hypothesis-sentinel",
+            "evidence-sentinel",
+            "counterevidence-sentinel",
+            "control-sentinel",
+        ):
+            self.assertNotIn(sentinel, verification_prompt)
+
+    def test_protocol_five_verification_rejects_unquoted_angle_search_without_retry(self) -> None:
+        runtime = _Runtime(
+            _stream(command="rg -n literal>search source.py"),
+            final_message=_HUNT_VERIFICATION_RESPONSE,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CodexExecError) as caught:
+                self._adapter(
+                    "hunt",
+                    "hunt-balanced",
+                    runtime,
+                    allowed_command_prefixes=(("rg",),),
+                    hunt_evidence_protocol_version=PAIRED_FLOW_HUNT_EVIDENCE_PROTOCOL_VERSION,
+                ).for_verification({"task-001": ()})(
+                    _request(), Path(directory), 60
+                )
+        self.assertEqual(caught.exception.failure_code, "command_redirect")
+        self.assertEqual(len(runtime.calls), 1)
 
     def test_hunt_discovery_protocol_three_adds_pass_selection_instructions(self) -> None:
         protocol_two = _Runtime(_hunt_stream())
