@@ -28,6 +28,12 @@ The completed Protocol 4 Canary produced 32 discovery candidates and zero exact 
 
 The failure is therefore two-part. Semantic presentation does not make the correct entry-to-critical relationship salient, and entry extraction is incomplete for cases where no defensible source anchor exists. Protocol 5 addresses both with paired seeds plus bounded sink-only and whole-frontier fallbacks.
 
+The first explicit-row Protocol 5 selector did not pass the host gate. Under the balanced 64-KiB packet, exact critical, entry, and pair coverage were all zero even though the complete 60.6-MiB oracle-blind pool contained three exact critical tasks. Selector-only, readable bundle, dictionary-only, confidence-first, and frontier-priority variants also failed to retain an exact pair.
+
+The selected amendment factors repeated data into path and component dictionaries, an entry bank, a critical bank, and bounded entry-to-critical adjacency. The balanced hybrid packet keeps 64 graph entries, retains the largest semantic-operation-ordered critical prefix that fits, and admits original Protocol 5 critical roots as standalone criticals. On the same held-out host gate it retained two exact critical tasks, increased exact entry tasks from zero to two, increased exact pairs from zero to one, and reduced aggregate model-visible bytes from the Protocol 4 control's 324,248 to 262,050. These are host input-coverage results, not model recall.
+
+The product implementation initially reproduced the critical floor but lost one entry and the exact pair. A four-way aggregate A/B diagnostic isolated the loss to an approximate graph-entry representative, not adjacency ordering. Reusing the complete canonical graph-entry order solely as the internal representative key restored the diagnostic floor. The corrected product gate retained two exact critical tasks, two exact entry tasks, one exact pair, and four exact trace nodes in 262,028 aggregate model-visible bytes with exact snapshot and packet-hash integrity. End-to-end model recall remains unmeasured.
+
 ## Alternatives
 
 ### A. Protocol 5 paired-flow seeds
@@ -63,75 +69,62 @@ The full semantic artifact is host-only under Protocol 5. This reduces model-vis
 
 ## Seed artifact
 
-The canonical file is `paired-flow-seeds.jsonl`. It contains UTF-8 JSON Lines with sorted keys, compact separators, LF line endings, and one terminal LF. Each row has exactly these fields.
+The canonical file remains `paired-flow-seeds.jsonl`, but Protocol 5 now uses factorized packet schema 2. It contains UTF-8 JSON Lines with sorted keys, compact separators, LF line endings, and one terminal LF. Rows have one of three exact shapes.
 
 ```json
-{
-  "component": "component-id",
-  "critical": {"family": "call", "line": 42, "path": "src/example.ts", "symbol": "write"},
-  "eligible_search_passes": ["forward", "backward"],
-  "entry": {"line": 7, "path": "src/example.ts", "symbol": "handle"},
-  "proof_status": "investigation_only",
-  "reason_codes": ["declaration-source", "parameter-flow"],
-  "schema_version": 1,
-  "seed_id": "seed-0123456789abcdef0123456789abcdef",
-  "seed_kind": "paired-flow",
-  "trace": [{"line": 12, "path": "src/example.ts", "symbol": "transform"}]
-}
+{"c":[[1,"component-id"]],"p":[[1,"src/example.ts"]],"t":"d","v":2}
+{"e":[[1,1,7,"handle"]],"t":"e","v":2}
+{"t":"x","v":2,"x":[[1,1,42,"write","c",1,"fb",[[1,"f"]]]]}
 ```
 
-For `sink-only`, `entry` is `null`. `critical.family` is one of `call`, `assignment`, `mutation`, or an existing semantic operation family. Paths are canonical inventory paths. Lines are positive integers. Symbols are normalized, bounded investigation labels and never source instructions. `trace` contains at most four canonical locations. `reason_codes` contains only fixed public codes. `proof_status` is always `investigation_only`.
+`d` rows define consecutive path and component IDs. `e` rows define consecutive entry IDs as `[entry_id,path_id,line,symbol]`. `x` rows define consecutive critical IDs as `[critical_id,path_id,line,symbol,family_code,component_id,critical_pass_codes,adjacency]`. Each adjacency item is `[entry_id,pass_codes]`, and one critical has at most four adjacent entries. Empty adjacency is valid and represents a standalone critical investigation root.
 
-`seed_id` is `seed-` plus the first 32 lowercase hexadecimal characters of SHA-256 over the canonical logical row without `seed_id`. Preparation fails on any truncated-ID collision.
+Pass codes are ordered subsets of `f/b/g/p/s/x` for `forward/backward/guard/parser/state/general`. Fixed family codes cover structural `a/c/m` and semantic `command/query/file/template/deserialize/network/state/output-context`. Paths are canonical inventory paths, lines are positive integers, and symbols are normalized bounded investigation labels. The packet contains no source snippets, confidence, proof claim, oracle label, prior model output, or task identity.
 
 ## Oracle-blind derivation
 
-The builder receives only the pinned snapshot, full frontier contexts, profile, and the existing semantic scan result. It must not receive a manifest, task ID, advisory label, oracle path, expected finding, or prior model output.
+The builder receives only the pinned snapshot, full frontier contexts, profile, and the existing schema-3 scan result. It must not receive a manifest, task ID, advisory label, oracle path, expected finding, or prior model output.
 
-Candidate seed pools are derived in this order.
+The existing route, declaration-source, parameter-flow, and sink-only candidate pool supplies critical roots and their eligible passes. The same scan's declaration graph supplies entry-to-critical adjacency as follows.
 
-1. Existing semantic routes with a source and operation become paired-flow seeds.
-2. A declaration source and a structural site inside that same declaration become paired-flow seeds.
-3. A parameter-flow structural site with no stronger source uses its enclosing declaration location as an investigation entry and becomes a paired-flow seed.
-4. Remaining exact structural sites become sink-only seeds.
+1. Declarations with a lexical source anchor become graph roots. The canonical declaration location is the investigation entry, while the minimum canonical source remains internal derivation evidence.
+2. Existing resolved call edges are reversed into deterministic caller-to-target edges. Duplicate caller-target edges retain the strongest existing `direct`, `import-linked`, or `name-only` class.
+3. Breadth-first propagation retains the shortest deterministic path, at most four roots per declaration, the existing profile graph-depth bound, and a fixed work ceiling.
+4. Structural sites owned by a reached declaration become adjacent criticals. The edge is investigation guidance only and never proof of attacker control, reachability, or impact.
+5. Original Protocol 5 criticals that have no retained graph entry remain standalone criticals rather than being discarded.
 
-No pair may be created merely because two locations share a component, path neighborhood, risk token, or lexical similarity. A pair requires an existing route, same-declaration source relationship, or explicit parameter flow. This prevents the artifact from presenting proximity as data flow.
-
-The implementation reuses the existing file scan and retains the declaration owner on structural sites. It must not rescan source files for Protocol 5.
+No pair may be created merely because locations share a component, path neighborhood, risk token, priority score, confidence class, or lexical similarity. The implementation reuses the existing scan, declarations, structural sites, and resolved edges and must not rescan source files.
 
 ## Deterministic selection and bounds
 
-Seed construction deduplicates by kind, entry endpoint, and critical endpoint. Rows are assigned to four fixed lanes matching the derivation order. Each lane is ordered by canonical component, endpoint path, line, family, symbol, and seed ID. Selection performs deterministic component round-robin within the repeating lane schedule `paired-route`, `paired-source`, `paired-parameter`, `sink-only`.
+Entry endpoints are deduplicated and ordered by deterministic component round-robin. `hunt-balanced` retains at most 64 entries and `hunt-max` at most 128. Critical endpoints are deduplicated by canonical endpoint and fixed family, merge graph adjacency with original critical-root pass eligibility, and are ordered by selected semantic operation rank followed by canonical key. Each critical retains at most four adjacent selected entries ordered by shortest graph trace and canonical row.
 
 The profile bounds are fixed.
 
-| Profile | Maximum rows | Maximum bytes | Maximum row bytes |
-| --- | ---: | ---: | ---: |
-| `hunt-balanced` | 128 | 65,536 | 1,024 |
-| `hunt-max` | 256 | 131,072 | 1,024 |
+| Profile | Maximum entries | Maximum rows | Maximum bytes | Maximum row bytes |
+| --- | ---: | ---: | ---: | ---: |
+| `hunt-balanced` | 64 | 128 | 65,536 | 1,024 |
+| `hunt-max` | 128 | 256 | 131,072 | 1,024 |
 
-The selector skips a row that cannot fit the remaining byte budget and continues deterministically. It stops when no lane can contribute. These are output bounds, not targets. Empty seed output is valid when the scanner has no defensible route or structural site.
-
-Sink-only rows remain in the fixed lane schedule so weak entry recall cannot erase exact critical roots. The normal priority packet and a bounded unseeded candidate allowance preserve whole-frontier exploration.
+After dictionaries and the complete bounded entry bank are fixed, a deterministic binary search retains the largest prefix of semantic-ordered criticals whose canonical packet satisfies every bound. Generation and later parsing both reject noncanonical rows, duplicate or nonconsecutive IDs, unknown dictionary references, invalid codes, duplicate adjacency, more than four adjacent entries, and any bound violation.
 
 ## Discovery contract
 
 The Hunt discovery response schema remains unchanged. Protocol 5 interprets `finding_id` as follows.
 
-- A seed-derived candidate copies one `seed_id` exactly into `finding_id`.
-- A paired-flow candidate copies the exact one-line entry and critical endpoints from that same seed.
-- A sink-only candidate copies the exact one-line critical endpoint from that seed and may supply any frontier-valid entry after source inspection.
-- An unseeded fallback candidate uses a non-seed identifier and the existing frontier and search-pass rules.
+- `join-e<entry_id>-c<critical_id>` selects one exact retained adjacency and must copy that entry and critical as one-line endpoints.
+- `sink-c<critical_id>` selects one exact critical and may supply any frontier-valid entry after source inspection.
+- Any other non-reserved identifier is an unseeded fallback under the existing frontier and search-pass rules.
 
-If a non-empty seed artifact exists and discovery returns any candidates, at least one candidate must be seed-derived. At most four candidates may be unseeded fallbacks. The global maximum remains 12 candidates and the final maximum remains five findings.
+A joined candidate uses the adjacency pass codes. A sink candidate uses the critical pass codes. Unknown IDs, nonadjacent entry-critical combinations, changed endpoint ranges, pass mismatch, duplicate reserved IDs, and reserved-shaped fallbacks fail closed. If the packet exposes any addressable seeds and discovery returns candidates, at least one candidate must use a retained join or sink ID. At most four candidates may be unseeded fallbacks. The global maximum remains 12 candidates and the final maximum remains five findings.
 
-For a seeded candidate, `search_pass` must be one of that seed's `eligible_search_passes`. Cross-seed endpoint combinations, unknown seed IDs, changed endpoint ranges, duplicate seed IDs, and seed-shaped fallback IDs fail closed. Trace, hypothesis, evidence, controls, and counterevidence still come from actual source inspection and do not become true merely because a seed exists.
+Trace, hypothesis, evidence, controls, and counterevidence still come from actual source inspection. Dictionary membership, a standalone critical, or graph adjacency is guidance, never proof.
 
 ## Attestation and evidence
 
-`PreparedHuntArtifacts` records the seed artifact identity, SHA-256, byte count, row count, paired count, and sink-only count. Its preparation fingerprint includes the full semantic and seed artifact hashes.
+`PreparedHuntArtifacts` records the packet identity, SHA-256, byte count, physical row count, adjacency count, and critical count. Its preparation fingerprint includes the full host-only semantic hash and the factorized packet hash. Existing `paired_flow_*` field names remain the Protocol 5 public evidence vocabulary, while `paired_flow_seed_count` counts addressable join plus sink IDs rather than physical JSONL rows.
 
-Protocol 5 evidence adds exactly these fields to the Protocol 4 evidence fields.
+Protocol 5 evidence continues to add these fields to the Protocol 4 evidence fields.
 
 - `paired_flow_seed_sha256`
 - `paired_flow_seed_count`
@@ -140,9 +133,9 @@ Protocol 5 evidence adds exactly these fields to the Protocol 4 evidence fields.
 - `fallback_candidate_count`
 - `seed_links_sha256`
 
-`seed_links_sha256` commits a canonical path-free list of candidate ID, seed ID, seed kind, endpoint role, start line, end line, frontier work ID, and matching-pass work ID. It does not persist source paths, symbols, hypotheses, or findings.
+`seed_links_sha256` commits a canonical path-free list of candidate ID, retained join or sink ID, seed kind, endpoint role, start line, end line, frontier work ID, and matching-pass work ID. It does not persist source paths, symbols, hypotheses, or findings.
 
-New fixed public failure codes are limited to read and linkage failures.
+The existing fixed public failure codes remain unchanged.
 
 - `hunt_paired_flow_seed_missing`
 - `hunt_paired_flow_seed_duplicate`
@@ -152,7 +145,7 @@ Artifact mutation remains `hunt_evidence_artifact_integrity`. Ordinary frontier 
 
 ## Adapter and phase behavior
 
-Protocol 5 selects the existing host-managed Hunt skill. The discovery prompt describes paired-flow, sink-only, and fallback rules; requires exact seed IDs and endpoints; and reiterates that guidance is not proof. It does not expose the full semantic file.
+Protocol 5 selects the existing host-managed Hunt skill. The discovery prompt describes dictionary, entry, critical, adjacency, sink, and fallback rules; requires exact retained IDs and endpoints; and reiterates that guidance is not proof. It does not expose the full semantic file.
 
 Verification receives the unchanged bounded projection of candidate identity and exact locations. It does not receive seed reason codes, discovery prose, semantic rows, or confidence. This preserves independent source validation.
 
@@ -161,7 +154,8 @@ Protocol 5 receives the same partial-phase recovery behavior as Protocol 4. Reco
 ## Compatibility
 
 - Protocol 1 through Protocol 4 supported-version sets, serializers, parsers, prompts, managed-skill selection, semantic bytes, and receipts remain valid.
-- Protocol 5 becomes the default only after every focused and full test passes.
+- The pre-factor Protocol 5 packet schema is superseded before any paid Protocol 5 benchmark. No Protocol 1 through Protocol 4 receipt or explicit control is reinterpreted.
+- Protocol 5 remains the default only after every amended focused and full test passes.
 - Controls with an explicit older protocol continue to select that protocol.
 - The discovery and verification JSON schemas do not change.
 - Standard does not prepare Hunt artifacts and does not select a Hunt skill.
@@ -170,15 +164,15 @@ Protocol 5 receives the same partial-phase recovery behavior as Protocol 4. Reco
 
 Implementation is acceptable only when all of the following pass.
 
-1. A public RED test proves Protocol 5 is initially unsupported.
-2. Canonical seed bytes are identical across repeated builds and frontier input order.
-3. Mutating an unrelated oracle-like file outside the frontier cannot change seed bytes.
-4. Synthetic route, source-linked structural, parameter-flow, sink-only, multi-component, disconnected, and empty fixtures behave as specified.
-5. Row, byte, trace, symbol, and seed-count bounds fail closed or truncate deterministically.
-6. Missing reads, duplicate reads, unknown IDs, endpoint mutation, cross-seed combinations, pass mismatch, too many fallbacks, and artifact mutation are rejected with fixed public codes.
-7. Protocol 1 through Protocol 4 golden semantic bytes, prompt hashes, receipts, and failure behavior remain unchanged.
-8. Protocol 5 discovery uses the managed skill, two packet reads, one discovery call, at most one verification call, 12 candidate slots, and five final finding slots.
-9. Partial discovery, zero-candidate verification, partial verification, and complete workflow receipts remain deterministic.
+1. Canonical factorized bytes are identical across repeated builds, frontier order, and equivalent declaration order.
+2. Mutating an unrelated oracle-like file outside the frontier cannot change packet bytes.
+3. Synthetic direct, import-linked, name-only, multi-root, standalone-critical, disconnected, and empty fixtures behave as specified without a second source scan.
+4. Entry, adjacency, graph-depth, graph-work, row, byte, row-byte, symbol, family, pass, dictionary, and reference bounds fail closed or truncate deterministically.
+5. Missing reads, duplicate reads, unknown IDs, nonadjacent joins, endpoint mutation, pass mismatch, too many fallbacks, reserved-shaped fallbacks, and artifact mutation are rejected with fixed public codes.
+6. Protocol 1 through Protocol 4 golden semantic bytes, prompt hashes, evidence, receipts, and failure behavior remain unchanged.
+7. Protocol 5 discovery uses the managed skill, two packet reads, one discovery call, at most one verification call, 12 candidate slots, and five final finding slots.
+8. Partial discovery, zero-candidate verification, partial verification, complete workflow receipts, and factorized evidence reproduction remain deterministic.
+9. The balanced host gate retains at least two exact critical tasks, increases exact entry and pair coverage over both the current Protocol 5 selector and Protocol 4 control, and remains smaller than the Protocol 4 model-visible guidance bytes.
 10. The full no-model Python and TypeScript suites, compilation, formatting, snapshot integrity, and independent Critical/Important review pass.
 
 After these gates, an aggregate-only private build may compare Protocol 4 and Protocol 5 entry, critical, pair, and trace seed coverage without a model. A paid Canary still requires fresh explicit authorization. Mini and Full remain blocked until a same-variable Canary shows positive discovery signal.

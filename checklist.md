@@ -111,13 +111,17 @@
 - [x] Approve the Protocol 5 paired-flow seed architecture under the user's standing non-destructive architecture authority.
 - [x] Write the Protocol 5 paired-flow seed design specification.
 - [x] Write the Protocol 5 RED/GREEN implementation plan.
-- [ ] Add deterministic bounded paired-flow and sink-only seed generation without a second source scan.
-- [ ] Bind exact seed identity, endpoints, pass eligibility, fallback counts, and artifact integrity into Protocol 5 evidence.
-- [ ] Route Protocol 5 through the managed discovery and independent verification phases without exposing the full semantic packet.
-- [ ] Extend partial-phase behavior to Protocol 5 and make it the default only after focused tests pass.
-- [ ] Verify Protocol 1 through Protocol 4 exact compatibility and the complete no-model suite.
-- [ ] Run aggregate-only host coverage and snapshot-integrity gates without a model, network, container, or paid invocation.
-- [ ] Complete independent Critical/Important review, semantic commits, and public fork push.
+- [x] Add deterministic bounded paired-flow and sink-only seed generation without a second source scan.
+- [x] Bind exact seed identity, endpoints, pass eligibility, fallback counts, and artifact integrity into Protocol 5 evidence.
+- [x] Route Protocol 5 through the managed discovery and independent verification phases without exposing the full semantic packet.
+- [x] Extend partial-phase behavior to Protocol 5 and make it the default only after focused tests pass.
+- [x] Verify Protocol 1 through Protocol 4 exact compatibility and the complete no-model suite.
+- [x] Run aggregate-only host coverage and snapshot-integrity gates without a model, network, container, or paid invocation.
+- [x] Require the compact hybrid host gate to retain at least two exact critical tasks, increase exact entry coverage, and increase exact entry-critical pair coverage under the Protocol 5 byte and row bounds.
+- [x] Replace only the Protocol 5 seed representation with a canonical factorized entry, critical, and adjacency packet after the hybrid gate passes.
+- [x] Attest exact factorized pair and standalone-critical candidate identities while preserving the discovery, verification, scoring, call-count, and Protocol 1 through Protocol 4 contracts.
+- [x] Re-run the complete no-model compatibility, snapshot-integrity, host-coverage, and independent review gates for the factorized Protocol 5 packet.
+- [x] Complete independent Critical/Important review, semantic commits, and public fork push.
 - [x] Record cached input, uncached input, output, time, and cache hits separately.
 - [x] Compare regex-only, lexical-graph, and language-specific AST guidance approaches.
 - [x] Obtain approval for deterministic lexical semantic guidance.
