@@ -754,3 +754,47 @@ test("ships the explicit Hunt skill and its complete workflow contract", () => {
     expect(pluginFiles.shippedExact).toContain(path);
   }
 });
+
+test("ships the bounded host-managed Hunt phase skill", () => {
+  const skillPath = join(
+    pluginRoot,
+    "skills",
+    "hunt-security-scan-managed",
+    "SKILL.md",
+  );
+  const skill = readFileSync(skillPath, "utf8");
+  const standaloneSkill = readFileSync(
+    join(pluginRoot, "skills", "hunt-security-scan", "SKILL.md"),
+    "utf8",
+  );
+  const pluginFiles = JSON.parse(
+    readFileSync(join(import.meta.dir, "..", "plugin-files.json"), "utf8"),
+  ) as { shippedExact: string[] };
+
+  for (const requirement of [
+    "The host owns artifact preparation",
+    "return at most 12 candidates",
+    "terminate every supplied candidate",
+    "Do not run the standalone Hunt workflow helpers",
+    "Do not generate exploits",
+  ]) {
+    expect(skill).toContain(requirement);
+  }
+  for (const standaloneStep of [
+    "make-repo-rank-input",
+    "make-frontier",
+    "close-frontier",
+    "prepare-validation",
+    "validate-decisions",
+    "finalize",
+  ]) {
+    expect(skill).not.toContain(standaloneStep);
+  }
+  expect(pluginFiles.shippedExact).toContain(
+    "skills/hunt-security-scan-managed/SKILL.md",
+  );
+  expect(skill).not.toContain("hunt-contract.md");
+  expect(Buffer.byteLength(skill)).toBeLessThan(
+    Buffer.byteLength(standaloneSkill),
+  );
+});

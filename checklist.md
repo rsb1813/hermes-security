@@ -191,6 +191,13 @@
 - [ ] Run HermesBench when Mini is inconclusive.
 - [ ] Run HermesBench for the final result regardless of Mini confidence.
 
+- [x] Remove the Protocol-v4 standalone-workflow conflict without adding model calls.
+  - [x] Add a public RED test for Protocol-v4 managed-skill selection in both phases.
+  - [x] Add one concise host-managed Hunt phase skill with explicit discovery and verification ownership boundaries.
+  - [x] Select it only for Protocol 4 while preserving Protocol 1 through Protocol 3 prompt bytes.
+  - [x] Prove unchanged candidate caps, verifier projection, invocation count, schemas, and host attestation.
+  - [x] Run focused, full, bridge, compile, diff, packaging, and independent review gates.
+
 ## Completion
 
 - [x] Run the complete repository test suite.

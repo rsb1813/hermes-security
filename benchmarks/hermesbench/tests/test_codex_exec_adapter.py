@@ -173,7 +173,7 @@ class CodexExecAdapterTests(unittest.TestCase):
             1: "4713cf562c5efa5bf504b909bac0bf8f18673aca5991fd00b5e89b211d5f2c47",
             2: "8563f2276a113797a5896f1b500198afe519bf5cb497a98a526abbdbcef01dca",
             3: "98906c398f5e15319266983ce30d1b18cf4a45b100f4123956220a2eb447b006",
-            4: "d5f2c66747cea93824899fccaff98dc0ae06634d4529cf470e97c2f0d3e4cb14",
+            4: "f87cfc5d494a2e4fddf51b781145326cc601b2e086dcb49400ef048c4295fa64",
         }
         for version, digest in expected.items():
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
@@ -206,6 +206,53 @@ class CodexExecAdapterTests(unittest.TestCase):
             default.calls[0]["command_argv"][-1],
             explicit.calls[0]["command_argv"][-1],
         )
+
+    def test_protocol_four_uses_the_host_managed_hunt_skill_for_both_phases(self) -> None:
+        managed_skill = "/workspace/plugin/skills/hunt-security-scan-managed/SKILL.md"
+        standalone_skill = "/workspace/plugin/skills/hunt-security-scan/SKILL.md"
+        legacy = _Runtime(_hunt_stream())
+        discovery = _Runtime(_hunt_stream())
+        verification = _Runtime(
+            _stream(),
+            final_message=_HUNT_VERIFICATION_RESPONSE,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            verification_scratch = Path(directory) / "verification"
+            verification_scratch.mkdir()
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                legacy,
+                hunt_evidence_protocol_version=3,
+            )(_request(), Path(directory) / "legacy", 60)
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                discovery,
+                hunt_evidence_protocol_version=4,
+            )(_request(), Path(directory) / "discovery", 60)
+            self._adapter(
+                "hunt",
+                "hunt-balanced",
+                verification,
+                hunt_evidence_protocol_version=4,
+            ).for_verification({"task-001": ()})(
+                _request(), verification_scratch, 60
+            )
+
+        legacy_prompt = legacy.calls[0]["command_argv"][-1]
+        self.assertEqual(
+            (len(legacy.calls), len(discovery.calls), len(verification.calls)),
+            (1, 1, 1),
+        )
+        self.assertIn(standalone_skill, legacy_prompt)
+        self.assertNotIn(managed_skill, legacy_prompt)
+        for prompt in (
+            discovery.calls[0]["command_argv"][-1],
+            verification.calls[0]["command_argv"][-1],
+        ):
+            self.assertIn(managed_skill, prompt)
+            self.assertNotIn(standalone_skill, prompt)
 
     def test_hunt_discovery_protocol_three_adds_pass_selection_instructions(self) -> None:
         protocol_two = _Runtime(_hunt_stream())
@@ -354,7 +401,7 @@ class CodexExecAdapterTests(unittest.TestCase):
             "hunt_verification_v1": "a4ca5252bf737379682e01521bc6aba58b992b52a848ebf9f7f28e6b967d470f",
             "hunt_verification_v2": "a4ca5252bf737379682e01521bc6aba58b992b52a848ebf9f7f28e6b967d470f",
             "hunt_verification_v3": "a4ca5252bf737379682e01521bc6aba58b992b52a848ebf9f7f28e6b967d470f",
-            "hunt_verification_v4": "7009282bc7fee58765db9584ec973a26e0a9c5a1f27a52cbbf3d26adeb12eb41",
+            "hunt_verification_v4": "0e78e9a7ff94faea92f5b1ebf7e3c6acd2431e95e74e5dcfcbb56d1415201ce9",
         }
         standard_discovery_runtime = _Runtime(_stream())
         standard_verification_runtime = _Runtime(_stream())
@@ -432,7 +479,7 @@ class CodexExecAdapterTests(unittest.TestCase):
             1: "acfbe735024db238a1d0ffad74dee6205a31a785ad7b9277a80166584a9ffb37",
             2: "acfbe735024db238a1d0ffad74dee6205a31a785ad7b9277a80166584a9ffb37",
             3: "acfbe735024db238a1d0ffad74dee6205a31a785ad7b9277a80166584a9ffb37",
-            4: "6e2157b58a268bec00cc762564363373da5ec4c1bbb0b35f5d93b62794d2791f",
+            4: "252b3bd7ba0c4d8935e6f4cb48024ef4d919ba65cff1e810f3583ad648073506",
         }
         candidate = CanonicalCandidate(
             candidate_id="candidate-rich",
@@ -788,7 +835,7 @@ class CodexExecAdapterTests(unittest.TestCase):
         )
         self.assertEqual(hunt_command[:3], standard_command[:3])
         self.assertIn("/workspace/plugin/skills/security-scan/SKILL.md", standard_command[-1])
-        self.assertIn("/workspace/plugin/skills/hunt-security-scan/SKILL.md", hunt_command[-1])
+        self.assertIn("/workspace/plugin/skills/hunt-security-scan-managed/SKILL.md", hunt_command[-1])
         self.assertIn("hunt-balanced", hunt_command[-1])
         self.assertNotIn(b"host-refresh-token-must-not-cross", standard["confidential_stdin"])
         self.assertIn(b'"refresh_token":""', standard["confidential_stdin"])
@@ -836,7 +883,7 @@ class CodexExecAdapterTests(unittest.TestCase):
                         for token in command
                     )
                 )
-                self.assertIn("/workspace/plugin/skills/hunt-security-scan/SKILL.md", command[-1])
+                self.assertIn("/workspace/plugin/skills/hunt-security-scan-managed/SKILL.md", command[-1])
                 self.assertIn(profile, command[-1])
 
     def test_hunt_discovery_prompt_uses_only_the_twelve_candidate_limit(self) -> None:

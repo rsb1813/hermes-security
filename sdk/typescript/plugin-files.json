@@ -94,6 +94,7 @@
     "skills/finding-discovery/agents/openai.yaml",
     "skills/fix-finding/SKILL.md",
     "skills/fix-finding/agents/openai.yaml",
+    "skills/hunt-security-scan-managed/SKILL.md",
     "skills/hunt-security-scan/SKILL.md",
     "skills/hunt-security-scan/agents/openai.yaml",
     "skills/hunt-security-scan/references/hunt-contract.md",

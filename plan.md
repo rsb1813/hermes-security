@@ -159,3 +159,15 @@ The production-safe variant preserves the existing semantic priority lane sequen
 Verification: the aggregate diagnostic exposes only anonymous ranks, budgets, and coverage counts. Any selected implementation must begin with a public failing behavior test and preserve exact Protocol 1 through 3 golden bytes plus strong schema-3 route bytes.
 
 Final verification passes 125 focused semantic tests, 54 adapter tests, all 459 HermesBench Python tests, the Bun real-CLI bridge, six explicit legacy-byte and prompt-hash contracts, compileall, diff checks, aggregate snapshot integrity, and independent Critical/Important review.
+
+## Current host-managed phase checkpoint
+
+- Protocol 4 currently tells each model invocation to read the complete standalone Hunt skill. That skill directs one actor through inventory generation, frontier closure, independent validation, and report finalization even though the HermesBench host already owns those lifecycle stages.
+- Prefer one concise host-managed Hunt phase skill over an inline prompt exception. A prompt-only override leaves contradictory high-level instructions in context, while shrinking semantic artifacts risks removing the newly recovered structural coverage.
+- Select the managed skill only for Hunt evidence Protocol 4. Discovery must read the two fixed host packets exactly once, inspect immutable source, and return at most 12 candidates. Verification must inspect immutable source independently and terminate only the supplied candidates. Neither phase may regenerate host artifacts, close the frontier, invoke another verifier, or finalize a report.
+- Preserve the standalone Hunt skill, Protocol 1 through Protocol 3 prompt bytes, Standard behavior, candidate and finding caps, two-call ceiling, schemas, attestation, scorer, and frozen runtime controls.
+- Do not claim a recall or billed-cost improvement without a later same-variable model run. This unit proves only removal of contradictory lifecycle instructions and a smaller phase contract without a model, network, container, or paid invocation.
+
+Verification: a public RED test must prove that Protocol 4 still selects the standalone skill before implementation. GREEN tests must prove phase-specific managed-skill selection for discovery and verification, exact legacy prompt hashes, shipped plugin contents, unchanged invocation counts and candidate projection, focused and full test success, compile success, and a clean diff.
+
+Outcome: the managed phase contract is 2,852 bytes and no longer links the 12,666-byte standalone contract. Protocol 4 alone selects it in discovery and verification, while exact legacy prompt hashes and every two-call, candidate, projection, attestation, and packaging boundary remain covered by passing public tests. No model, network, container, or paid invocation was made, so end-to-end recall and billed-cost effects remain unmeasured.

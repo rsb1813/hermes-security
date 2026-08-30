@@ -77,6 +77,7 @@ _MAX_ERROR_MESSAGE_BYTES = 4096
 _MAX_ERROR_JSON_DEPTH = 4
 _STANDARD_SKILL = "/workspace/plugin/skills/security-scan/SKILL.md"
 _HUNT_SKILL = "/workspace/plugin/skills/hunt-security-scan/SKILL.md"
+_HUNT_MANAGED_SKILL = "/workspace/plugin/skills/hunt-security-scan-managed/SKILL.md"
 _SCHEMA_PATH = "/workspace/schema/prediction-response.schema.json"
 _HUNT_DISCOVERY_SCHEMA_PATH = "/workspace/schema/hunt-discovery-response.schema.json"
 _HUNT_VERIFICATION_SCHEMA_PATH = "/workspace/schema/hunt-verification-response.schema.json"
@@ -191,6 +192,12 @@ class CodexExecAdapter:
         ):
             raise ValueError("Hunt evidence protocol is unsupported")
         self._hunt_evidence_protocol_version = hunt_evidence_protocol_version
+        if (
+            self._workflow == "hunt"
+            and hunt_evidence_protocol_version
+            == NESTED_OUTPUT_HUNT_EVIDENCE_PROTOCOL_VERSION
+        ):
+            self._skill = _HUNT_MANAGED_SKILL
 
     def for_verification(
         self, candidates: Mapping[str, tuple[CanonicalCandidate, ...]]
