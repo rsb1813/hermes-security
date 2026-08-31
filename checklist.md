@@ -219,6 +219,15 @@
   - [x] Launch exactly one process with no automatic retry and preserve its private start/finish ledger.
   - [x] Independently revalidate receipts, aggregate metrics, invocation counts, snapshots, public boundaries, and container cleanup.
   - [x] Record path-free evidence, self-review the diff, run final verification, and create one semantic commit.
+- [ ] Measure Protocol 5 with one freshly authorized same-variable Hunt Canary process.
+  - [x] Record the fresh one-process authorization, no-retry boundary, and aggregate-only disclosure rule.
+  - [x] Confirm the public single-run CLI uses Protocol 5 and reject the costlier paired-run path.
+  - [ ] Reconstruct the valid Protocol 4 aggregate baseline and prove all non-protocol experiment controls match.
+  - [ ] Pass no-model authentication, image, snapshot, policy, output-containment, and stale-container preflight checks.
+  - [ ] Launch exactly one Protocol 5 Hunt process with no automatic or manual retry.
+  - [ ] Independently validate receipts, aggregate metrics, invocation counts, score reconstruction, snapshots, bindings, and cleanup.
+  - [ ] Compare Protocol 5 against Protocol 4 using only aggregate path-free evidence and rule on Mini or Full promotion.
+  - [ ] Self-review, run final verification, create semantic result commits, and push without force.
 
 ## Completion
 

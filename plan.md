@@ -212,3 +212,16 @@ Verification: public RED/GREEN tests prove deterministic bounded route, source-l
 - Final public verification passed all 492 HermesBench Python tests, the Bun bridge, Python compilation, TypeScript type checking, explicit legacy contracts, and diff checks. Independent review closed endpoint-level decoder canonicalization gaps and finished with no Critical or Important findings. The reviewed code was pushed to `origin/hermes/runner-canary` without force.
 
 Verification: product-generated factorized packets must reproduce the diagnostic floor of two exact critical tasks, two exact entry tasks, one exact pair, and fewer than 324,248 aggregate bytes while every snapshot and Protocol 1 through Protocol 4 compatibility check remains exact.
+
+## Current Protocol-v5 paid Canary checkpoint
+
+- Consume the user's fresh 2026-08-31 authorization for exactly one Hunt-only Protocol 5 Canary process. Do not launch Standard, rerun Protocol 4, switch profiles, or retry automatically.
+- Reuse the same immutable eight-task Canary corpus, task order, manifest, snapshots, oracles, schema-3 frozen controls, execution policy, managed authentication, pinned runtime image, `hunt-balanced` profile, phase timeout, task caps, scorer, and two-call ceiling as the independently validated Protocol 4 baseline.
+- Treat the evidence protocol as the only material experiment variable. Operationally create only a fresh path-safe run child under the existing safe output root and a private one-process start/finish ledger.
+- Stop before any model invocation if the stored Protocol 4 baseline cannot be independently reconstructed or if authentication, image binding, snapshot integrity, controls, policy, output containment, clean-worktree, or zero-stale-container checks fail.
+- After the one process exits, independently validate aggregate and phase receipts, invocation and token totals, score reconstruction, snapshot immutability, frozen bindings, public projection boundaries, and container cleanup. A partial or failed receipt is the result of the authorized attempt and does not permit a retry.
+- Compare Protocol 5 directly against the stored Protocol 4 aggregate evidence because the public `compare` command is a Standard-versus-Hunt comparator rather than a Protocol-4-versus-Protocol-5 comparator.
+- Keep task identities, source labels, paths, findings, raw model text, credentials, oracle contents, and private artifacts out of tracked files and user-facing output. Publish only aggregate path-free measurements.
+- Gate HermesBench Mini and Full on the independently verified Canary signal. Do not promote from host-input coverage alone.
+
+Verification: the private no-model preflight and public fixed-control audit pass before launch; the private ledger proves exactly one process and no retry; independent reconstruction agrees with the immutable receipts and stored Protocol 4 baseline; final public notes contain only aggregate evidence; and the verified documentation commit is pushed without force.
